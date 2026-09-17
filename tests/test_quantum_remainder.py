@@ -229,6 +229,11 @@ def _digests(directory):
 #: it the pyMFE evaluation the CLI always runs; the QSVC fit itself is ~2s.
 CLI_OVERRIDES = [
     "embeddings=[pca]",
+    # The synthetic dataset is 5 features wide, below the embedding_min_features
+    # default of 18, so the embedding requested above would otherwise be suppressed
+    # and collapsed to a single "none" pass. These tests exist to exercise the
+    # embedding machinery, so they opt out of the threshold the way a user would.
+    "embedding_min_features=0",
     "model=[qsvc]",
     "iter=1",
     "n_components=2",

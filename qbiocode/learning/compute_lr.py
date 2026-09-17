@@ -4,12 +4,10 @@ import time
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import GridSearchCV
 from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 
 # ====== Additional local imports ======
-from qbiocode.learning._grid import build_param_grid
-from qbiocode.learning._tuning import build_search_space, run_study
+from qbiocode.learning._tuning import search_hyperparameters
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Scikit-learn imports ======
@@ -188,29 +186,18 @@ def compute_lr_opt(
         "solver": solver,
         "max_iter": max_iter,
     }
-    # Optuna by default; the exhaustive grid stays reachable so a number published
-    # against it can still be reproduced. Both engines are handed the same
-    # `candidates`, so switching `tuner` never changes *which* hyperparameters are
-    # searched -- only how the search spends its fits.
-    if tuner == "grid":
-        search = GridSearchCV(
-            LogisticRegression(random_state=random_state),
-            param_grid=build_param_grid("lr", candidates),
-            cv=cv,
-        )
-        search.fit(X_train, y_train)
-        best_params = search.best_params_
-    else:
-        best_params = run_study(
-            LogisticRegression,
-            build_search_space("lr", candidates),
-            X_train,
-            y_train,
-            cv=cv,
-            n_trials=n_trials,
-            seed=random_state,
-            fixed={"random_state": random_state},
-        )
+    best_params = search_hyperparameters(
+        "lr",
+        LogisticRegression,
+        candidates,
+        X_train,
+        y_train,
+        cv=cv,
+        tuner=tuner,
+        n_trials=n_trials,
+        seed=random_state,
+        fixed={"random_state": random_state},
+    )
     best_logres = LogisticRegression(**best_params, random_state=random_state)
     best_logres.fit(X_train, y_train)
 

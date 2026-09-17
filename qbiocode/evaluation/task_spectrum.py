@@ -186,7 +186,7 @@ geometric modes a representation captures.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Sequence, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.optimize import brentq
@@ -703,7 +703,7 @@ def _gram_basis(X: np.ndarray) -> Tuple[np.ndarray, int]:
     total = eigenvalues.sum()
     if total <= _EPS:
         return eigenvectors[:, :0], 0
-    keep = eigenvalues > max(total, 0.0) * 1e-10
+    keep = eigenvalues > total * 1e-10
     eigenvalues = eigenvalues[keep]
     basis = eigenvectors[:, keep]
 
@@ -730,7 +730,7 @@ def _pca_tail_signal(basis: np.ndarray, r: int, y_centred: np.ndarray) -> float:
     return float(power[r:].sum() / total)
 
 
-def _h0_fragmentation(D: np.ndarray, y: np.ndarray) -> float:
+def _h0_fragmentation(D: np.ndarray, y: np.ndarray, pooled: Optional[float] = None) -> float:
     """Class-conditioned total H0 persistence, relative to the pooled value.
 
     The ratio of the summed within-class MST weights to the MST weight of the
@@ -743,8 +743,22 @@ def _h0_fragmentation(D: np.ndarray, y: np.ndarray) -> float:
     then has to step *over* points of the other class, so every hop costs about
     twice a pooled hop. That is the disconnected-label-regions signature, measured
     without reference to any neighbourhood size ``k``.
+
+    Args:
+        D (numpy.ndarray): Square, symmetric distance matrix.
+        y (numpy.ndarray): Class labels, one per row of ``D``.
+        pooled (float, optional): The pooled MST weight, ``_mst_total_weight(D)``, when
+            the caller already has it. It depends on ``D`` alone, so under the
+            permutation null of :func:`get_task_spectrum_features` -- which changes
+            ``y`` and nothing else -- it is the same number every draw. Computing it
+            here regardless cost 101 MSTs per call to that function, which measured at
+            about 60 % of the whole block's runtime at both ``n = 100`` and ``n = 200``;
+            the module docstring's claim that a permutation costs "one matrix-vector
+            product" was only true of the graph-spectral half. None recomputes it, so a
+            direct caller needs to know none of this.
     """
-    pooled = _mst_total_weight(D)
+    if pooled is None:
+        pooled = _mst_total_weight(D)
     if pooled <= _EPS:
         return 0.0
     within = 0.0
@@ -927,10 +941,15 @@ def get_task_spectrum_features(
             f"which is undefined for a constant target (y takes the single value "
             f"{classes[0]!r})."
         )
-    if n_permutations == 1:
+    # `== 1` alone let a negative count through to `np.empty(n_permutations)` below,
+    # which raises "negative dimensions are not allowed" -- a numpy message about an
+    # array the caller never asked for, naming neither the argument nor the two values
+    # that are actually allowed.
+    if n_permutations == 1 or n_permutations < 0:
         raise ValueError(
-            "n_permutations=1 cannot give a null standard deviation. Pass 0 to skip "
-            "the permutation control, or 2 or more to compute it."
+            f"n_permutations={n_permutations!r} cannot give a null standard deviation, "
+            "which needs at least two draws. Pass 0 to skip the permutation control, or "
+            "2 or more to compute it."
         )
 
     # ---- everything that depends only on X, computed once ----------------
@@ -946,6 +965,9 @@ def get_task_spectrum_features(
 
     gram, r = _gram_basis(X)
 
+    # A function of D alone, so constant across the permutation null below.
+    pooled_mst = _mst_total_weight(D)
+
     neighbour_order = np.argsort(
         np.where(np.eye(n, dtype=bool), np.inf, D), axis=1, kind="stable"
     )[:, : n - 1]
@@ -960,7 +982,7 @@ def get_task_spectrum_features(
         ]
         values = {name: np.array([row[name] for row in per_k]) for name in GRAPH_FEATURES}
         values["pca_tail_signal"] = np.array([_pca_tail_signal(gram, r, centred)])
-        values["h0_fragmentation"] = np.array([_h0_fragmentation(D, labels)])
+        values["h0_fragmentation"] = np.array([_h0_fragmentation(D, labels, pooled_mst)])
         values["purity_auc"] = np.array([_purity_auc(neighbour_order, scales, labels)])
         return values
 

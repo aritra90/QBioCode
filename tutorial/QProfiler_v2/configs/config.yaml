@@ -58,6 +58,14 @@ n_jobs: 1
 # embeddings: ['none']
 embeddings: ['none', 'pca']
 
+# Embeddings are applied only to a dataset with MORE than `embedding_min_features`
+# features -- 18 by default, because below that width a reduction mostly costs
+# information (these models encode one qubit per feature, so 18 is a circuit they handle
+# directly). This tutorial's data is deliberately narrower than that AND the comparison
+# it draws is between 'none' and 'pca', so it opts out of the threshold entirely. This is
+# the documented way to embed a narrow dataset on purpose.
+embedding_min_features: 0
+
 # number of dimensions (features) to embed (reduce) your data down to
 n_components: 3
 

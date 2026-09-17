@@ -18,6 +18,35 @@ logger = logging.getLogger(__name__)
 #: ``gridsearch_<model>_args`` blocks; see :mod:`qbiocode.learning._tuning`.
 _TUNERS = frozenset({"optuna", "grid"})
 
+#: Keys a TUNED quantum model still reads from ``<model>_args`` rather than from
+#: ``gridsearch_<model>_args``, per model.
+#:
+#: The two blocks answer different questions. ``gridsearch_<model>_args`` says what to
+#: SEARCH; ``<model>_args`` says how to run the model. Almost every setting is one or the
+#: other, but ``classical_models`` is unambiguously the second -- it selects which
+#: classical heads ``compute_qpl`` fits on the quantum projection, so its value is a list
+#: of heads and not a list of candidates to choose among.
+#:
+#: The tuned branch below used to build its kwargs from the gridsearch block alone, so
+#: ``qpl_args: {classical_models: ['lr']}`` was honoured with tuning off and silently
+#: dropped with it on -- a tuned run searched and reported all six default heads. That is
+#: worse than a slow run: ``_tuning._accuracy_of`` scores a QPL candidate by the MEAN
+#: accuracy across heads, so the projection was chosen to suit heads the config had
+#: excluded. Naming the key in the gridsearch block instead was not a workaround either;
+#: it reached ``compute_qpl_opt`` as an unexpected keyword argument.
+_QUANTUM_PASSTHROUGH = {"qpl": ("classical_models",)}
+
+#: The models that run on a quantum backend, as ``args['model']`` spells them.
+#:
+#: The dispatcher branches on this to decide what ``tune_quantum`` covers, and
+#: :mod:`qbiocode.visualization.visualize_correlation` reads it to colour and order the
+#: quantum models in the figures. That second consumer is why it is a module constant
+#: rather than the local it used to be: the plotting code had its own hardcoded
+#: ``("QNN", "PQK", "VQC", "QSVC")`` -- and a THIRD copy inline in the scatter arm -- both
+#: missing ``qpl``, so every QPL row was coloured and ordered as a classical model in
+#: every published figure. One list, one place to add the next quantum learner to.
+QUANTUM_MODELS = frozenset({"qsvc", "qnn", "vqc", "pqk", "qpl"})
+
 
 def _call_with_global_seeds(compute_fn, seed, q_seed, *fn_args, **fn_kwargs):
     """Re-establish the global RNG seeds inside the worker, then run ``compute_fn``.
@@ -179,7 +208,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         "qpl_opt": compute_qpl_opt,
     }
 
-    quantum_models = {"qsvc", "qnn", "vqc", "pqk", "qpl"}
+    quantum_models = QUANTUM_MODELS
 
     # Quantum models now have `_opt` twins, but they stay off unless asked for twice:
     # `grid_search: True` alone tunes only the classical models, exactly as before. A
@@ -220,7 +249,11 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
             f"named at most once. Every model writes one 'results_<model>' column, so "
             f"a repeat has nowhere to put its second result. Requested: {requested}."
         )
-    if grid_search_requested := bool(args.get("grid_search", False)):
+    grid_search = bool(args.get("grid_search", False))
+    if grid_search:
+        # Unreachable as the table stands -- every classical entry has an `_opt` twin --
+        # and kept as a guard for the next learner added without one, which would
+        # otherwise fail on `compute_ml_dict[method + "_opt"]` inside a joblib worker.
         missing_opt = [
             m for m in requested
             if m not in quantum_models and (m + "_opt") not in compute_ml_dict
@@ -236,7 +269,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         missing_blocks = [
             m for m in requested
             if m in quantum_models
-            and args.get("tune_quantum", False)
+            and tune_quantum
             and not args.get("gridsearch_" + m + "_args")
         ]
         if missing_blocks:
@@ -250,7 +283,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         # wrappers score a whole compute function, not an estimator GridSearchCV could
         # drive. Asking for `tuner: grid` and getting Optuna anyway is the kind of
         # silent substitution that makes a result impossible to interpret later.
-        if args.get("tune_quantum", False) and args.get("tuner", "optuna") == "grid":
+        if tune_quantum and args.get("tuner", "optuna") == "grid":
             quantum_requested = [m for m in requested if m in quantum_models]
             if quantum_requested:
                 warnings.warn(
@@ -269,21 +302,16 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
                 f"{sorted(_TUNERS)}: 'optuna' samples args['n_trials'] "
                 f"configurations with Optuna, 'grid' fits every combination."
             )
-    elif args.get("tune_quantum", False):
+    elif tune_quantum:
         raise ValueError(
             "tune_quantum is enabled but grid_search is not, so no tuning would run. "
             "Set grid_search: True as well, or drop tune_quantum."
         )
-    del grid_search_requested
 
     # Run classical and quantum models
     n_jobs = len(args["model"])
     if "n_jobs" in args.keys():
         n_jobs = min(args["n_jobs"], len(args["model"]))
-
-    grid_search = False
-    if "grid_search" in args.keys():
-        grid_search = args["grid_search"]
 
     # Check if any quantum models are in the model list when grid_search is enabled
     if grid_search:
@@ -331,6 +359,23 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
             "hyperparameters.", key, method,
         )
         return {}
+
+    def _tuned_quantum_kwargs(method):
+        """What to search, plus the run settings that are not candidates.
+
+        ``gridsearch_<method>_args`` supplies the search space. Anything in
+        :data:`_QUANTUM_PASSTHROUGH` is copied over from ``<method>_args`` as well, so a
+        setting that selects *which models run* is not lost by turning tuning on; see
+        that constant for why ``classical_models`` is the one key that needs it.
+        """
+        kwargs = dict(args.get("gridsearch_" + method + "_args", {}))
+        model_args = args.get(method + "_args") or {}
+        for key in _QUANTUM_PASSTHROUGH.get(method, ()):
+            # `not in` rather than unconditional: a value already in the gridsearch block
+            # was written there deliberately and is what the user is looking at.
+            if key not in kwargs and key in model_args:
+                kwargs[key] = model_args[key]
+        return kwargs
 
     def _seeded_kwargs(compute_fn, model_kwargs):
         """Fill in ``random_state`` from ``args['seed']`` wherever an estimator takes one.
@@ -385,7 +430,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
                     n_trials=args.get("n_trials_quantum", 10),
                     validation_split=args.get("validation_split", 0.25),
                     **_seeded_kwargs(
-                        compute_fn, args.get("gridsearch_" + method + "_args", {})
+                        compute_fn, _tuned_quantum_kwargs(method)
                     ),
                     verbose=False,
                 )

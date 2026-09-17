@@ -41,6 +41,7 @@ Usage
 """
 
 from .embed import (
+    DEFAULT_EMBEDDING_MIN_FEATURES,
     QUVINE_HEADLINE_METHODS,
     QUVINE_METHODS,
     SKLEARN_METHODS,
@@ -48,10 +49,13 @@ from .embed import (
     get_embeddings,
     is_transductive,
     pqk,
+    resolve_embeddings,
 )
 
 __all__ = [
     "get_embeddings",
+    "resolve_embeddings",
+    "DEFAULT_EMBEDDING_MIN_FEATURES",
     "is_transductive",
     "pqk",
     "ConvAutoencoder",

@@ -44,6 +44,9 @@ def quvine_run(tmp_path_factory):
         tmp_path_factory.mktemp("quvine"),
         [
             f"embeddings=[{METHOD}]",
+            # 5-feature synthetic data, below the embedding_min_features default of
+            # 18; this test is about the QuVINE arm, so it opts out of the threshold.
+            "embedding_min_features=0",
             "model=[lr]",
             "iter=1",
             f"n_components={N_COMPONENTS}",

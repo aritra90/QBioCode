@@ -39,6 +39,21 @@ n_jobs: 10
 # embeddings: ['none']
 embeddings: ['pca', 'nmf', 'none']
 
+# Embeddings are applied only to a dataset with MORE than this many features. Below that
+# width a feature reduction mostly costs information without buying anything: every
+# quantum learner here encodes one qubit per feature, so 18 features is a circuit these
+# models handle directly, and reducing to n_components first discards most of the problem
+# and then reports the models' scores on what is left.
+#
+# When a dataset is too narrow, the whole 'embeddings' list above collapses to a single
+# 'none' pass -- not one no-op pass per name, which would fit every model several times on
+# identical data and label the rows with a reduction that did not happen. The log says
+# which embeddings were skipped.
+#
+# Set 0 to apply every requested embedding whatever the feature count. Omit the key for
+# the default of 18.
+embedding_min_features: 18
+
 # number of dimensions (features) to embed (reduce) your data down to
 n_components: 3
 

@@ -525,8 +525,20 @@ class TestTheCorrelationAnalysis:
             f"only {len(prefixed)} pyMFE features produced a correlation coefficient; "
             "the block is listed in the output but is not being correlated"
         )
-        assert correlations["median_metric"].notna().all()
-        assert ((correlations["frac_gt_thresh"] >= 0) & (correlations["frac_gt_thresh"] <= 1)).all()
+        # Both columns are now NaN where a metric was never observed -- `auc` is NaN for a
+        # model with no ranking, and a group of those has no median and no fraction. So the
+        # bound is asserted over the observed values, and the fact that SOME are observed is
+        # asserted separately: `(NaN >= 0) & (NaN <= 1)` is False, so the original form
+        # would have failed the moment a rankless model entered this table, reporting it as
+        # an out-of-range fraction.
+        observed_fraction = correlations["frac_gt_thresh"].dropna()
+        assert not observed_fraction.empty, "no metric was observed at all"
+        assert ((observed_fraction >= 0) & (observed_fraction <= 1)).all()
+        assert correlations["median_metric"].notna().any()
+        # A median is present exactly where a fraction is: both describe the same group.
+        assert (
+            correlations["median_metric"].isna() == correlations["frac_gt_thresh"].isna()
+        ).all()
 
 
 def _scored_table(from_csv, winners, qml_name):

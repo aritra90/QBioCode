@@ -255,7 +255,6 @@ def modeleval(
     accuracy = accuracy_score(y_test, y_predicted, normalize=True)
     f1 = f1_score(y_test, y_predicted, average=average)
     compile_time = time.time() - beg_time
-    params = params
     if verbose == True:
         print_results(model, accuracy, f1, compile_time, params)
 
@@ -276,42 +275,27 @@ def modeleval(
     # A consequence worth knowing: one run can now carry BOTH columns -- tuned classical
     # models and untuned quantum ones in the same table. Every reader already accepts
     # either name; qc_winner_finder additionally coalesces them per row.
-    if _was_tuned(model, tuned):
-        return pd.DataFrame(
-            {
-                "y_test_" + model: [y_test],
-                "y_predicted_" + model: [y_predicted],
-                "results_"
-                + model: [
-                    {
-                        "model": model,
-                        "accuracy": accuracy,
-                        "f1_score": f1,
-                        "time": compile_time,
-                        "auc": auc,
-                        "BestParams_Tuned": params,
-                    }
-                ],
-            }
-        )
-    else:
-        return pd.DataFrame(
-            {
-                "y_test_" + model: [y_test],
-                "y_predicted_" + model: [y_predicted],
-                "results_"
-                + model: [
-                    {
-                        "model": model,
-                        "accuracy": accuracy,
-                        "f1_score": f1,
-                        "time": compile_time,
-                        "auc": auc,
-                        "Model_Parameters": params,
-                    }
-                ],
-            }
-        )
+    # One frame, built once. The two branches this replaces were identical but for the
+    # name of the parameter key, so every other column was written out twice and a change
+    # to any of them had to be made in both places to take effect.
+    parameter_column = "BestParams_Tuned" if _was_tuned(model, tuned) else "Model_Parameters"
+    return pd.DataFrame(
+        {
+            "y_test_" + model: [y_test],
+            "y_predicted_" + model: [y_predicted],
+            "results_"
+            + model: [
+                {
+                    "model": model,
+                    "accuracy": accuracy,
+                    "f1_score": f1,
+                    "time": compile_time,
+                    "auc": auc,
+                    parameter_column: params,
+                }
+            ],
+        }
+    )
 
 
 def evaluation_metrics(predictions, y_test, metrics=["accuracy", "brier"], save=False):

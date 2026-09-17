@@ -713,6 +713,7 @@ def compute_qpl_opt(
     primitive=None,
     entanglement=None,
     reps=None,
+    classical_models=None,
     *,
     n_trials=10,
     validation_split=0.25,
@@ -746,6 +747,13 @@ def compute_qpl_opt(
         primitive (list or dict): Qiskit primitives to search ('sampler', 'estimator'). None leaves it at the default.
         entanglement (list or dict): Entanglement patterns to search ('linear', 'full', ...). None leaves it at the default.
         reps (list or dict): Feature-map repetition counts to search. None leaves it at the default.
+        classical_models (list, optional): Which classical heads to fit on the quantum
+            projection. **Not** a hyperparameter to search -- it selects which models
+            run, so it is a list of heads rather than a list of candidate values, and
+            every trial fits all of them. Forwarded to ``compute_qpl`` unchanged, so
+            None means its default six heads. ``model_run`` fills this in from
+            ``qpl_args``, the same block the untuned path reads, so turning
+            ``tune_quantum`` on does not change which heads run.
         n_trials (int): Trial budget, default 10 -- an order of magnitude below the
             classical default because each trial is a quantum fit. Lowered
             automatically when the configured values describe fewer combinations.
@@ -766,6 +774,12 @@ def compute_qpl_opt(
         "reps": reps,
     }
 
+    # `classical_models` selects which heads run; it is not a candidate value, so it goes
+    # to every trial via `fixed` rather than into the search space. Handing it to the
+    # trials as well as to the final fit is what keeps the two consistent: the objective
+    # is the MEAN accuracy across heads (see _tuning._accuracy_of), so scoring candidates
+    # on the default six while the final fit ran a different set would have chosen the
+    # projection that suited heads the config excluded.
     best_params = run_function_study(
         compute_qpl,
         build_search_space("qpl", candidates),
@@ -776,6 +790,7 @@ def compute_qpl_opt(
         n_trials=n_trials,
         seed=args.get("seed") if isinstance(args, dict) else None,
         validation_split=validation_split,
+        fixed={"classical_models": classical_models},
     )
 
     frame = compute_qpl(
@@ -787,6 +802,7 @@ def compute_qpl_opt(
         model=model,
         data_key=data_key,
         verbose=verbose,
+        classical_models=classical_models,
         **best_params,
     )
     return record_tuned_params(frame, best_params, beg_time)

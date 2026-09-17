@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import warnings
 from typing import NamedTuple
 
 import matplotlib as mpl
@@ -14,10 +15,11 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from scipy.stats import spearmanr
+from scipy.stats import pearsonr, spearmanr
 
 from qbiocode.evaluation.dataset_evaluation import complexity_feature_columns
 from qbiocode.evaluation.mfe_features import MFE_COLUMN_PREFIX
+from qbiocode.evaluation.model_run import QUANTUM_MODELS
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import MinMaxScaler
 
@@ -62,8 +64,19 @@ PUBLICATION_STYLE = {
     "grid.linewidth": 0.5,
 }
 
-#: Model-name prefixes drawn as quantum rather than classical.
-_QML_MODELS = ("QNN", "PQK", "VQC", "QSVC")
+#: Model-name prefixes drawn as quantum rather than classical, upper-cased to match the
+#: ``model`` column these figures build.
+#:
+#: Derived from :data:`qbiocode.evaluation.model_run.QUANTUM_MODELS` rather than written
+#: out, because it was written out twice -- here and inline in the scatter arm -- and both
+#: copies were missing ``qpl``. A QPL row was therefore drawn in the classical colour and
+#: sorted with the classical models, in every figure, with nothing to notice.
+_QML_MODELS = tuple(sorted(name.upper() for name in QUANTUM_MODELS))
+
+#: Colour for a cell whose correlation is undefined -- a constant feature, or a metric
+#: that was never observed. Deliberately outside the blue-white-red diverging scale the
+#: figures use, so "not measurable" cannot be read as "measured, near zero".
+_MISSING_COLOR = "#BDBDBD"
 
 _SAVEFIG_KWARGS = {
     "dpi": 600,
@@ -164,6 +177,58 @@ def _save_figure(fig: Figure, path: str, label: str) -> None:
     logger.info("%s saved to: %s", label, path)
 
 
+#: Correlation engines ``compute_results_correlation`` accepts. Both return
+#: ``(coefficient, p_value)`` and both need at least two complete pairs.
+_CORRELATION_FUNCTIONS = {"spearman": spearmanr, "pearson": pearsonr}
+
+
+def _fraction_above(values, thresh):
+    """Share of the OBSERVED values above ``thresh``.
+
+    The denominator is the number of values actually present, not the number of rows. A
+    NaN is not a value below the threshold -- ``auc`` is NaN wherever a model exposes no
+    ranking (see :func:`qbiocode.evaluation.model_evaluation.modeleval`), and counting
+    those in the denominator reported 7/15 where the answer among models that have an AUC
+    at all is 7/14. Returns NaN when nothing was observed, rather than 0.0, so "no model
+    cleared the bar" and "no model had a score" stay distinguishable.
+    """
+    observed = values[values.notna()]
+    if observed.empty:
+        return float("nan")
+    return float((observed > thresh).sum() / len(observed))
+
+
+def _correlate(correlate, metric_values, feature_values):
+    """One correlation coefficient, or NaN when the pair cannot support one.
+
+    Three ways it cannot, all of which reached scipy and came back as a NaN plus a
+    warning:
+
+    * a NaN in either column -- scipy's default ``nan_policy='propagate'`` returns NaN for
+      the whole pair, so one missing AUC among fifteen splits erased the entire AUC
+      analysis. Dropped pairwise here instead.
+    * fewer than two complete pairs left after that drop.
+    * a constant column. This is routine rather than exceptional: within one
+      (model, embedding, dataset) group the embedding width is fixed, so ``mfe.nr_attr``
+      and its neighbours genuinely have no variance and no correlation is defined.
+
+    NaN is returned in each case and is NOT later filled with zero; see
+    :func:`_plot_correlation_figures` for why that distinction has to survive into the
+    figure.
+    """
+    both = metric_values.notna() & feature_values.notna()
+    if int(both.sum()) < 2:
+        return float("nan")
+    metric_observed = metric_values[both]
+    feature_observed = feature_values[both]
+    if metric_observed.nunique() < 2 or feature_observed.nunique() < 2:
+        return float("nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        coefficient = correlate(metric_observed, feature_observed)[0]
+    return float(coefficient)
+
+
 def compute_results_correlation(results_df, correlation="spearman", thresh=0.7):
     """This function takes in as input a Pandas Dataframe containing the results and data evaluations for
     a given dataset.  It then produces a spearman correlation between the data evaluation characteristics (features)
@@ -179,12 +244,31 @@ def compute_results_correlation(results_df, correlation="spearman", thresh=0.7):
 
     Args:
         results_df (pd.DataFrame): A DataFrame containing the results and data evaluations.
-        correlation (str): The type of correlation to compute, default is 'spearman'.
-        thresh (float): The threshold for F1 score to consider, default is 0.7.
+        correlation (str): Which coefficient to compute -- ``'spearman'`` (default) or
+            ``'pearson'``. Any other name is refused; it used to be accepted and then
+            silently produce no rows at all.
+        thresh (float): The threshold ``frac_gt_thresh`` counts against, default 0.7. It
+            is applied to *every* metric, so for ``time`` it reports the fraction of
+            runs slower than 0.7 seconds -- meaningful only for the metrics bounded in
+            [0, 1].
 
     Returns:
         results_df (pd.DataFrame): The input DataFrame with additional columns for datatype and model_embed_datatype.
         correlations_df (pd.DataFrame): A DataFrame containing the computed correlations between metrics and features.
+
+    Note:
+        Three columns are ``NaN`` where the quantity is genuinely undefined, and callers
+        must not fill them:
+
+        * ``correlation`` -- the feature is constant within the group (the embedding
+          width is, by construction), or fewer than two complete pairs remain.
+        * ``median_metric`` and ``frac_gt_thresh`` -- the metric was never observed for
+          that group. ``auc`` is ``NaN`` wherever a model exposes no ranking; see
+          :func:`qbiocode.evaluation.model_evaluation.modeleval`.
+
+        Missing values are dropped pairwise rather than propagated, so one missing
+        ``auc`` among fifteen splits costs one split and not the whole group's
+        analysis.
 
     """
 
@@ -214,24 +298,46 @@ def compute_results_correlation(results_df, correlation="spearman", thresh=0.7):
         )
     metrics = ["accuracy", "f1_score", "time", "auc"]
 
+    # A misspelt name used to fall through the `if correlation == "spearman"` test below
+    # and append nothing at all, so `compute_results_correlation(df, correlation="pearson")`
+    # returned an empty frame, exited cleanly, and produced three blank figures.
+    if correlation not in _CORRELATION_FUNCTIONS:
+        raise ValueError(
+            f"Unknown correlation {correlation!r}. Choose one of "
+            f"{sorted(_CORRELATION_FUNCTIONS)}."
+        )
+    correlate = _CORRELATION_FUNCTIONS[correlation]
+
     keys = list(set(results_df["model_embed_datatype"]))
     for m in keys:
         dat_temp_m = results_df[results_df["model_embed_datatype"] == m]
         if len(dat_temp_m) > 0:
             for s in metrics:
+                if s not in dat_temp_m.columns:
+                    continue
+                # Coerced because a metric column read back from ModelResults.csv can be
+                # object-dtype -- the CSV is written per row with a union header, so a
+                # column absent from some rows comes back with '' in those cells.
+                metric_values = pd.to_numeric(dat_temp_m[s], errors="coerce")
+                observed = metric_values.notna()
                 for f in features:
                     if f in dat_temp_m.columns:
-                        if correlation == "spearman":
-                            correlations.append(
-                                [
-                                    m,
-                                    s,
-                                    f,
-                                    np.median(dat_temp_m[s]),
-                                    sum(dat_temp_m[s] > thresh) / len(dat_temp_m[s]),
-                                    spearmanr(dat_temp_m[s], dat_temp_m[f])[0],
-                                ]
-                            )
+                        feature_values = pd.to_numeric(dat_temp_m[f], errors="coerce")
+                        correlations.append(
+                            [
+                                m,
+                                s,
+                                f,
+                                # nanmedian, not median: `auc` is NaN by design wherever a
+                                # model exposes no ranking (see modeleval), and np.median
+                                # propagates that to the whole group -- so one decision
+                                # tree among fifteen splits blanked the median for all of
+                                # them.
+                                np.nanmedian(metric_values) if observed.any() else np.nan,
+                                _fraction_above(metric_values, thresh),
+                                _correlate(correlate, metric_values, feature_values),
+                            ]
+                        )
 
     correlations_df = pd.DataFrame(
         correlations,
@@ -363,6 +469,9 @@ def _plot_correlation_figures(
         "#67001f",
     ]
     cmap_custom = LinearSegmentedColormap.from_list("custom_diverging", colors_custom, N=256)
+    # A cell with no defined correlation is drawn in this grey, which appears nowhere in
+    # the blue-white-red scale above, so it cannot be read as a weak correlation.
+    cmap_custom.set_bad(_MISSING_COLOR)
     norm = mcolors.TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
 
     # Sample data
@@ -398,17 +507,41 @@ def _plot_correlation_figures(
     data = data.sort_values(["feature", "datatype"], ascending=False)
     data["model"] = [re.sub("_.*", "", x) for x in data[key]]
     data["model"] = [x.upper() for x in data["model"]]
-    data = pd.concat(
-        [
-            data[~data["model"].isin(["QSVC", "QNN", "VQC", "PQK"])],
-            data[data["model"].isin(["QSVC", "QNN", "VQC", "PQK"])],
-        ]
-    )
+    # Quantum models last in the frame, which puts them first on the axis. Same list as
+    # the heatmap's colour mapping below -- it used to be a separate literal, so adding a
+    # quantum learner meant remembering both.
+    is_quantum = data["model"].isin(_QML_MODELS)
+    data = pd.concat([data[~is_quantum], data[is_quantum]])
     fm = dict(zip(list(set(data["feature"])), range(len(set(data["feature"])))))
     data["feature_map"] = [fm[x] for x in data["feature"]]
 
-    # Fill NaN values before scaling to avoid errors
-    data = data.fillna(0)
+    # NaN in `correlation` means "no correlation is defined here", and it must NOT
+    # become 0.
+    #
+    # `data = data.fillna(0)` used to do exactly that, and 0 is the worst possible
+    # substitute: the colormap below is diverging and centred on 0, so an uncomputable
+    # correlation was drawn in the same neutral colour as a measured absence of
+    # correlation -- visually identical, and wrong in the direction that reads as a
+    # finding. It is not a rare cell either. Within one (model, embedding, dataset)
+    # group the embedding width is fixed, so `mfe.nr_attr` and its neighbours are
+    # constant and genuinely have no correlation; and `auc` is NaN by design wherever a
+    # model exposes no ranking. `modeleval` writes that NaN precisely so it cannot be
+    # mistaken for a number, and this function then rendered it as one.
+    #
+    # NaN is kept and mapped through `set_bad` to a colour that is in neither arm of the
+    # diverging scale, so a missing cell looks missing.
+    correlation_missing = data["correlation"].isna()
+
+    # The size column is a different case: it is NaN only when the metric was never
+    # observed for that whole group, in which case every correlation in the group is NaN
+    # too and the dot carries no information. Given the smallest size so it is present but
+    # unobtrusive, rather than dropped -- a silently absent row is harder to notice than a
+    # small grey one.
+    data[size] = pd.to_numeric(data[size], errors="coerce")
+    if data[size].notna().any():
+        data[size] = data[size].fillna(data[size].min())
+    else:
+        data[size] = 0.0
 
     # Scale dot size based on actual data range for meaningful representation
     # Reduced sizes to minimize overlap
@@ -531,7 +664,16 @@ def _plot_correlation_figures(
 
     data[key_column] = data[key]
     data["Data feature"] = data["feature"]
-    to_plot = data.pivot_table(columns=key_column, index="Data feature", values="correlation")
+    # dropna=False so a feature whose correlation is undefined in EVERY group keeps its
+    # row. `pivot_table` drops an all-NaN row by default, which mattered only once the
+    # `fillna(0)` above was removed: before, every cell was a number and nothing was
+    # dropped. Dropping is the wrong answer here -- a feature that is silently absent from
+    # the heatmap reads as one that was never considered, where a fully grey row correctly
+    # reads as one that could not be measured. It also cost 28 of 141 rows on the real
+    # pyMFE block, all of them the constant-within-group columns.
+    to_plot = data.pivot_table(
+        columns=key_column, index="Data feature", values="correlation", dropna=False
+    )
 
     # Define professional color scheme for model types
     ccolors = [
@@ -553,18 +695,35 @@ def _plot_correlation_figures(
         "#b2182b",
     ]
     cmap_heatmap = LinearSegmentedColormap.from_list("custom_heatmap", colors_heatmap, N=256)
+    cmap_heatmap.set_bad(_MISSING_COLOR)
 
     # Create professional heatmap with better proportions
     heatmap_height = figsize[1] * 0.95  # Much taller to reduce space above colorbar
     heatmap_width = min(figsize[0] * 0.9, 10)  # Narrower columns
 
+    # `fillna(0)` for the LINKAGE only -- scipy cannot compute a distance across NaN, so
+    # the clustering has to see numbers. `mask` then hides those same cells in the drawn
+    # heatmap, so a cell with no defined correlation renders in the `set_bad` grey instead
+    # of as a measured zero. Passing the filled frame alone, as this did, put fabricated
+    # zeros into the figure AND let them pull the dendrogram: two features that were merely
+    # both unmeasurable clustered together as though they behaved alike.
+    # Clustering needs at least two things to cluster. A one-column frame -- one model on
+    # one embedding of one dataset, which is the smallest useful QProfiler run and what a
+    # first-time user does -- otherwise reached scipy as an empty distance matrix and
+    # raised "The number of observations cannot be determined on an empty distance
+    # matrix", from four frames below seaborn, naming nothing the user had configured.
+    # The dendrograms are hidden immediately below in any case, so switching the
+    # clustering off for a degenerate axis costs the figure nothing.
     g = sns.clustermap(
         to_plot.fillna(0),
+        mask=to_plot.isna(),
         figsize=(heatmap_width, heatmap_height),
         col_colors=ccolors,
         cmap=cmap_heatmap,
         method="average",
         metric="euclidean",
+        col_cluster=to_plot.shape[1] > 1,
+        row_cluster=to_plot.shape[0] > 1,
         center=0,
         xticklabels=xticks,
         yticklabels=True,
@@ -637,10 +796,12 @@ def _plot_correlation_figures(
 
     g2 = sns.clustermap(
         to_plot_ordered.fillna(0),
+        mask=to_plot_ordered.isna(),
         figsize=(heatmap_width, heatmap_height),
         col_colors=ccolors_ordered,
         col_cluster=False,
-        row_cluster=True,
+        # Same one-row guard as above; the column axis is already unclustered here.
+        row_cluster=to_plot_ordered.shape[0] > 1,
         cmap=cmap_heatmap,
         center=0,
         xticklabels=xticks,

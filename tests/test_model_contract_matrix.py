@@ -70,7 +70,7 @@ from sklearn.model_selection import train_test_split
 # tests/test_openmp_import_order.py.
 import qbiocode
 from qbiocode import learning
-from qbiocode.evaluation.model_run import model_run
+from qbiocode.evaluation.model_run import QUANTUM_MODELS, model_run
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_RUN_SOURCE = REPO_ROOT / "qbiocode" / "evaluation" / "model_run.py"
@@ -105,12 +105,20 @@ LABEL_PREFIXES = ("results", "y_test", "y_predicted")
 
 
 def _read_dispatch_source():
-    """``({key: (function name, module)}, quantum keys)`` as written in model_run."""
+    """``{key: (function name, module)}`` as written in model_run.
+
+    Only ``compute_ml_dict`` needs reading this way. The quantum set used to be parsed
+    out of the same function body as an ``ast.Set`` literal; it is now the module
+    constant :data:`~qbiocode.evaluation.model_run.QUANTUM_MODELS`, which the
+    visualization layer imports too, so it is imported here rather than re-parsed --
+    fewer moving parts, and it cannot disagree with what the dispatcher actually branches
+    on.
+    """
     tree = ast.parse(MODEL_RUN_SOURCE.read_text(encoding="utf-8"))
     body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "model_run"]
     assert body, f"model_run is no longer a module-level function in {MODEL_RUN_SOURCE}"
 
-    imported, table_node, quantum = {}, None, None
+    imported, table_node = {}, None
     for node in ast.walk(body[0]):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -119,10 +127,7 @@ def _read_dispatch_source():
             targets = {getattr(t, "id", None) for t in node.targets}
             if "compute_ml_dict" in targets:
                 table_node = node.value
-            elif "quantum_models" in targets:
-                quantum = node.value
     assert isinstance(table_node, ast.Dict), "could not read compute_ml_dict out of model_run"
-    assert isinstance(quantum, ast.Set), "could not read quantum_models out of model_run"
 
     table = {}
     for key_node, value_node in zip(table_node.keys, table_node.values):
@@ -134,10 +139,11 @@ def _read_dispatch_source():
     # Non-vacuity: several tests below iterate this table, and an empty one would
     # make every one of them pass by looping over nothing.
     assert len(table) > 1, "compute_ml_dict parsed as empty; the reader above is stale"
-    return table, frozenset(element.value for element in quantum.elts)
+    return table
 
 
-DISPATCH, QUANTUM_KEYS = _read_dispatch_source()
+DISPATCH = _read_dispatch_source()
+QUANTUM_KEYS = QUANTUM_MODELS
 
 #: The classical learners, derived: everything that is neither a tuned twin nor
 #: quantum. Nine today (svc dt lr nb rf xgb catboost tabpfn mlp).

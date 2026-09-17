@@ -175,7 +175,6 @@ def detect_complexity_schema(columns):
     mfe = [name for name in columns if str(name).startswith(MFE_COLUMN_PREFIX)]
     task = [name for name in columns if str(name).startswith(TASK_COLUMN_PREFIX)]
     if mfe or task:
-        native = [name for name in NATIVE_COMPLEXITY_COLUMNS if name in present]
         missing = [name for name in NATIVE_COMPLEXITY_COLUMNS if name not in present]
         if missing:
             raise ValueError(
@@ -237,7 +236,9 @@ def detect_complexity_schema(columns):
                 # mixed case there is no ambiguity about what the table is. Drop the
                 # block rather than feed QSage a column of zeros.
                 task = []
-        return 'pymfe', native + mfe + task
+        # Every native column is present -- the guard above raised otherwise -- so the
+        # tuple itself is the list, in its own documented output order.
+        return 'pymfe', list(NATIVE_COMPLEXITY_COLUMNS) + mfe + task
 
     legacy_missing = [name for name in LEGACY_COMPLEXITY_COLUMNS if name not in present]
     if not legacy_missing:
@@ -534,7 +535,13 @@ def evaluate(df, y, file, random_state=0, mfe_features=None, task_spectrum=True,
     intrinsic_dim = get_intrinsic_dim(df_numeric)
     condition_number = get_condition_number(df_numeric)
     fdr = get_fdr(df_numeric, y)
-    count_nonzero = get_nnz(df)
+    # df_numeric, not df. Every other measure here reads the numeric selection, so a
+    # dataset carrying a text column had that column excluded from all of them and then
+    # counted in this one -- `np.count_nonzero` on an object column counts every non-empty
+    # string. The two are identical for an all-numeric dataset, which is every committed
+    # one, so no published number moves; a mixed-dtype dataset gets the count it should
+    # always have had.
+    count_nonzero = get_nnz(df_numeric)
     num_low_variance_features = get_low_var_features(df_numeric, n_features)
     avg_co_of_v, std_co_of_v = get_coefficient_var(df_numeric)
     mean_log_density = get_log_density(df_numeric)

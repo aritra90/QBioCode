@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Embeddings are applied only to a dataset wide enough to justify one
+
+- **`embedding_min_features`, default 18.** An embedding now runs only on a dataset with
+  *more than* this many features. Below that width a feature reduction mostly costs
+  information without buying anything: every quantum learner here encodes one qubit per
+  feature, so 18 features is a circuit these models handle directly, and reducing to
+  `n_components: 3` first discards most of the problem and then reports the models' scores
+  on what is left. Measured on the 6-feature `class_data-1`, PCA to 3 components moves 108
+  of the 115 `mfe.` columns -- what was being profiled after the reduction was largely not
+  the dataset that was loaded.
+
+- **The list collapses rather than repeating.** When a dataset is too narrow the whole
+  `embeddings` list becomes a single `'none'` pass, and the log names what was skipped.
+  Running each requested name as a no-op instead would fit every model once per name on
+  identical data and write those rows under an `embeddings` column claiming a reduction
+  that never happened -- three times the runtime for one result, recorded misleadingly.
+
+- **`embedding_min_features: 0` restores the old behaviour exactly**, which is what both
+  QProfiler tutorial configs now set: their data is 6 and 10 features wide and the
+  comparison they draw is `'none'` against `'pca'`, so they opt out explicitly. The policy
+  is `qbiocode.resolve_embeddings`, which is a pure function of the name list and the
+  width, so it is testable without running a profile.
+
 #### QProfiler tutorial v2
 
 - **`tutorial/QProfiler_v2/example_qprofiler_v2.ipynb`**, a second pass over QProfiler built
@@ -183,6 +206,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### One search-engine dispatch instead of eight copies
+
+- **`qbiocode.learning._tuning.search_hyperparameters` replaces the `if tuner == "grid":`
+  branch that each of the eight classical `_opt` learners carried.** All eight held the same
+  twenty lines -- build a grid or a search space from the same `candidates`, fit
+  `GridSearchCV` or drive `run_study`, take the best parameters -- differing only in the
+  estimator class and the model name. Eight copies of one branch is eight places for the two
+  engines to drift apart, and they had already begun to: `compute_nb_opt` reads its sampler
+  seed from `args` because `GaussianNB` has no `random_state` for the dispatcher to fill in.
+  Behaviour is unchanged, including which engine runs and what each is given; the tests that
+  watched the two engines as learner-module globals now watch them on `_tuning`.
+
+- **`run_study` names the model as the config spells it** when a rejected trial budget is
+  reported. It used `estimator_cls.__name__`, so the one message that tells you to fix
+  `gridsearch_rf_args` said `'RandomForestClassifier'` -- a name appearing in no config file.
+
+- **`modeleval` builds its results frame once.** The tuned and untuned branches returned
+  frames identical but for the name of a single key, so every other column was written out
+  twice and a change to any of them had to be made in both places to take effect.
+
+
 #### QSage detects its feature schema instead of naming it
 
 - **`QuantumSage._columns_data_features` is now derived from the input**, via the new
@@ -218,6 +262,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   different widths, which is exactly the comparison QSage makes.
 
 ### Fixed
+
+#### The correlation figures drew "not measurable" as "measured zero"
+
+- **`fillna(0)` on the correlation column, into a colormap centred on zero.** An
+  undefined correlation was rendered in the exact neutral colour of the diverging scale,
+  making it visually identical to a measured absence of correlation -- wrong in the
+  direction that reads as a finding. Neither source of missing values is rare: a feature
+  that is constant within a (model, embedding, dataset) group has no defined correlation,
+  and the embedding width *is* constant inside a group, so `mfe.nr_attr` and its
+  neighbours are always in that state; and `auc` is NaN wherever a model exposes no
+  ranking. `modeleval` writes that NaN specifically so it cannot be mistaken for a
+  number, and this stage then rendered it as one. Missing cells now map through
+  `set_bad` to a grey that appears nowhere in the blue-white-red ramp, and the heatmaps
+  pass a `mask` so the fill is used for the linkage only -- previously the fabricated
+  zeros also pulled the dendrogram, clustering two features together because both were
+  unmeasurable.
+
+- **One missing AUC erased the AUC analysis for a whole group.** `np.median` and
+  `spearmanr` both propagate NaN, so a single decision tree among fifteen splits left
+  `median_metric` undefined and *every* feature correlation NaN for that model -- which
+  the `fillna(0)` above then drew as a grid of zeros. Now `np.nanmedian`, with the
+  correlation computed on the complete pairs and NaN returned only when fewer than two
+  remain or a column is constant.
+
+- **`frac_gt_thresh` counted missing values as failures.** The denominator was the row
+  count rather than the number of observed values, reporting 7/15 where the answer among
+  models that have an AUC at all is 7/14. It is now NaN when nothing was observed, so
+  "no model cleared the bar" and "no model was scored" stay distinguishable.
+
+- **`correlation='pearson'` silently returned nothing.** The only engine wired up was
+  Spearman, behind an `if correlation == "spearman"` that any other name fell straight
+  through -- appending no rows, raising nothing, and yielding three blank figures.
+  Pearson is now implemented and an unrecognised name is refused.
+
+- **QPL was drawn as a classical model.** The quantum-model list was written out three
+  times -- a module constant, an inline literal in the scatter arm, and the heatmap's
+  colour mapping -- and every copy named four models and omitted `qpl`, so QPL rows took
+  the classical colour and sorted with the classical models in all three figures. There is
+  now one list, `qbiocode.evaluation.model_run.QUANTUM_MODELS`, which the dispatcher and
+  the figures both read.
+
+- **The smallest useful run could not be plotted.** One model on one embedding of one
+  dataset gives a single column, and `sns.clustermap` asked scipy for a column dendrogram
+  over it: `ValueError: The number of observations cannot be determined on an empty
+  distance matrix`, raised from below seaborn and naming nothing the user had configured.
+  Clustering is now skipped on a degenerate axis; the dendrograms were hidden anyway.
+
+#### `# Non-zero entries` counted the columns every other measure excluded
+
+- **`evaluate()` computed this one measure on the raw frame** while every other measure
+  reads the numeric selection, so a dataset carrying a text column had that column dropped
+  from all of them and then counted here -- `np.count_nonzero` on an object column counts
+  every non-empty string. Identical for an all-numeric dataset, which is every committed
+  one, so no published number moves.
+
+#### Tuning QPL silently discarded the configured `classical_models`
+
+- **The same config ran one head untuned and six tuned.** `qpl_args:
+  {classical_models: ['lr']}` selects which classical heads are fitted on the quantum
+  projection. `model_run`'s tuned-quantum branch built its keyword arguments from
+  `gridsearch_qpl_args` alone, so with `tune_quantum: True` that block was never read and
+  `compute_qpl` fell back to its six-head default. Naming the key in the gridsearch block
+  instead was not a workaround: it arrived at `compute_qpl_opt` as an unexpected keyword
+  argument, since that function had no such parameter.
+
+- **The wasted fits were the smaller half.** A QPL candidate is scored by the *mean*
+  accuracy across its heads, so the search was choosing the quantum projection to suit
+  heads the config had excluded -- and the result was undetectable from the output, because
+  the extra heads appear as ordinary extra `results_qpl_opt_<head>` rows rather than as an
+  error. `compute_qpl_opt` now takes `classical_models` and hands it to every trial as well
+  as to the final fit, and `model_run` forwards it from `qpl_args` for both paths. Narrowing
+  the list now also makes a tuned QPL run proportionally cheaper.
+
+#### The target spectrum recomputed a label-independent quantity on every permutation
+
+- **About 60 % of the `task.` block's runtime was spent re-deriving the same number.**
+  `_h0_fragmentation` divides the summed within-class MST weight by the MST weight of the
+  pooled cloud, and the pooled value is a function of the distance matrix alone -- a
+  permutation of `y` cannot change it. It was nonetheless recomputed on each of the 100
+  permutation draws plus the observed one. Measured 60 % at `n = 100` and 62 % at `n = 200`;
+  hoisting it takes the block from 0.20 s to 0.11 s and from 0.76 s to 0.32 s respectively,
+  with every reported value unchanged. The module docstring's claim that a permutation costs
+  "one matrix-vector product because the graph does not change" was only ever true of the
+  graph-spectral half.
+
+- **`n_permutations` now rejects a negative count** with the same message `1` gets. It was
+  truthy, so it reached `np.empty(n_permutations)` and surfaced as numpy's "negative
+  dimensions are not allowed" -- a message about an array the caller never mentioned, naming
+  neither the argument nor the two values that are allowed.
 
 #### `ModelResults.csv` was unreadable whenever tuned and untuned models shared a run
 

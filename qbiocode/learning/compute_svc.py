@@ -2,13 +2,11 @@
 
 import time
 
-from sklearn.model_selection import GridSearchCV
 from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 from sklearn.svm import SVC
 
 # ====== Additional local imports ======
-from qbiocode.learning._grid import build_param_grid
-from qbiocode.learning._tuning import build_search_space, run_study
+from qbiocode.learning._tuning import search_hyperparameters
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Scikit-learn imports ======
@@ -176,29 +174,18 @@ def compute_svc_opt(
         "gamma": gamma,
         "kernel": kernel,
     }
-    # Optuna by default; the exhaustive grid stays reachable so a number published
-    # against it can still be reproduced. Both engines are handed the same
-    # `candidates`, so switching `tuner` never changes *which* hyperparameters are
-    # searched -- only how the search spends its fits.
-    if tuner == "grid":
-        search = GridSearchCV(
-            SVC(random_state=random_state),
-            param_grid=build_param_grid("svc", candidates),
-            cv=cv,
-        )
-        search.fit(X_train, y_train)
-        best_params = search.best_params_
-    else:
-        best_params = run_study(
-            SVC,
-            build_search_space("svc", candidates),
-            X_train,
-            y_train,
-            cv=cv,
-            n_trials=n_trials,
-            seed=random_state,
-            fixed={"random_state": random_state},
-        )
+    best_params = search_hyperparameters(
+        "svc",
+        SVC,
+        candidates,
+        X_train,
+        y_train,
+        cv=cv,
+        tuner=tuner,
+        n_trials=n_trials,
+        seed=random_state,
+        fixed={"random_state": random_state},
+    )
     best_svc = SVC(**best_params, random_state=random_state)
     best_svc.fit(X_train, y_train)
 

@@ -69,6 +69,8 @@ from .embeddings.embed import (
     QUVINE_METHODS,
     SKLEARN_METHODS,
     get_embeddings,
+    resolve_embeddings,
+    DEFAULT_EMBEDDING_MIN_FEATURES,
     is_transductive,
     pqk,
 )
@@ -167,6 +169,8 @@ __all__ = [
     "compute_qpl_opt",
     # Embeddings
     "get_embeddings",
+    "resolve_embeddings",
+    "DEFAULT_EMBEDDING_MIN_FEATURES",
     "is_transductive",
     "SKLEARN_METHODS",
     "QUVINE_HEADLINE_METHODS",

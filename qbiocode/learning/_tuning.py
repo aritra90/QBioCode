@@ -47,7 +47,9 @@ import warnings
 from collections.abc import Mapping, Sequence
 
 import optuna
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import GridSearchCV, cross_val_score
+
+from qbiocode.learning._grid import build_param_grid
 
 # Optuna logs one INFO line per trial. With the default budget across seven models,
 # each running inside a joblib worker that interleaves its stdout with the others,
@@ -262,7 +264,7 @@ def _finite_size(space):
     return total
 
 
-def run_study(estimator_cls, space, X, y, *, cv, n_trials, seed=None, fixed=None):
+def run_study(estimator_cls, space, X, y, *, cv, n_trials, model=None, seed=None, fixed=None):
     """Search ``space`` with Optuna and return the best hyperparameters found.
 
     Scored by ``cross_val_score(...).mean()`` with the estimator's own ``score``,
@@ -278,6 +280,9 @@ def run_study(estimator_cls, space, X, y, *, cv, n_trials, seed=None, fixed=None
         n_trials (int): Trial budget. Lowered to the size of the space when the
             space is entirely categorical and smaller than the budget, so an
             8-value block does not spend 50 fits re-evaluating 8 models.
+        model (str or None): Model name as the config spells it ('rf'), used only to
+            make a rejected budget name the ``gridsearch_<model>_args`` block it came
+            from. Falls back to the estimator's class name.
         seed (int or None): Seeds the sampler, so a run repeats at a given
             ``args['seed']``. ``None`` leaves Optuna drawing from the global RNG.
         fixed (dict or None): Passed to every trial's estimator but not searched --
@@ -288,7 +293,11 @@ def run_study(estimator_cls, space, X, y, *, cv, n_trials, seed=None, fixed=None
         ``GridSearchCV.best_params_`` returned, so callers refit unchanged.
     """
     fixed = dict(fixed or {})
-    _validate_budget(estimator_cls.__name__, n_trials)
+    # The config key where the caller supplied one, not `estimator_cls.__name__`: every
+    # other message in this module names the model as the config spells it ('rf'), which
+    # is what makes "gridsearch_rf_args" findable. 'RandomForestClassifier' appears in no
+    # config, so it left the one message that rejects a budget unable to point anywhere.
+    _validate_budget(model or estimator_cls.__name__, n_trials)
 
     size = _finite_size(space)
     if size is not None:
@@ -318,6 +327,81 @@ def run_study(estimator_cls, space, X, y, *, cv, n_trials, seed=None, fixed=None
     with _suppress_unstorable_choice_warning():
         study.optimize(objective, n_trials=n_trials, n_jobs=1)
     return dict(study.best_params)
+
+
+def search_hyperparameters(
+    model,
+    estimator_cls,
+    candidates,
+    X_train,
+    y_train,
+    *,
+    cv,
+    tuner="optuna",
+    n_trials=50,
+    seed=None,
+    fixed=None,
+):
+    """Run whichever search ``tuner`` names, and return the best hyperparameters.
+
+    The whole of what the eight classical ``compute_*_opt`` functions used to spell out
+    individually. Each held the same twenty lines -- build a grid or a search space from
+    the same ``candidates``, fit ``GridSearchCV`` or drive :func:`run_study`, take the
+    best parameters -- differing only in the estimator class and the model name. Eight
+    copies of a branch is eight places for the two engines to drift apart, and they had
+    already started to: ``compute_nb_opt`` reads its seed from ``args`` because
+    ``GaussianNB`` has no ``random_state`` for ``model_run`` to fill in.
+
+    Args:
+        model (str): Model name as the config spells it ('rf', 'catboost'), so an error
+            names the ``gridsearch_<model>_args`` block the user has to edit.
+        estimator_cls (type): Estimator to search over and construct.
+        candidates (dict): Hyperparameter name -> what the config asked for. Passed
+            unchanged to whichever of :func:`build_param_grid` or
+            :func:`build_search_space` this engine uses, which is what keeps the two
+            agreeing on which entries count as "not tuned".
+        X_train (array-like): Training features.
+        y_train (array-like): Training labels.
+        cv (int): Number of cross-validation folds.
+        tuner (str): ``'optuna'`` (default) samples ``n_trials`` configurations;
+            ``'grid'`` restores the exhaustive ``GridSearchCV`` sweep. Any other value
+            is treated as ``'optuna'`` -- ``model_run`` rejects an unknown name up
+            front, and a direct caller passing one gets the default engine.
+        n_trials (int): Trial budget, used by the Optuna engine only.
+        seed (int or None): Seeds the sampler.
+        fixed (dict or None): Settings every candidate estimator is built with but which
+            are not searched -- ``random_state``, and CatBoost's quiet flags and resolved
+            ``bootstrap_type``. The grid engine gets them by constructing its estimator
+            with them, which is what the per-model code was already doing by hand.
+
+    Returns:
+        dict: The best hyperparameters found, in the shape ``GridSearchCV.best_params_``
+        returned, so callers refit unchanged.
+    """
+    fixed = dict(fixed or {})
+    # Optuna by default; the exhaustive grid stays reachable so a number published
+    # against it can still be reproduced. Both engines are handed the same `candidates`,
+    # so switching `tuner` never changes *which* hyperparameters are searched -- only how
+    # the search spends its fits.
+    if tuner == "grid":
+        search = GridSearchCV(
+            estimator_cls(**fixed),
+            param_grid=build_param_grid(model, candidates),
+            cv=cv,
+        )
+        search.fit(X_train, y_train)
+        return dict(search.best_params_)
+    return run_study(
+        estimator_cls,
+        build_search_space(model, candidates),
+        X_train,
+        y_train,
+        cv=cv,
+        n_trials=n_trials,
+        model=model,
+        seed=seed,
+        fixed=fixed,
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -354,9 +438,10 @@ def _metric_dicts(frame, model):
     head per entry in ``classical_models`` on the same quantum projection and
     ``pd.concat``s a frame per head, so the result carries a ``results_qpl_rf``, a
     ``results_qpl_svc`` and so on, each populated on its own row and NaN elsewhere.
-    The label is a display name rather than the dispatch key -- ``compute_pqk`` hardcodes
-    ``"pqk"`` and ignores the ``model=`` it was passed -- so the columns are found rather
-    than assumed.
+
+    Hence the columns are *found* rather than derived from the label the caller passed:
+    a QPL frame appends the head name to it, so ``model='qpl_opt'`` produces
+    ``results_qpl_opt_rf`` and five siblings, none of them named ``results_qpl_opt``.
     """
     dicts = []
     for column in [c for c in frame.columns if c.startswith("results_")]:

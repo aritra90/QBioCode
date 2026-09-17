@@ -17,12 +17,11 @@ except Exception as e:
     _XGBOOST_ERROR = str(e)
     XGBClassifier = None  # type: ignore
 
-from sklearn.model_selection import GridSearchCV
 from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 
 # ====== Additional local imports ======
-from qbiocode.learning._grid import build_param_grid, warn_ignored_hyperparameter
-from qbiocode.learning._tuning import build_search_space, run_study
+from qbiocode.learning._grid import warn_ignored_hyperparameter
+from qbiocode.learning._tuning import search_hyperparameters
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Begin functions ======
@@ -226,29 +225,18 @@ def compute_xgb_opt(
         "bootstrap": bootstrap,
     }
 
-    # Optuna by default; the exhaustive grid stays reachable so a number published
-    # against it can still be reproduced. Both engines are handed the same
-    # `candidates`, so switching `tuner` never changes *which* hyperparameters are
-    # searched -- only how the search spends its fits.
-    if tuner == "grid":
-        search = GridSearchCV(
-            XGBClassifier(random_state=random_state),
-            param_grid=build_param_grid("xgb", candidates),
-            cv=cv,
-        )  # type: ignore
-        search.fit(X_train, y_train)
-        best_params = search.best_params_
-    else:
-        best_params = run_study(
-            XGBClassifier,
-            build_search_space("xgb", candidates),
-            X_train,
-            y_train,
-            cv=cv,
-            n_trials=n_trials,
-            seed=random_state,
-            fixed={"random_state": random_state},
-        )
+    best_params = search_hyperparameters(
+        "xgb",
+        XGBClassifier,
+        candidates,
+        X_train,
+        y_train,
+        cv=cv,
+        tuner=tuner,
+        n_trials=n_trials,
+        seed=random_state,
+        fixed={"random_state": random_state},
+    )
     best_xgb = XGBClassifier(**best_params, random_state=random_state)  # type: ignore
     best_xgb.fit(X_train, y_train)
 

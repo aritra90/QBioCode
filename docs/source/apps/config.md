@@ -233,6 +233,53 @@ n_components: 5
 Start with `'none'` to establish baseline performance, then try `'pca'` for faster quantum model training.
 ```
 
+#### When embeddings are applied: `embedding_min_features`
+
+An embedding is applied only to a dataset with **more than `embedding_min_features`**
+features. The default is **18**.
+
+```yaml
+embeddings: ['pca', 'nmf', 'none']
+embedding_min_features: 18   # the default; omit the key to get it
+```
+
+Below that width a feature reduction mostly costs information without buying anything.
+Every quantum learner in QBioCode encodes one qubit per feature, so 18 features is a
+circuit these models handle directly — reducing to `n_components: 3` first discards most
+of the problem and then reports the models' scores on what is left. The complexity blocks
+say the same thing from the other side: on the 6-feature `class_data-1`, PCA to 3
+components moves 108 of the 115 `mfe.` columns, so what is being profiled after the
+reduction is largely not the dataset that was loaded.
+
+When a dataset is too narrow, the **whole `embeddings` list collapses to a single
+`'none'` pass**, and the log says which methods were skipped:
+
+```text
+WARNING - class_data-1.csv: 6 features is not more than embedding_min_features=18,
+so ['pca', 'nmf'] will NOT be applied and the models run on the unreduced features
+instead. [...] To embed anyway, set embedding_min_features: 0 in the config.
+```
+
+It collapses rather than running each name as a no-op on purpose: three requested
+embeddings would otherwise fit every model three times on identical data and write three
+groups of rows distinguished only by an `embeddings` column naming a reduction that never
+happened.
+
+**To embed a narrow dataset deliberately**, set the threshold to 0:
+
+```yaml
+embedding_min_features: 0    # apply every requested embedding, whatever the width
+```
+
+That is what both QProfiler tutorial configs do — their data is 6 and 10 features wide and
+the comparison they draw is `'none'` against `'pca'`.
+
+```{note}
+The threshold applies to every embedding name uniformly, including the QuVINE graph
+embeddings, whose output width does not depend on the feature count. If you want a graph
+embedding on a narrow table, set `embedding_min_features: 0`.
+```
+
 ### Train/Test Split
 
 Configure data splitting and preprocessing.
@@ -390,6 +437,19 @@ What is tunable per model:
 
 There is no `n_qubits`: the qubit count follows from the width of the data reaching the
 model, so it is set by the embedding's `n_components`, not by tuning.
+
+`qpl`'s `classical_models` is **not** in that table, because it is not a hyperparameter to
+search -- it selects which classical heads are fitted on the quantum projection. It stays
+in `qpl_args` and is read from there whether or not tuning is on:
+
+```yaml
+qpl_args:
+  classical_models: ['rf', 'lr']   # honoured with tune_quantum on or off
+```
+
+Every trial fits all of the named heads and a candidate is scored by their *mean*
+accuracy, so narrowing the list makes a tuned QPL run proportionally cheaper as well as
+changing what the search optimises for.
 
 **Tuning on real hardware is refused** unless you also set `allow_hardware_tuning: True`.
 Every trial is a separate queued job billed against your instance, and the failure mode

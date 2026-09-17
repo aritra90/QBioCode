@@ -78,6 +78,7 @@ what the converted tests exist to catch:
 
 import functools
 import importlib
+import inspect
 import math
 import sys
 from contextlib import contextmanager
@@ -227,15 +228,21 @@ def watched_opt_twin(model):
 def watched_engines(model):
     """Record which of the two search engines ``compute_<model>_opt`` entered, with what.
 
-    Every classical ``_opt`` learner branches on ``if tuner == "grid":`` to
-    ``GridSearchCV`` and otherwise to ``run_study``, and both are module globals of
-    ``compute_<model>``, so wrapping the two names says which branch ran and what ``cv``
-    it was given. Nothing else does: an engine substitution is silent, and the sklearn
+    The branch on ``if tuner == "grid":`` used to sit in each ``compute_<model>``, so the
+    two engines were that module's own globals and were wrapped there. They now live once
+    in ``qbiocode.learning._tuning.search_hyperparameters``, which every classical
+    ``_opt`` learner calls, so the two names are wrapped on ``_tuning`` instead. What is
+    observed is unchanged -- which branch ran and what ``cv`` it was given -- and so is
+    why it has to be observed at all: an engine substitution is silent, and the sklearn
     complaint about an impossible fold count is phrased identically whether it surfaces
     from ``cross_val_score`` inside the study or from ``GridSearchCV.fit``.
+
+    ``model`` is still taken, and still imported, so that a learner which stops routing
+    through the shared helper fails here rather than quietly recording nothing.
     """
-    module = learner_module(model)
-    real = {"optuna": module.run_study, "grid": module.GridSearchCV}
+    learner_module(model)
+    tuning = importlib.import_module("qbiocode.learning._tuning")
+    real = {"optuna": tuning.run_study, "grid": tuning.GridSearchCV}
     seen = {"optuna": [], "grid": []}
 
     def recorder(engine):
@@ -247,8 +254,8 @@ def watched_engines(model):
 
     patched = pytest.MonkeyPatch()
     try:
-        patched.setattr(module, "run_study", recorder("optuna"))
-        patched.setattr(module, "GridSearchCV", recorder("grid"))
+        patched.setattr(tuning, "run_study", recorder("optuna"))
+        patched.setattr(tuning, "GridSearchCV", recorder("grid"))
         yield seen
     finally:
         patched.undo()
@@ -484,8 +491,15 @@ class TestTheConfigBlockReachesTheSearch:
         the *searched* hyperparameters. So the tuner entry point is wrapped in a
         recording delegate that still runs the real search on real data; nothing about
         the model is faked.
+
+        ``run_study`` is wrapped on ``qbiocode.learning._tuning`` rather than on
+        ``compute_dt``: the engine branch moved into ``search_hyperparameters`` there, so
+        that is the module whose global the learner now reaches through. Both arguments
+        under test still arrive at ``run_study`` itself, which is why this stays the
+        thing worth watching.
         """
-        module = learner_module("dt")
+        learner_module("dt")
+        module = importlib.import_module("qbiocode.learning._tuning")
         real_run_study = module.run_study
         seen = []
 
@@ -828,8 +842,10 @@ def tuned_pqk(tmp_path_factory):
 
 
 #: The heads ``compute_qpl`` runs when ``classical_models`` is left at its default --
-#: which is every head a tuned run has, because ``compute_qpl_opt`` takes no
-#: ``classical_models`` argument at all.
+#: which is what a tuned run gets too whenever ``qpl_args`` does not narrow the list.
+#: ``compute_qpl_opt`` now takes the argument and ``model_run`` forwards it from that
+#: block, so the two paths agree; see
+#: ``TestTunedQplHonoursTheConfiguredHeads`` for the narrowed case.
 #:
 #: Read off the source rather than guessed: ``compute_qpl`` sets
 #: ``classical_models = ["rf", "mlp", "svc", "lr", "xgb", "catboost"]``. Note what is
@@ -1005,10 +1021,10 @@ class TestTunedPqkAndQplAreLabelledApartFromAnUntunedRun:
         heads = {split_qpl_label(name[len("results_"):])[1] for name in rows}
         assert heads == set(DEFAULT_QPL_HEADS), (
             f"a tuned QPL run reported heads {sorted(heads)} out of columns "
-            f"{sorted(rows)}, not {sorted(DEFAULT_QPL_HEADS)}. compute_qpl_opt takes no "
-            f"classical_models argument, so the default list is what every trial and the "
-            f"final fit search -- a head missing here is a model silently absent from the "
-            f"run, and a surplus one means this file's premise has rotted"
+            f"{sorted(rows)}, not {sorted(DEFAULT_QPL_HEADS)}. This fixture sets no "
+            f"'qpl_args', so the default list is what every trial and the final fit "
+            f"search -- a head missing here is a model silently absent from the run, and "
+            f"a surplus one means this file's premise has rotted"
         )
         for name, row in rows.items():
             tuned = row["BestParams_Tuned"]
@@ -1079,9 +1095,11 @@ class TestTunedPqkAndQplAreLabelledApartFromAnUntunedRun:
 def tuned_qpl(tmp_path_factory):
     """One tuned QPL dispatch, shared by the two tests that read it.
 
-    It costs about twenty seconds even at this size, because ``compute_qpl_opt`` takes
-    no ``classical_models`` argument, so every trial and the final fit search all six
-    heads (each a 40-candidate RandomizedSearchCV). Both consumers used to be marked
+    It costs about twenty seconds even at this size, because it sets no ``qpl_args``, so
+    every trial and the final fit search all six default heads (each a 40-candidate
+    RandomizedSearchCV) -- which is the point: this is the unnarrowed case, and
+    ``TestTunedQplHonoursTheConfiguredHeads`` covers the narrowed one. Both consumers
+    used to be marked
     ``slow`` for that reason, and that is deliberately no longer so:
     ``-m 'not slow and not requires_quantum'`` is the addopts default and what CI runs, so
     a ``slow`` mark would have kept these two out of every default run. That mattered
@@ -1106,6 +1124,74 @@ def tuned_qpl(tmp_path_factory):
         "gridsearch_qpl_args": {"encoding": ["Z"], "reps": [1]},
     }
     return model_run(X_train, X_test, y_train, y_test, "qpl-dispatch", args)
+
+
+class TestTunedQplHonoursTheConfiguredHeads:
+    """``classical_models`` survives turning ``tune_quantum`` on.
+
+    ``qpl_args: {classical_models: [...]}`` selects which classical heads are fitted on
+    the quantum projection. It is not a hyperparameter -- its value is a list of models,
+    not a list of candidates -- so it lives in ``qpl_args`` and not in
+    ``gridsearch_qpl_args``.
+
+    The tuned branch of ``model_run`` used to build its kwargs from the gridsearch block
+    alone, so this setting was honoured with tuning off and silently dropped with it on:
+    the same config ran one head untuned and six tuned. Worse than the wasted work, a QPL
+    candidate is scored by the MEAN accuracy across heads (``_tuning._accuracy_of``), so
+    the projection was being chosen to suit heads the config had excluded -- and nothing
+    in the results frame said so, because the extra heads simply appeared as extra rows.
+    Naming the key in the gridsearch block was not a workaround either: it arrived at
+    ``compute_qpl_opt`` as an unexpected keyword argument.
+    """
+
+    def test_a_narrowed_head_list_reaches_a_tuned_run(self, tmp_path):
+        """One head configured, one head reported -- not the six defaults."""
+        scratch = tmp_path / "qpl_projections"
+        X_train, X_test, y_train, y_test = _quantum_dataset()
+        args = {
+            "backend": "simulator",
+            "shots": 64,
+            "seed": 7,
+            "q_seed": 7,
+            "n_jobs": 1,
+            "grid_search": True,
+            "tune_quantum": True,
+            "n_trials_quantum": 2,
+            "model": ["qpl"],
+            "qpl_projection_dir": str(scratch),
+            "gridsearch_qpl_args": {"encoding": ["Z"], "reps": [1]},
+            "qpl_args": {"classical_models": ["lr"]},
+        }
+        raw = model_run(X_train, X_test, y_train, y_test, "qpl-heads", args)
+
+        heads = {
+            split_qpl_label(name[len("results_"):])[1] for name in results_rows(raw)
+        }
+        assert heads == {"lr"}, (
+            f"a tuned QPL run configured with classical_models=['lr'] reported heads "
+            f"{sorted(heads)}. Anything wider means qpl_args was dropped on the tuned "
+            f"branch, so the search optimised the projection for heads the config "
+            f"excluded; the six defaults are {sorted(DEFAULT_QPL_HEADS)}"
+        )
+
+    def test_the_tuned_wrapper_accepts_the_argument_at_all(self):
+        """The signature half, so the failure is legible if the plumbing regresses.
+
+        Without this, dropping ``classical_models`` from ``compute_qpl_opt`` would fail
+        the test above with a head-set mismatch rather than saying that the argument is
+        gone -- and dropping it from ``model_run``'s passthrough would fail identically,
+        leaving two very different regressions indistinguishable.
+        """
+        from qbiocode.learning.compute_qpl import compute_qpl_opt
+
+        assert "classical_models" in inspect.signature(compute_qpl_opt).parameters, (
+            "compute_qpl_opt must accept classical_models, or a tuned run cannot be "
+            "given the heads its untuned twin already honours"
+        )
+        tuning_module = importlib.import_module("qbiocode.evaluation.model_run")
+        assert "classical_models" in tuning_module._QUANTUM_PASSTHROUGH.get("qpl", ()), (
+            "model_run must forward classical_models from qpl_args on the tuned branch"
+        )
 
 
 # --------------------------------------------------------------------------------------

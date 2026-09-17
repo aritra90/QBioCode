@@ -83,12 +83,10 @@ except Exception as exc:  # noqa: BLE001 -- see above
 
 # ====== Scikit-learn imports ======
 
-from sklearn.model_selection import GridSearchCV
 
 # ====== Additional local imports ======
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
-from qbiocode.learning._grid import build_param_grid
-from qbiocode.learning._tuning import build_search_space, run_study
+from qbiocode.learning._tuning import search_hyperparameters
 
 # ====== Module constants ======
 
@@ -533,29 +531,18 @@ def compute_catboost_opt(
         fixed["min_data_in_leaf"] = min_data_in_leaf
     _resolve_bootstrap(candidates, fixed)
 
-    # Optuna by default; the exhaustive grid stays reachable so a number published
-    # against it can still be reproduced. Both engines are handed the same
-    # `candidates`, so switching `tuner` never changes *which* hyperparameters are
-    # searched -- only how the search spends its fits.
-    if tuner == "grid":
-        search = GridSearchCV(
-            CatBoostClassifier(**fixed),  # type: ignore
-            param_grid=build_param_grid("catboost", candidates),
-            cv=cv,
-        )
-        search.fit(X_train, y_train)
-        best_params = search.best_params_
-    else:
-        best_params = run_study(
-            CatBoostClassifier,
-            build_search_space("catboost", candidates),
-            X_train,
-            y_train,
-            cv=cv,
-            n_trials=n_trials,
-            seed=random_state,
-            fixed=fixed,
-        )
+    best_params = search_hyperparameters(
+        "catboost",
+        CatBoostClassifier,
+        candidates,
+        X_train,
+        y_train,
+        cv=cv,
+        tuner=tuner,
+        n_trials=n_trials,
+        seed=random_state,
+        fixed=fixed,
+    )
     best_catboost = CatBoostClassifier(**best_params, **fixed)  # type: ignore
     best_catboost.fit(X_train, y_train)
 

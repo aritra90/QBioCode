@@ -86,7 +86,8 @@ def _resolve_input_folder(folder_path):
 
 # ====== Scaling and encoding functions imports ======
 from qbiocode import scale_train_test, feature_encoding
-from qbiocode import get_embeddings
+from qbiocode import get_embeddings, resolve_embeddings
+from qbiocode.embeddings import DEFAULT_EMBEDDING_MIN_FEATURES
 from qbiocode.embeddings import check_embedding_name
 # ====== Evaluation functions imports ====
 #from qmlbench.evaluation.dataset_evaluation_no_var_threshold import evaluate2 # use this for moons/circles data, otherwise you'll run into an error with finding no features with minimum variance threshold
@@ -199,6 +200,21 @@ def _validate_config(args, log):
         raise ValueError(
             f"n_jobs must be a non-zero integer (-1 means all cores); got "
             f"{args['n_jobs']!r}."
+        )
+
+    # Validated here rather than left to resolve_embeddings, which runs after the first
+    # dataset has been loaded, split and scaled -- minutes into a run, for a typo.
+    min_features = args.get("embedding_min_features", DEFAULT_EMBEDDING_MIN_FEATURES)
+    if (
+        isinstance(min_features, bool)
+        or not isinstance(min_features, int)
+        or min_features < 0
+    ):
+        raise ValueError(
+            f"embedding_min_features is the feature count a dataset must exceed before "
+            f"an embedding is applied, and must be a non-negative integer; got "
+            f"{min_features!r}. Use 0 to embed regardless of width; omit the key for the "
+            f"default of {DEFAULT_EMBEDDING_MIN_FEATURES}."
         )
 
     embeddings = list(args["embeddings"])
@@ -471,8 +487,36 @@ def main(args):
             if scaler_name != 'None':
                 X_train, X_test = scale_train_test(X_train, X_test, scaling=scaler_name)
         
+            # Skip feature reduction on a dataset too narrow to justify it.
+            #
+            # Resolved per split rather than once per dataset because it reads
+            # X_train.shape[1] -- the width the embedding would actually be fitted on.
+            # That equals the file's feature count today, but deriving it from the array
+            # in hand is what keeps this correct if a future step drops a column.
+            effective_embeddings, skipped_embeddings = resolve_embeddings(
+                args['embeddings'],
+                X_train.shape[1],
+                min_features=args.get(
+                    'embedding_min_features', DEFAULT_EMBEDDING_MIN_FEATURES
+                ),
+            )
+            if skipped_embeddings and iter == 1:
+                # Once per dataset, not once per split: the decision cannot change
+                # between splits of one file, and repeating it `iter` times reads like
+                # a recurring problem rather than a stated policy.
+                log.warning(
+                    f"{file}: {X_train.shape[1]} features is not more than "
+                    f"embedding_min_features="
+                    f"{args.get('embedding_min_features', DEFAULT_EMBEDDING_MIN_FEATURES)}, "
+                    f"so {skipped_embeddings} will NOT be applied and the models run on "
+                    f"the unreduced features instead. Below that width a reduction costs "
+                    f"information without buying anything -- these models encode one "
+                    f"qubit per feature and handle this many directly. To embed anyway, "
+                    f"set embedding_min_features: 0 in the config."
+                )
+
             # Embed the training data and test data separately
-            for embed in args['embeddings']:
+            for embed in effective_embeddings:
                 if embed == 'none':
                     log.info(f"No feature reduction (embedding) applied in this iteration")
                 else:

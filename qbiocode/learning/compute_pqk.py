@@ -456,7 +456,6 @@ def compute_pqk(
     # no way to tell from ModelResults.csv whether a search had run.
     estimator = create_svc_model(args["seed"])
 
-    method_pqk = model
     estimator.fit(projections_train, y_train)
     y_predicted = estimator.predict(projections_test)
     # `auc` is computed from these scores alone, never from y_predicted. The head is a
@@ -481,7 +480,7 @@ def compute_pqk(
         beg_time,
         params=model_params,
         args=args,
-        model=method_pqk,
+        model=model,
         verbose=verbose,
         y_score=y_score,
     )

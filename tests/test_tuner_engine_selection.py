@@ -550,7 +550,11 @@ class TestTheDispatcherSuppliesTheBudgetAndTheSeed:
         X_train, X_test, y_train, y_test = data
         log = []
         module = learner_module("dt")
-        monkeypatch.setattr(module, "run_study", recording(module.run_study, log))
+        monkeypatch.setattr(
+            module,
+            "search_hyperparameters",
+            recording(module.search_hyperparameters, log),
+        )
 
         args = {
             "model": ["dt"],
@@ -684,14 +688,19 @@ class TestTheDispatcherSuppliesTheBudgetAndTheSeed:
         """``_seeded_kwargs`` fills ``random_state``, which becomes the sampler seed.
 
         The journey is ``args['seed']`` -> ``random_state=`` on the ``_opt`` call ->
-        ``seed=`` on ``run_study`` -> ``TPESampler(seed=...)``. Only the last hop was
-        tested before; if any earlier one broke, the sampler would draw from OS entropy
-        and two runs of one config would disagree with nothing to say why.
+        ``seed=`` on ``search_hyperparameters`` -> ``run_study`` ->
+        ``TPESampler(seed=...)``. Only the last hop was tested before; if any earlier one
+        broke, the sampler would draw from OS entropy and two runs of one config would
+        disagree with nothing to say why.
         """
         X_train, X_test, y_train, y_test = data
         log = []
         module = learner_module("rf")
-        monkeypatch.setattr(module, "run_study", recording(module.run_study, log))
+        monkeypatch.setattr(
+            module,
+            "search_hyperparameters",
+            recording(module.search_hyperparameters, log),
+        )
 
         args = {
             "model": ["rf"],
@@ -723,7 +732,11 @@ class TestTheDispatcherSuppliesTheBudgetAndTheSeed:
         X_train, X_test, y_train, y_test = data
         log = []
         module = learner_module("nb")
-        monkeypatch.setattr(module, "run_study", recording(module.run_study, log))
+        monkeypatch.setattr(
+            module,
+            "search_hyperparameters",
+            recording(module.search_hyperparameters, log),
+        )
 
         args = {
             "model": ["nb"],
@@ -742,7 +755,10 @@ class TestTheDispatcherSuppliesTheBudgetAndTheSeed:
             f"naive Bayes takes no random_state, so args['seed'] has to be read from the "
             f"config by the learner itself: {entry}"
         )
-        assert entry["fixed"] == {}, "GaussianNB has nothing to fix; see compute_nb_opt"
+        assert not entry.get("fixed"), (
+            f"GaussianNB has nothing to fix, so compute_nb_opt must pass no estimator "
+            f"settings -- an absent or empty 'fixed'; see compute_nb_opt: {entry}"
+        )
 
     @pytest.mark.parametrize(
         "model,block",

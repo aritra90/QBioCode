@@ -64,7 +64,9 @@ from qbiocode.evaluation.task_spectrum import (
     TASK_FEATURES,
     Z_CLIP,
     _centred,
+    _h0_fragmentation,
     _laplacian_basis,
+    _mst_total_weight,
     _mutual_knn_affinity,
     _pairwise_sq_distances,
     get_task_spectrum_features,
@@ -622,12 +624,39 @@ class TestDegenerateInput:
         with pytest.raises(ValueError, match="NaN or inf"):
             get_task_spectrum_features(X, [0] * 10 + [1] * 10)
 
-    def test_one_permutation_cannot_give_a_null_sd(self):
+    @pytest.mark.parametrize("n_permutations", [1, -1, -100])
+    def test_a_permutation_count_that_cannot_give_a_null_sd_is_refused(self, n_permutations):
+        """Both spellings of "not enough draws", and both named as such.
+
+        ``1`` was already refused. A negative count was not: it is truthy, so it reached
+        ``np.empty(n_permutations)`` and came back as numpy's "negative dimensions are not
+        allowed" -- a message about an array the caller never mentioned, naming neither
+        the argument nor the two values that are allowed. Parametrized rather than added
+        as a second test so the two cases cannot drift apart in their message.
+        """
         rng = np.random.default_rng(15)
         with pytest.raises(ValueError, match="cannot give a null standard deviation"):
             get_task_spectrum_features(
-                rng.normal(size=(20, 3)), [0] * 10 + [1] * 10, n_permutations=1
+                rng.normal(size=(20, 3)), [0] * 10 + [1] * 10, n_permutations=n_permutations
             )
+
+    def test_the_pooled_mst_is_hoisted_without_changing_a_single_value(self):
+        """The permutation null reuses one pooled MST; that must be an optimisation only.
+
+        ``h0_fragmentation`` divides the summed within-class MST weight by the pooled one,
+        and the pooled value is a function of the distance matrix alone -- a permutation of
+        ``y`` cannot change it. It used to be recomputed on every draw, which measured at
+        about 60 % of the whole block's runtime. Passing it in has to leave the number
+        identical, so both routes are compared directly rather than trusting that.
+        """
+        rng = np.random.default_rng(16)
+        X = rng.normal(size=(40, 6))
+        y = np.arange(40) % 2
+        D = np.sqrt(_pairwise_sq_distances(X))
+        assert _h0_fragmentation(D, y) == _h0_fragmentation(D, y, _mst_total_weight(D)), (
+            "passing the pooled MST in must be arithmetically identical to computing it "
+            "inside; if it is not, the hoist changed a reported value"
+        )
 
     @pytest.mark.parametrize(
         "name,build",

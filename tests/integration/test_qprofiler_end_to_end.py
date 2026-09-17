@@ -46,6 +46,11 @@ N_COMPONENTS = 2
 
 OVERRIDES = [
     f"embeddings=[{','.join(EMBEDDINGS)}]",
+    # The synthetic dataset is 5 features wide, below the embedding_min_features
+    # default of 18, so the embedding requested above would otherwise be suppressed
+    # and collapsed to a single "none" pass. These tests exist to exercise the
+    # embedding machinery, so they opt out of the threshold the way a user would.
+    "embedding_min_features=0",
     f"model=[{','.join(MODELS)}]",
     f"iter={N_ITER}",
     f"n_components={N_COMPONENTS}",
@@ -99,6 +104,55 @@ class TestTheResultsFile:
     def test_the_models_learned_something(self, run_seed7):
         """The dataset is separable; if the best model is at chance, the pipeline is broken."""
         assert pd.to_numeric(run_seed7["accuracy"]).max() > 0.6
+
+
+@pytest.fixture(scope="session")
+def defaulted_run(tmp_path_factory):
+    """``run_seed7``'s configuration minus the ``embedding_min_features=0`` opt-out."""
+    return run_qprofiler(
+        tmp_path_factory.mktemp("threshold-default"),
+        [
+            f"embeddings=[{','.join(EMBEDDINGS)}]",
+            f"model=[{','.join(MODELS)}]",
+            f"iter={N_ITER}",
+            f"n_components={N_COMPONENTS}",
+            "n_jobs=2",
+            "seed=7",
+        ],
+    )
+
+
+class TestTheEmbeddingThresholdEndToEnd:
+    """The ``embedding_min_features`` default, through the real CLI and config.
+
+    Every other fixture in this module passes ``embedding_min_features=0`` so it can
+    exercise the embedding machinery on 5-feature synthetic data. This class is the
+    counterpart: it leaves the key at its shipped default and checks that the policy
+    actually reaches a run -- otherwise the override in ``OVERRIDES`` would be the only
+    behaviour under test, and the default could break without anything noticing.
+    """
+
+    def test_the_requested_pca_is_suppressed_on_narrow_data(self, defaulted_run):
+        assert N_FEATURES < 18, "this test's premise is that the data is narrow"
+        assert set(defaulted_run["embeddings"]) == {"none"}, (
+            f"{N_FEATURES}-feature data must collapse ['pca', 'none'] to one unreduced "
+            f"pass; got {sorted(set(defaulted_run['embeddings']))}"
+        )
+
+    def test_it_collapses_rather_than_running_none_twice(self, defaulted_run):
+        """The row count is the whole point: one pass, not one no-op pass per name."""
+        assert len(defaulted_run) == N_ITER * len(MODELS), (
+            f"expected {N_ITER * len(MODELS)} rows (one 'none' pass per model per split), "
+            f"got {len(defaulted_run)} -- a duplicated pass means every model was fitted "
+            f"twice on identical data"
+        )
+
+    def test_the_features_are_the_unreduced_ones(self, defaulted_run):
+        assert list(defaulted_run[N_FEATURES_COLUMN].unique()) == [N_FEATURES]
+
+    def test_the_run_still_produces_usable_metrics(self, defaulted_run):
+        """Suppressing the embedding must not degrade the run to nothing."""
+        assert pd.to_numeric(defaulted_run["accuracy"]).max() > 0.6
 
 
 class TestReproducibility:

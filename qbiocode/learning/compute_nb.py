@@ -2,13 +2,11 @@
 
 import time
 
-from sklearn.model_selection import GridSearchCV
 from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 from sklearn.naive_bayes import GaussianNB
 
 # ====== Additional local imports ======
-from qbiocode.learning._grid import build_param_grid
-from qbiocode.learning._tuning import build_search_space, run_study
+from qbiocode.learning._tuning import search_hyperparameters
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Scikit-learn imports ======
@@ -123,33 +121,21 @@ def compute_nb_opt(
     candidates = {
         "var_smoothing": var_smoothing,
     }
-    # Optuna by default; the exhaustive grid stays reachable so a number published
-    # against it can still be reproduced. Both engines are handed the same
-    # `candidates`, so switching `tuner` never changes *which* hyperparameters are
-    # searched -- only how the search spends its fits.
-    if tuner == "grid":
-        search = GridSearchCV(
-            GaussianNB(),
-            param_grid=build_param_grid("nb", candidates),
-            cv=cv,
-        )
-        search.fit(X_train, y_train)
-        best_params = search.best_params_
-    else:
-        best_params = run_study(
-            GaussianNB,
-            build_search_space("nb", candidates),
-            X_train,
-            y_train,
-            cv=cv,
-            n_trials=n_trials,
-            # GaussianNB has no `random_state`, so `model_run._seeded_kwargs` does not
-            # give this function one to pass on. The sampler still needs a seed or a
-            # range over `var_smoothing` would search differently on every run, so read
-            # the run's seed straight off the config.
-            seed=args.get("seed") if isinstance(args, dict) else None,
-            fixed={},
-        )
+    best_params = search_hyperparameters(
+        "nb",
+        GaussianNB,
+        candidates,
+        X_train,
+        y_train,
+        cv=cv,
+        tuner=tuner,
+        n_trials=n_trials,
+        # GaussianNB has no `random_state`, so `model_run._seeded_kwargs` does not give
+        # this function one to pass on, and there is nothing to fix on the estimator.
+        # The sampler still needs a seed or a range over `var_smoothing` would search
+        # differently on every run, so read the run's seed straight off the config.
+        seed=args.get("seed") if isinstance(args, dict) else None,
+    )
     best_nb = GaussianNB(**best_params)
     best_nb.fit(X_train, y_train)
 

@@ -386,6 +386,87 @@ def check_embedding_name(embedding: str) -> str:
     return name
 
 
+#: Feature count a dataset must EXCEED for an embedding to be applied by default.
+#:
+#: Below this width a feature reduction mostly costs information without buying
+#: anything. QProfiler's whole point is comparing models on a dataset's own geometry,
+#: and every quantum learner here already encodes one qubit per feature -- 18 features
+#: is a circuit these models handle directly, so reducing to ``n_components: 3`` first
+#: discards most of the problem and then reports the models' scores on what is left.
+#: The complexity blocks say the same thing from the other side: measured on the
+#: 6-feature ``class_data-1``, PCA to 3 components moves 108 of 115 pyMFE columns, so
+#: what is being profiled after the reduction is largely not the dataset that was
+#: loaded.
+#:
+#: This is a *default*, not a rule -- :func:`resolve_embeddings` takes the threshold as
+#: an argument and ``embedding_min_features: 0`` in the config turns it off entirely.
+DEFAULT_EMBEDDING_MIN_FEATURES = 18
+
+
+def resolve_embeddings(
+    embeddings, n_features, min_features=DEFAULT_EMBEDDING_MIN_FEATURES
+):
+    """Drop feature reductions that a dataset is too narrow to justify.
+
+    Applies the :data:`DEFAULT_EMBEDDING_MIN_FEATURES` policy: an embedding is worth
+    applying only to a dataset with MORE than ``min_features`` features. On a narrower
+    one the requested embeddings collapse to a single ``'none'`` pass, so the models are
+    compared on the features the file actually carries.
+
+    Collapsing to one pass rather than running each name as a no-op is deliberate.
+    ``embeddings: ['pca', 'nmf', 'none']`` on a 6-feature dataset would otherwise fit
+    every model three times on identical data and write three groups of rows
+    distinguished only by an ``embeddings`` column claiming a reduction that did not
+    happen -- three times the runtime for one result, recorded misleadingly.
+
+    Args:
+        embeddings (Iterable[str]): The requested embedding names, in config order.
+        n_features (int): Feature count of the data the embedding would be fitted on.
+        min_features (int or None): Feature count to exceed. ``0``, ``None`` or
+            ``False`` applies every requested embedding whatever the width, which is
+            how a caller asks for an embedding on a narrow dataset deliberately.
+
+    Returns:
+        tuple: ``(effective, skipped)``. ``effective`` is the list to iterate --
+        unchanged when the dataset is wide enough, else ``['none']``. ``skipped`` names
+        what the threshold removed, for the caller to report; it is empty whenever
+        ``effective`` is the input list, and also when the only requested embedding was
+        ``'none'`` already.
+
+    Raises:
+        ValueError: if ``min_features`` is not a non-negative integer.
+
+    Examples:
+        >>> resolve_embeddings(["pca", "none"], n_features=50)
+        (['pca', 'none'], [])
+        >>> resolve_embeddings(["pca", "nmf"], n_features=6)
+        (['none'], ['pca', 'nmf'])
+        >>> resolve_embeddings(["pca"], n_features=6, min_features=0)
+        (['pca'], [])
+    """
+    requested = list(embeddings)
+    if min_features is None or min_features is False:
+        min_features = 0
+    if isinstance(min_features, bool) or not isinstance(min_features, (int, np.integer)):
+        raise ValueError(
+            f"embedding_min_features must be a non-negative integer (0 disables the "
+            f"threshold); got {min_features!r}."
+        )
+    min_features = int(min_features)
+    if min_features < 0:
+        raise ValueError(
+            f"embedding_min_features must be >= 0; got {min_features}. Use 0 to apply "
+            f"every requested embedding regardless of the feature count."
+        )
+    if n_features > min_features:
+        return requested, []
+
+    skipped = [name for name in requested if str(name).lower().strip() != "none"]
+    if not skipped:
+        return requested, []
+    return ["none"], skipped
+
+
 def _quvine_embed(embedding, X_train, X_test, n_components, n_neighbors=30, quvine_args=None):
     """Embed via QuVINE, treating the (train+test) feature matrix as one cell graph.
 
