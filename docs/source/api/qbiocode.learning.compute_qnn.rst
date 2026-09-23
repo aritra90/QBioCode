@@ -7,7 +7,7 @@ qbiocode.learning.compute_qnn module
 .. currentmodule:: qbiocode.learning.compute_qnn
 
 .. automodule:: qbiocode.learning.compute_qnn
-    :members: compute_qnn
+    :members: compute_qnn, compute_qnn_opt
     :undoc-members:
     :show-inheritance:
     :member-order: bysource
@@ -21,6 +21,7 @@ qbiocode.learning.compute_qnn module
         :nosignatures:
 
         compute_qnn
+        compute_qnn_opt
 
 
 

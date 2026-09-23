@@ -351,6 +351,9 @@ QuVINE - Getting Started <tutorials/QuVINE/example_quvine>
 QuVINE on Single-Cell Data <tutorials/QuVINE/quvine_sc_cd4_vs_cd8>
 QuVINE on T vs. Monocyte <tutorials/QuVINE/quvine_sc_t_vs_mono>
 QuVINE Embeddings in QProfiler <tutorials/QProfiler/sc_binary_quvine_2x2_qprofiler>
+Simulator Selection for Projections <tutorials/MPS_vs_Statevector_Scaling>
+MPS vs Statevector in QProfiler <tutorials/QProfiler/qprofiler_mps_head_to_head>
+Quantum vs Classical Baselines <tutorials/QProfiler/quantum_vs_classical_baseline>
 Quantum Ensemble Learning <tutorials/QEnsemble/QEnsemble_example_blobs>
 QSage <tutorials/QSage/qsage>
 Quantum Projection Learning <tutorials/Quantum_Projection_Learning/QPL_example>

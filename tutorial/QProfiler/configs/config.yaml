@@ -22,6 +22,31 @@ index_col: False
 # backend: 'ibm_least'
 backend: 'simulator'
 
+# How the projected-kernel models (pqk, qpl) evaluate their Pauli expectation values on a
+# local simulator. Leave this commented out for the historical behaviour: the
+# StatevectorEstimator primitive, which re-simulates the circuit once PER OBSERVABLE (there
+# are 3 x n_features of them, so ~59x more work than necessary at 20 features).
+#
+# It matters most because ONE FEATURE IS ONE QUBIT. A dense statevector holds 2**n
+# amplitudes, so it runs out of memory near 30 features and is impractical past ~20 on a few
+# hundred samples -- which is why `n_components: 3` below exists. A matrix-product-state
+# backend is linear in feature count for bounded-entanglement feature maps, so you can feed
+# the model hundreds of real features instead of three principal components.
+#
+# Every backend returns the SAME projections (equal to ~1e-14), so this only changes cost.
+#   'auto'          -- fastest measured backend for this feature map (recommended)
+#   'statevector'   -- dense, exact; no extra dependency
+#   'aer_mps'       -- Aer MPS; fastest for reps <= 6
+#   'quimb_mps'     -- quimb MPS; better for deep maps, and reports truncation
+#   'quimb_permmps' -- MPS with lazy qubit permutation; helps entanglement: 'full' only
+#   'quimb_exact'   -- exact tensor-network contraction; best for 'full' past ~24 features
+# Everything except 'statevector' needs:  pip install 'qbiocode[mps]'
+# projection_backend: 'auto'
+
+# Data rows are independent, so the projection parallelises across processes. -1 uses every
+# core. There is a one-time worker startup cost, so this pays from a few hundred rows up.
+# projection_n_jobs: 1
+
 # IBM runtime credentials - they should be in your home directory by default, but if they are elsewhere, please change path below.
 # 'name' should be the account name alias you used when saving your runtime credentials.  This is relevant if you have multiple accounts stored in your json.
 # 'ibm_instance' is the instance with your account under which to run your job.  If not included, it will search for an available instance under your account if you have multiple.

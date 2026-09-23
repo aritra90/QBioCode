@@ -14,6 +14,7 @@ QBioCode provides tools for benchmarking quantum and classical machine learning 
 - **QSage**: Meta-learning tool for intelligent model selection
 - **Data Generation**: Create artificial datasets with controlled complexity
 - **Quantum ML Support**: QSVC, PQK, VQC, QNN, Quantum Ensemble implementations
+- **Scalable Quantum Simulation**: tensor-network (MPS) projection backends for `pqk`/`qpl` via the optional `[mps]` extra — one feature is one qubit, so this lifts the ~20-feature ceiling a dense statevector imposes
 - **Classical ML Baselines**: RF, SVM, LR, DT, NB, MLP, XGBoost, CatBoost, and TabPFN (a pretrained tabular transformer, via the optional `[tabpfn]` extra)
 - **Comprehensive Documentation**: Detailed tutorials and API reference
 
@@ -54,6 +55,7 @@ Everything below is additive, and extras combine (`'qbiocode[apps,quvine]'`).
 | *(none)* | `pip install qbiocode` | Core library: embeddings (`pca`, `nmf`, `umap`, `tsne`, `spectral`, ...), PQK, classical + quantum models, `evaluate_graph`, `scale_train_test` |
 | `apps` | `pip install 'qbiocode[apps]'` | Hydra-driven CLIs for the QProfiler and QSage apps |
 | `quvine` | `pip install 'qbiocode[quvine]'` | QuVINE quantum/classical graph embeddings — 83 methods via `get_embeddings("quvine_*", ...)` |
+| `mps` | `pip install 'qbiocode[mps]'` | Tensor-network projection backends for `pqk`/`qpl` — run quantum models on hundreds of features instead of ~20 |
 | `docs` | `pip install 'qbiocode[docs]'` | Sphinx toolchain for building the documentation |
 | `dev` | `pip install 'qbiocode[dev]'` | `pytest`, `pytest-cov`, `black`, `isort`, `flake8`, `mypy` |
 | `all` | `pip install 'qbiocode[all]'` | Union of every extra above |

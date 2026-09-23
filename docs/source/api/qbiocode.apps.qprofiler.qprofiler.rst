@@ -7,7 +7,7 @@ qbiocode.apps.qprofiler.qprofiler module
 .. currentmodule:: qbiocode.apps.qprofiler.qprofiler
 
 .. automodule:: qbiocode.apps.qprofiler.qprofiler
-    :members: dir_home, main
+    :members: DEFAULT_EMBEDDING_MIN_FEATURES, dir_home, main
     :undoc-members:
     :show-inheritance:
     :member-order: bysource

@@ -7,7 +7,7 @@ qbiocode.visualization.visualize_correlation module
 .. currentmodule:: qbiocode.visualization.visualize_correlation
 
 .. automodule:: qbiocode.visualization.visualize_correlation
-    :members: CorrelationFigures, PUBLICATION_STYLE, compute_results_correlation, plot_results_correlation, publication_style
+    :members: CorrelationFigures, MFE_COLUMN_PREFIX, PUBLICATION_STYLE, QUANTUM_MODELS, compute_results_correlation, plot_results_correlation, publication_style
     :undoc-members:
     :show-inheritance:
     :member-order: bysource

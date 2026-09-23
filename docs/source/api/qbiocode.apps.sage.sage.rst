@@ -7,7 +7,7 @@ qbiocode.apps.sage.sage module
 .. currentmodule:: qbiocode.apps.sage.sage
 
 .. automodule:: qbiocode.apps.sage.sage
-    :members: QuantumSage, calculate_SLGH, main
+    :members: QuantumSage, SAMPLE_COUNT_COLUMN, calculate_SLGH, main
     :undoc-members:
     :show-inheritance:
     :member-order: bysource

@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Tensor-network projection backends: `projection_backend`
+
+- **`projection_backend`, plus the new `[mps]` extra.** `pqk` and `qpl` encode one qubit
+  per feature, and the `StatevectorEstimator` they used stores all `2**n` amplitudes — so
+  they were capped near 20 features on a few hundred samples, and the usual response was to
+  PCA the dataset down to `n_components: 3` first. `projection_backend` selects a
+  matrix-product-state or exact tensor-network simulator instead, whose cost is linear in
+  feature count for bounded-entanglement feature maps:
+
+  ```yaml
+  backend: 'simulator'
+  projection_backend: 'auto'   # or statevector / aer_mps / quimb_mps / quimb_permmps / quimb_exact
+  projection_n_jobs: -1        # rows are independent
+  ```
+
+  `'auto'` applies the measured rule: `aer_mps` for bounded entanglement at `reps <= 6`,
+  `quimb_mps` above that, `statevector` for `entanglement: 'full'` under ~24 features and
+  `quimb_exact` at or above it. Needs `pip install 'qbiocode[mps]'` for anything but
+  `statevector`.
+
+  **This is a performance switch, not a modelling one** — every backend returns the same
+  projections, verified equal to ~1e-14, and the metrics are bit-identical. Omitting the key
+  keeps the previous code path exactly, so existing configs and cached `.npy` projections
+  are unaffected.
+
+  What it buys: on PBMC CD4-vs-CD8 (500 cells), using all 50 genes rather than the 20 a
+  dense statevector can afford raised AUC from 0.948 to 0.974, and the 50-gene job took
+  16.5 s against 234 s for a 20-gene dense run. Two tutorials cover the trade-offs —
+  *Simulator Selection for Projections* and *MPS vs Statevector in QProfiler*.
+
+  Separately, the `StatevectorEstimator` the default path uses re-simulates the circuit
+  once **per observable**, and there are `3 x n_features` of them: measured at 20 features
+  that is a ~59x overhead over computing the same numbers from one `Statevector`. Setting
+  `projection_backend: 'statevector'` removes it with no other change.
+
+### Fixed
+
+- **`compute_pqk` no longer assigns a `classical_models` local it never reads.** Dead code
+  inherited from `compute_qpl`, which does select heads; `compute_pqk` fits SVC alone and
+  offers no such parameter. Nothing behaved differently, but the variable implied a
+  configurable choice that does not exist.
+- **Unused imports removed from `compute_qpl` and `compute_pqk`** — five `sklearn.metrics`
+  helpers, `sklearn.svm`, a duplicate shadowing `GridSearchCV`, and in `compute_pqk` four
+  estimator classes and `pandas`, none of which were referenced. Both modules are now
+  clean under `pyflakes`.
+
+
 #### Embeddings are applied only to a dataset wide enough to justify one
 
 - **`embedding_min_features`, default 18.** An embedding now runs only on a dataset with

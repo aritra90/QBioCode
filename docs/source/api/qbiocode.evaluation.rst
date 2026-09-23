@@ -5,7 +5,9 @@ qbiocode.evaluation package
 ===========================
 
 .. automodule:: qbiocode.evaluation
-    
+    :members: LEGACY_COMPLEXITY_COLUMNS, MFE_FEATURES, NATIVE_COMPLEXITY_COLUMNS, TASK_COLUMN_PREFIX, TASK_FEATURES
+    :undoc-members:
+    :show-inheritance:
 
 
     Submodules:
@@ -30,14 +32,36 @@ qbiocode.evaluation package
 
     .. list-table::
     
+       * - :func:`complexity_feature_columns <qbiocode.evaluation.dataset_evaluation.complexity_feature_columns>`
+         - The complexity feature columns in ``columns``, tolerating an unknown schema.
+       * - :func:`detect_complexity_schema <qbiocode.evaluation.dataset_evaluation.detect_complexity_schema>`
+         - Identify which dataset-complexity schema a results table carries.
        * - :func:`evaluate <qbiocode.evaluation.dataset_evaluation.evaluate>`
-         - This function evaluates a dataset and returns a transposed summary DataFrame with various statistical measures, derived from the dataset.
+         - Summarize a dataset's complexity as a one-row DataFrame.
        * - :func:`evaluation_metrics <qbiocode.evaluation.model_evaluation.evaluation_metrics>`
          - Calculate evaluation metrics for classification predictions.
+       * - :func:`get_mfe_features <qbiocode.evaluation.mfe_features.get_mfe_features>`
+         - Extract the curated pyMFE meta-feature block for one dataset.
+       * - :func:`get_task_spectrum_features <qbiocode.evaluation.task_spectrum.get_task_spectrum_features>`
+         - Describe how the target sits in the geometric spectrum of the features.
        * - :func:`model_run <qbiocode.evaluation.model_run.model_run>`
          - This function runs the ML methods, with or without a grid search, as specified in the config.yaml file.
        * - :func:`modeleval <qbiocode.evaluation.model_evaluation.modeleval>`
-         - Evaluates the model performance using accuracy, F1 score, and AUC.
+         - Evaluates the model performance using accuracy, F1 score, and ROC AUC.
+       * - :func:`task_column_names <qbiocode.evaluation.task_spectrum.task_column_names>`
+         - Column names :func:`get_task_spectrum_features` produces, without computing them.
     
 
+    ``__all__`` Data:
 
+
+    * :data:`LEGACY_COMPLEXITY_COLUMNS <LEGACY_COMPLEXITY_COLUMNS>`
+    * :data:`MFE_FEATURES <MFE_FEATURES>`
+    * :data:`NATIVE_COMPLEXITY_COLUMNS <NATIVE_COMPLEXITY_COLUMNS>`
+    * :data:`TASK_COLUMN_PREFIX <TASK_COLUMN_PREFIX>`
+    * :data:`TASK_FEATURES <TASK_FEATURES>`
+
+
+
+    Reference
+    ---------

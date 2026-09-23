@@ -7,7 +7,7 @@ qbiocode.utils.tabpfn_account module
 .. currentmodule:: qbiocode.utils.tabpfn_account
 
 .. automodule:: qbiocode.utils.tabpfn_account
-    :members: DEFAULT_TOKEN_PATH, ENV_VAR, PLACEHOLDER, check_tabpfn_access, describe_token_source, load_tabpfn_token, write_token_template
+    :members: ENV_VAR, PLACEHOLDER, check_tabpfn_access, describe_token_source, load_tabpfn_token, write_token_template
     :undoc-members:
     :show-inheritance:
     :member-order: bysource

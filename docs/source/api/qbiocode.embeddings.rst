@@ -5,7 +5,7 @@ qbiocode.embeddings package
 ===========================
 
 .. automodule:: qbiocode.embeddings
-    :members: QUVINE_HEADLINE_METHODS, QUVINE_METHODS, SKLEARN_METHODS
+    :members: DEFAULT_EMBEDDING_MIN_FEATURES, QUVINE_HEADLINE_METHODS, QUVINE_METHODS, SKLEARN_METHODS
     :undoc-members:
     :show-inheritance:
 
@@ -45,11 +45,14 @@ qbiocode.embeddings package
          - Return True if ``embedding`` is fit on the combined train and test rows.
        * - :func:`pqk <qbiocode.embeddings.embed.pqk>`
          - This function generates quantum circuits, computes projections of the data onto these circuits.
+       * - :func:`resolve_embeddings <qbiocode.embeddings.embed.resolve_embeddings>`
+         - Drop feature reductions that a dataset is too narrow to justify.
     
 
     ``__all__`` Data:
 
 
+    * :data:`DEFAULT_EMBEDDING_MIN_FEATURES <DEFAULT_EMBEDDING_MIN_FEATURES>`
     * :data:`QUVINE_HEADLINE_METHODS <QUVINE_HEADLINE_METHODS>`
     * :data:`QUVINE_METHODS <QUVINE_METHODS>`
     * :data:`SKLEARN_METHODS <SKLEARN_METHODS>`

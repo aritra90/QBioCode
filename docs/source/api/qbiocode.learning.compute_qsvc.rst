@@ -7,7 +7,7 @@ qbiocode.learning.compute_qsvc module
 .. currentmodule:: qbiocode.learning.compute_qsvc
 
 .. automodule:: qbiocode.learning.compute_qsvc
-    :members: compute_qsvc
+    :members: compute_qsvc, compute_qsvc_opt
     :undoc-members:
     :show-inheritance:
     :member-order: bysource
@@ -21,6 +21,7 @@ qbiocode.learning.compute_qsvc module
         :nosignatures:
 
         compute_qsvc
+        compute_qsvc_opt
 
 
 

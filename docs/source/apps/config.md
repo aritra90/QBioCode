@@ -198,6 +198,82 @@ When using `'simulator_aer'` or `'noisy_<device_name>'` backends, specify the si
 **Resilience Level:** Error mitigation strength (1=light, 2=medium, 3=heavy). Higher = more accurate but slower.
 ```
 
+### Projection Backend: how many features a quantum model can afford
+
+`projection_backend` selects *how* the projected-kernel models (`pqk`, `qpl`) evaluate
+their Pauli expectation values on a local simulator. It changes cost only — every backend
+returns the same numbers, verified equal to ~1e-14 — so it is a performance switch, not a
+modelling one.
+
+It matters because **one feature is one qubit.** The default path stores all `2**n`
+amplitudes, so it runs out of memory near 30 qubits and becomes impractical past about 20
+on a few hundred samples. That is a hard cap on how many features a `pqk`/`qpl` model can
+use, and the usual workaround — PCA down to `n_components: 3` — throws most of the dataset
+away before the model sees it. Matrix-product-state backends are *linear* in qubit count
+for bounded-entanglement feature maps, which lifts the cap to hundreds of features.
+
+```yaml
+backend: 'simulator'          # required: these backends are local
+projection_backend: 'auto'    # omit entirely to keep the historical behaviour
+projection_n_jobs: 1          # rows are independent; -1 uses every core
+```
+
+Requires the `[mps]` extra for every value except `statevector`:
+
+```bash
+pip install 'qbiocode[mps]'
+```
+
+```{note}
+**Projection Backend Options:**
+- *omitted* (the default): the `StatevectorEstimator` primitive, exactly as before. Kept
+  as the default so existing configs and cached projections are unaffected.
+- `'auto'`: pick the fastest measured backend for this feature map. Recommended.
+- `'statevector'`: dense `2**n` statevector, one simulation per sample. Same result as the
+  default at a fraction of the cost — the primitive re-simulates the circuit once *per
+  observable*, and there are `3 x n_features` of them.
+- `'aer_mps'`: Aer's matrix-product-state method. Fastest for `reps <= 6`.
+- `'quimb_mps'`: quimb's MPS. Degrades far more gracefully with `reps`; use it for deep
+  feature maps. Also the only option that reports whether it truncated.
+- `'quimb_permmps'`: MPS with lazily tracked qubit permutation. A modest win on
+  `entanglement: 'full'` only.
+- `'quimb_exact'`: exact tensor-network contraction, no truncation. The fastest option for
+  `entanglement: 'full'` once the circuit is wide enough that a dense statevector cannot
+  cope.
+```
+
+**Which backend wins depends on the feature map, not on the data.** `'auto'` encodes the
+measured rule:
+
+| feature map | fastest backend |
+|---|---|
+| `entanglement` in `linear`, `reverse_linear`, `pairwise`, `circular`, `sca`; `reps <= 6` | `aer_mps` |
+| the same patterns with `reps >= 7` | `quimb_mps` |
+| `entanglement: 'full'`, under ~24 features | `statevector` |
+| `entanglement: 'full'`, ~24 features or more | `quimb_exact` |
+
+The reason the entanglement pattern decides this is that an MPS is only cheap when the
+state's entanglement is bounded. `linear`-style patterns entangle neighbours only, and the
+bond dimension stays at 2 regardless of width. `entanglement: 'full'` makes every pair
+interact, which is precisely the state an MPS cannot compress — there, an MPS is *slower*
+than the dense statevector.
+
+```{warning}
+`max_bond` caps the bond dimension and makes an MPS cheap on a state it cannot otherwise
+compress, but it does so by discarding part of the state, and **nothing raises**. The
+projections simply become approximate. `compute_qpl`/`compute_pqk` warn when the fidelity
+estimate drops below 0.999; treat any such run's metrics as approximate and report the
+fidelity alongside them. On `entanglement: 'full'` there is no useful operating point —
+measured at 20 features, a cap of 128 out of an exact 156 still loses a third of the state.
+```
+
+See {doc}`Tutorial Notebooks <../tutorials>` for two notebooks on this: *Simulator Selection for Projections*
+benchmarks every backend across qubit count, `reps` and entanglement pattern, and *MPS vs
+Statevector in QProfiler* runs the comparison end to end on a single-cell classification
+task. Note that the AUC gain there comes from using more genes, not from the quantum
+projection: a matched classical baseline on the same raw genes does at least as well, so
+on that dataset MPS buys feasibility and speed rather than accuracy.
+
 ### Embedding Methods
 
 Dimensionality reduction techniques to apply before model training.

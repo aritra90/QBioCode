@@ -1,0 +1,36 @@
+# ==========================================================================
+# Tensor-network projection backends -- the [mps] extra
+# ==========================================================================
+# Installs the dependency set for qbiocode.utils.mps_backend and
+# qbiocode.utils.projection, which add matrix-product-state and exact
+# tensor-network simulators to the projected-kernel paths (compute_qpl,
+# compute_pqk) via `args['projection_backend']`.
+#
+#   pip install "qbiocode[mps]"           # from a release/checkout
+#   pip install -r requirements/requirements-mps.txt
+#
+# An extra rather than a base dependency because nothing needs it to run: with
+# `projection_backend` unset, both paths use the dense StatevectorEstimator
+# exactly as before, and `import qbiocode` never imports quimb. The projectors
+# raise an ImportError naming this file if a backend is selected without it.
+#
+# WHY YOU WOULD WANT IT: the dense statevector stores 2**n amplitudes, so it runs
+# out of memory near 30 qubits and is impractical past ~20 on a few hundred rows.
+# One qubit is one feature, so that is a hard cap on how many features a
+# projected-kernel model can use. The MPS backends are linear in qubit count for
+# bounded-entanglement feature maps ('linear', 'reverse_linear', 'pairwise',
+# 'circular', 'sca'), which lifts the cap to hundreds of features.
+# See tutorial/MPS_vs_Statevector_Scaling.ipynb for which backend wins where, and
+# tutorial/QProfiler/qprofiler_mps_head_to_head.ipynb for the effect on a real task.
+#
+# `cotengra` is quimb's contraction-path optimiser. qbiocode never imports it
+# directly, but `import quimb` fails without it, so it is pinned here rather than
+# left to quimb's own metadata.
+#
+# This list mirrors the `mps` entry in pyproject.toml's
+# [project.optional-dependencies]; tests/test_requirements_consistency.py
+# asserts the two stay identical.
+# ==========================================================================
+
+quimb>=1.11
+cotengra>=0.7

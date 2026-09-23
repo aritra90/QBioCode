@@ -5,7 +5,7 @@ qbiocode package
 ================
 
 .. automodule:: qbiocode
-    :members: QUVINE_HEADLINE_METHODS, QUVINE_METHODS, SKLEARN_METHODS
+    :members: DEFAULT_EMBEDDING_MIN_FEATURES, QUVINE_HEADLINE_METHODS, QUVINE_METHODS, SKLEARN_METHODS
     :undoc-members:
     :show-inheritance:
 
@@ -64,10 +64,20 @@ qbiocode package
          - This function generates a model using a Gaussian Naive Bayes (NB) Classifier method as implemented in `scikit-learn <https://scikit-learn.org/stable/modules/generated/sklearn.naive_bayes.GaussianNB.html>`__.
        * - :func:`compute_pqk <qbiocode.learning.compute_pqk.compute_pqk>`
          - This function generates quantum circuits, computes projections of the data onto these circuits, and evaluates the performance of classical machine learning models on the projected data.
+       * - :func:`compute_pqk_opt <qbiocode.learning.compute_pqk.compute_pqk_opt>`
+         - Tune PQK's hyperparameters with Optuna, then run it at the best ones found.
        * - :func:`compute_qnn <qbiocode.learning.compute_qnn.compute_qnn>`
          - This function computes a Quantum Neural Network (QNN) model on the provided training data and evaluates it on the test data.
+       * - :func:`compute_qnn_opt <qbiocode.learning.compute_qnn.compute_qnn_opt>`
+         - Tune QNN's hyperparameters with Optuna, then run it at the best ones found.
+       * - :func:`compute_qpl <qbiocode.learning.compute_qpl.compute_qpl>`
+         - This function generates quantum circuits, computes projections of the data onto these circuits, and evaluates the performance of classical machine learning models on the projected data.
+       * - :func:`compute_qpl_opt <qbiocode.learning.compute_qpl.compute_qpl_opt>`
+         - Tune QPL's hyperparameters with Optuna, then run it at the best ones found.
        * - :func:`compute_qsvc <qbiocode.learning.compute_qsvc.compute_qsvc>`
          - This function computes a quantum support vector classifier (QSVC) using the Qiskit Machine Learning library.
+       * - :func:`compute_qsvc_opt <qbiocode.learning.compute_qsvc.compute_qsvc_opt>`
+         - Tune QSVC's hyperparameters with Optuna, then run it at the best ones found.
        * - :func:`compute_results_correlation <qbiocode.visualization.visualize_correlation.compute_results_correlation>`
          - This function takes in as input a Pandas Dataframe containing the results and data evaluations for a given dataset.
        * - :func:`compute_rf <qbiocode.learning.compute_rf.compute_rf>`
@@ -78,18 +88,20 @@ qbiocode package
          - This function generates a model using a Support Vector Classifier (SVC) method as implemented in `scikit-learn <https://scikit-learn.org/stable/modules/generated/sklearn.svm.SVC.html>`__.
        * - :func:`compute_svc_opt <qbiocode.learning.compute_svc.compute_svc_opt>`
          - This function generates a model using a Support Vector Classifier (SVC) method as implemented in `scikit-learn <https://scikit-learn.org/stable/modules/generated/sklearn.svm.SVC.html>`__.
-       * - :func:`compute_vqc <qbiocode.learning.compute_vqc.compute_vqc>`
-         - This function computes a Variational Quantum Classifier (VQC) using the Qiskit Machine Learning library.
        * - :func:`compute_tabpfn <qbiocode.learning.compute_tabpfn.compute_tabpfn>`
          - This function generates a model using `TabPFN <https://github.com/PriorLabs/TabPFN>`__, a transformer pretrained on synthetic tabular tasks that classifies by in-context learning rather than by fitting parameters to your data.
        * - :func:`compute_tabpfn_opt <qbiocode.learning.compute_tabpfn.compute_tabpfn_opt>`
          - This function also generates a model using `TabPFN <https://github.com/PriorLabs/TabPFN>`__.
+       * - :func:`compute_vqc <qbiocode.learning.compute_vqc.compute_vqc>`
+         - This function computes a Variational Quantum Classifier (VQC) using the Qiskit Machine Learning library.
+       * - :func:`compute_vqc_opt <qbiocode.learning.compute_vqc.compute_vqc_opt>`
+         - Tune VQC's hyperparameters with Optuna, then run it at the best ones found.
        * - :func:`compute_xgb <qbiocode.learning.compute_xgb.compute_xgb>`
          - This function generates a model using an Extreme Gradient Boositing (xgb) Classifier method as implemented in xgboost.
        * - :func:`compute_xgb_opt <qbiocode.learning.compute_xgb.compute_xgb_opt>`
          - This function generates a model using an Extreme Gradient Boositing (xgb) Classifier method as implemented in xgboost.
        * - :func:`evaluate <qbiocode.evaluation.dataset_evaluation.evaluate>`
-         - This function evaluates a dataset and returns a transposed summary DataFrame with various statistical measures, derived from the dataset.
+         - Summarize a dataset's complexity as a one-row DataFrame.
        * - :func:`evaluate_graph <qbiocode.evaluation.graph_evaluation.evaluate_graph>`
          - Summarize a graph's complexity as a one-row DataFrame.
        * - :func:`feature_encoding <qbiocode.utils.helper_fn.feature_encoding>`
@@ -117,7 +129,7 @@ qbiocode package
        * - :func:`model_run <qbiocode.evaluation.model_run.model_run>`
          - This function runs the ML methods, with or without a grid search, as specified in the config.yaml file.
        * - :func:`modeleval <qbiocode.evaluation.model_evaluation.modeleval>`
-         - Evaluates the model performance using accuracy, F1 score, and AUC.
+         - Evaluates the model performance using accuracy, F1 score, and ROC AUC.
        * - :func:`plot_results_correlation <qbiocode.visualization.visualize_correlation.plot_results_correlation>`
          - Plot publication-quality correlation figures from a ``correlations_df``.
        * - :func:`pqk <qbiocode.embeddings.embed.pqk>`
@@ -126,6 +138,8 @@ qbiocode package
          - Return a copy of :data:`PUBLICATION_STYLE` for use as a matplotlib style.
        * - :func:`qml_winner <qbiocode.utils.qc_winner_finder.qml_winner>`
          - This function finds data sets where QML was beneficial (higher F1 scores than CML) and create new .csv files with the relevant evaluation and performance for these specific datasets, for further analysis.
+       * - :func:`resolve_embeddings <qbiocode.embeddings.embed.resolve_embeddings>`
+         - Drop feature reductions that a dataset is too narrow to justify.
        * - :func:`scale_train_test <qbiocode.utils.helper_fn.scale_train_test>`
          - Scale train and test with a single scaler fit on the training set only.
        * - :func:`scaler_fn <qbiocode.utils.helper_fn.scaler_fn>`
@@ -139,6 +153,7 @@ qbiocode package
     ``__all__`` Data:
 
 
+    * :data:`DEFAULT_EMBEDDING_MIN_FEATURES <DEFAULT_EMBEDDING_MIN_FEATURES>`
     * :data:`QUVINE_HEADLINE_METHODS <QUVINE_HEADLINE_METHODS>`
     * :data:`QUVINE_METHODS <QUVINE_METHODS>`
     * :data:`SKLEARN_METHODS <SKLEARN_METHODS>`

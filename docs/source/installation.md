@@ -51,6 +51,7 @@ models. Everything below is additive.
 | `apps` | `pip install 'qbiocode[apps]'` | Hydra-driven CLIs for the QProfiler and QSage apps (`hydra-core`, `joblib`) |
 | `quvine` | `pip install 'qbiocode[quvine]'` | QuVINE quantum/classical graph embeddings — 83 methods reachable through `get_embeddings("quvine_*", ...)` |
 | `tabpfn` | `pip install 'qbiocode[tabpfn]'` | The `tabpfn` classical model — a pretrained tabular transformer. No API key or license acceptance needed for the pinned default; see below |
+| `mps` | `pip install 'qbiocode[mps]'` | Tensor-network projection backends for `pqk`/`qpl` (`quimb`, `cotengra`) — lifts the ~20-feature ceiling the dense statevector imposes, since one feature is one qubit |
 | `docs` | `pip install 'qbiocode[docs]'` | Sphinx toolchain for building this documentation locally |
 | `dev` | `pip install 'qbiocode[dev]'` | `pytest`, `pytest-cov`, `black`, `isort`, `flake8`, `mypy` |
 | `all` | `pip install 'qbiocode[all]'` | Union of every extra above |
@@ -188,6 +189,40 @@ below).
 TabPFN supports at most **10 classes**. Unlike its row and feature limits, that ceiling
 is fixed by the checkpoint and is not waived by `ignore_pretraining_limits`.
 ```
+
+### Tensor-network projection backends (`[mps]`)
+
+`pqk` and `qpl` project each sample onto Pauli expectation values of a feature-map
+circuit, and that circuit uses **one qubit per feature**. The default simulator stores all
+`2**n` amplitudes, so it exhausts memory near 30 features and is impractical past about 20
+on a few hundred samples — which is why these pipelines usually reduce to
+`n_components: 3` first.
+
+The `[mps]` extra adds matrix-product-state and exact tensor-network simulators, whose
+cost is *linear* in feature count for bounded-entanglement feature maps:
+
+```bash
+pip install 'qbiocode[mps]'
+```
+
+Then set `projection_backend` in your config (see
+{doc}`QProfiler Configuration <apps/config>`):
+
+```yaml
+backend: 'simulator'
+projection_backend: 'auto'
+```
+
+Every backend returns the same projections — verified equal to ~1e-14 — so this is a
+performance switch only. Without the extra, `import qbiocode` and both models keep working
+exactly as before; the projectors raise an `ImportError` naming this extra if a backend is
+selected without it.
+
+On a PBMC CD4-vs-CD8 classification this lifts the model from 20 genes to all 50, which
+raises AUC from 0.948 to 0.974 — though a matched classical baseline on the same raw genes
+does at least as well, so the gain is attributable to the extra features rather than to the
+quantum projection. See the *Simulator Selection for Projections*, *MPS vs Statevector in
+QProfiler* and *Quantum vs Classical Baselines* tutorials.
 
 ## Install with Conda
 

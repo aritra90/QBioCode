@@ -7,7 +7,7 @@ qbiocode.learning.compute_vqc module
 .. currentmodule:: qbiocode.learning.compute_vqc
 
 .. automodule:: qbiocode.learning.compute_vqc
-    :members: compute_vqc
+    :members: compute_vqc, compute_vqc_opt
     :undoc-members:
     :show-inheritance:
     :member-order: bysource
@@ -21,6 +21,7 @@ qbiocode.learning.compute_vqc module
         :nosignatures:
 
         compute_vqc
+        compute_vqc_opt
 
 
 

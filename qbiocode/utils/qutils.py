@@ -3,6 +3,7 @@ from qiskit_ibm_runtime.qiskit_runtime_service import QiskitRuntimeService
 
 import logging
 import math
+import warnings
 import os
 import re
 from functools import reduce
@@ -31,6 +32,8 @@ from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime import Session
 from qiskit_ibm_transpiler.transpiler_service import TranspilerService
 from qiskit_aer import AerSimulator
+from qiskit_aer.primitives import EstimatorV2 as AerEstimatorV2
+from qiskit_aer.primitives import SamplerV2 as AerSamplerV2
 
 from qbiocode.utils.ibm_account import instantiate_runtime_service
 
@@ -57,7 +60,7 @@ def get_backend_session(args: dict, primitive: str, num_qubits: int):
     # into a notebook: these keys are the caller's contract, and the message has
     # to name which one is missing and what it is for.
     required = ["backend"]
-    if args.get("backend") == "simulator":
+    if args.get("backend") in ("simulator", "simulator_aer"):
         required.append("seed")
         if primitive != "estimator":
             required.append("shots")
@@ -79,11 +82,65 @@ def get_backend_session(args: dict, primitive: str, num_qubits: int):
             prim = StatevectorEstimator(seed=args["seed"])
         else:
             prim = StatevectorSampler(seed=args["seed"], default_shots=args["shots"])
-    elif ("ibm" in args["backend"]) or (args["backend"] == "simulator_aer"):
+    elif args["backend"] == "simulator_aer":
+        # Purely LOCAL Aer simulation. Two bugs used to make this branch unreachable:
+        #
+        #   * it called ``AerSimulator.from_backend(method=...)`` with no backend, and
+        #     ``from_backend(backend, **options)`` needs one -- so every use raised
+        #     ``TypeError: missing 1 required positional argument: 'backend'``. There is
+        #     no backend to copy here: a plain local simulator is ``AerSimulator(...)``,
+        #     and ``from_backend`` exists to clone a *device's* noise model, which is
+        #     what the ``noisy_*`` branch below legitimately does.
+        #   * it went through ``instantiate_runtime_service`` first, so a local,
+        #     noiseless simulation demanded IBM Quantum credentials.
+        #
+        # Between them, the documented way to select a simulation method -- and therefore
+        # the only route to MPS simulation for qsvc/vqc/qnn -- could not run at all.
+        method = args.get("sim_method", "automatic")
+        if method not in SUPPORTED_SIM_METHODS:
+            raise ValueError(
+                f"Unsupported sim_method {method!r} for backend 'simulator_aer'. "
+                f"Expected one of {SUPPORTED_SIM_METHODS}. Use "
+                f"'matrix_product_state' to simulate feature maps wider than the ~30 "
+                f"qubits a statevector can hold."
+            )
+        backend = AerSimulator(method=method)
+        # No Session: a Session belongs to the runtime service and cannot wrap a local
+        # backend. Aer's own primitives run the circuits in-process instead.
+        backend_options = {"backend_options": {"method": method}}
+        if primitive == "estimator":
+            # MEASURED CAVEAT, not a theoretical one. Aer's EstimatorV2 is exact and
+            # deterministic when driven directly -- five repeats of one pub agree to
+            # 0.0e+00 and match StatevectorEstimator to 2e-17, with
+            # options.default_precision == 0.0 so no sampling noise is added. But
+            # qiskit-machine-learning's EstimatorQNN driving it is NOT reproducible:
+            # three forward() calls on identical inputs and fixed weights spread by
+            # ~3e-2, where the same QNN on StatevectorEstimator spreads by exactly
+            # 0.0. The cause is in how EstimatorQNN drives the primitive, not in the
+            # primitive; it has not been root-caused, so a `qnn` run on this backend
+            # cannot be reproduced and its metrics should not be compared against a
+            # 'simulator' run. `qsvc` is unaffected (12/12 identical predictions
+            # across simulator / Aer statevector / Aer MPS).
+            warnings.warn(
+                "backend='simulator_aer' with the estimator primitive is not "
+                "reproducible: qiskit-machine-learning's EstimatorQNN driving Aer's "
+                "EstimatorV2 returns different values for identical inputs "
+                "(measured spread ~3e-2, versus exactly 0 on backend='simulator'). "
+                "Aer's estimator is exact when called directly, so this is an "
+                "integration problem that has not been root-caused. Use "
+                "backend='simulator' for 'qnn' unless you have verified this on your "
+                "own configuration; for wide feature maps in 'pqk'/'qpl', prefer "
+                "projection_backend, which is verified exact.",
+                RuntimeWarning,
+            )
+            prim = AerEstimatorV2(options=backend_options)
+        else:
+            prim = AerSamplerV2(
+                default_shots=args["shots"], seed=args["seed"], options=backend_options
+            )
+    elif "ibm" in args["backend"]:
         service: QiskitRuntimeService = instantiate_runtime_service(args)
-        if args["backend"] == "simulator_aer":
-            backend = AerSimulator.from_backend(method = args['sim_method'])
-        elif "noisy" in args["backend"]:
+        if "noisy" in args["backend"]:
             noisy_backend_name = re.sub("noisy_", "", args["backend"])
             backend = AerSimulator.from_backend(service.backend(name=noisy_backend_name), method = args['sim_method'])
         else:
@@ -254,6 +311,31 @@ def get_ansatz(ansatz_type, feat_dimension, reps=1, entanglement="linear"):
         ansatz = TwoLocal(feat_dimension, ["ry", "rz"], "cz", entanglement, reps=reps)
     return ansatz
 
+
+#: Local simulation methods ``args['sim_method']`` may name with
+#: ``backend: 'simulator_aer'``. These reach **every** quantum model -- qsvc, vqc, qnn,
+#: pqk and qpl -- because all five obtain their primitive from
+#: :func:`get_backend_session`, so the choice of simulator is made in one place and is
+#: independent of which primitive a given model needs.
+#:
+#: ``'matrix_product_state'`` is the one worth knowing about: the default statevector
+#: methods store all ``2**n`` amplitudes, so they exhaust memory near 30 qubits, and one
+#: feature is one qubit. An MPS is linear in qubit count whenever the circuit's
+#: entanglement stays bounded, which for these feature maps means any ``entanglement``
+#: other than ``'full'``. See ``docs/source/apps/config.md``.
+#:
+#: Note that ``pqk``/``qpl`` have a second, more direct route -- ``projection_backend``,
+#: which bypasses the primitive entirely because those two models need only per-qubit
+#: Pauli expectation values. ``sim_method`` is the route that works for all five.
+SUPPORTED_SIM_METHODS = (
+    "automatic",
+    "statevector",
+    "matrix_product_state",
+    "density_matrix",
+    "stabilizer",
+    "extended_stabilizer",
+    "tensor_network",
+)
 
 #: Feature-map names accepted by :func:`get_feature_map`, in the spelling the
 #: config files use. Exported so callers can validate at their own boundary --

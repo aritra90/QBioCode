@@ -8,8 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, auc, classification_report, confusion_matrix, f1_score
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.model_selection import RandomizedSearchCV
 from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
 
@@ -47,8 +46,6 @@ from functools import reduce
 # ====== Qiskit imports ======
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import Pauli
-from sklearn import svm
-from sklearn.model_selection import GridSearchCV
 
 import qbiocode.utils.qutils as qutils
 
@@ -120,8 +117,6 @@ def compute_qpl(
             optional ``[tabpfn]`` extra, so defaulting it on would make every QPL run warn
             in an ordinary install. Name it explicitly to use it. It needs no API token:
             QBioCode pins the ungated ``v2`` weights.
-                                 Options: 'rf', 'mlp', 'svc', 'lr', 'xgb'.
-                                 Default is ['rf', 'mlp', 'svc', 'lr', 'xgb'].
 
     Returns:
         modeleval (pd.DataFrame): A DataFrame containing evaluation metrics and model parameters for all models.
@@ -153,8 +148,18 @@ def compute_qpl(
     projection_dir = os.path.expanduser(args.get("qpl_projection_dir", "qpl_projections"))
     os.makedirs(projection_dir, exist_ok=True)
 
+    # `projection_backend` joins the fingerprint ONLY when it is set. It has to be in
+    # there for a head-to-head: without it the second and third backends load the first
+    # one's cached projection, which makes their timings meaningless and their agreement
+    # tautological. But appending a bare `None` would change every legacy hash too, and
+    # that silently orphans the projection caches already on disk (88 .npy files ship in
+    # this repo alone) -- a slow surprise, not a wrong answer, but avoidable.
+    fingerprint_parts = (encoding, entanglement, reps, primitive, feat_dimension)
+    _projection_backend = args.get("projection_backend")
+    if _projection_backend:
+        fingerprint_parts = fingerprint_parts + (_projection_backend,)
     feature_map_fingerprint = hashlib.sha256(
-        repr((encoding, entanglement, reps, primitive, feat_dimension)).encode()
+        repr(fingerprint_parts).encode()
     ).hexdigest()[:10]
 
     file_projection_train = os.path.join(
@@ -217,91 +222,142 @@ def compute_qpl(
 
     if (not os.path.exists(file_projection_train)) | (not os.path.exists(file_projection_test)):
 
-        #  Generate the backend, session and primitive
-        backend, session, prim = qutils.get_backend_session(
-            args, "estimator", num_qubits=num_qubits
-        )
+        projection_backend = args.get("projection_backend")
+        if projection_backend:
+            # Local simulator path: one state preparation per row, all 3n expectation
+            # values read off it. The branch below instead calls StatevectorEstimator,
+            # which re-simulates the circuit once PER OBSERVABLE -- a ~3n-fold overhead
+            # unrelated to simulation method. Kept as the default only for hardware and
+            # for backwards compatibility.
+            if args["backend"] != "simulator":
+                raise ValueError(
+                    f"projection_backend={projection_backend!r} runs on a local "
+                    f"simulator, but backend={args['backend']!r} selects remote or "
+                    f"noisy execution. Set backend: 'simulator', or remove "
+                    f"projection_backend to use the runtime primitive."
+                )
+            from qbiocode.utils.projection import make_projector
 
-        # Transpile
-        if args["backend"] != "simulator":
-            circuit = qutils.transpile_circuit(
-                circuit, opt_level=3, backend=backend, PT=True, initial_layout=None
+            projector = make_projector(
+                feat_dimension, encoding=encoding, reps=reps,
+                entanglement=entanglement, backend=projection_backend,
+                data_map_func=data_map_func,
+            )
+            for f_tr in [file_projection_train, file_projection_test]:
+                if os.path.exists(f_tr):
+                    continue
+                dat = X_train.copy() if "train" in f_tr else X_test.copy()
+                projections = projector.project(
+                    dat, progress_every=100, n_jobs=args.get("projection_n_jobs", 1)
+                )
+                # Reverse the qubit axis. The legacy path builds its observables as
+                # Pauli(id[:i] + "X" + id[i+1:]), indexing by STRING POSITION -- and in a
+                # qiskit Pauli label the rightmost character is qubit 0, so its
+                # observables_x[i] is X on qubit n-1-i. projection.py indexes by qubit
+                # number. Without this flip the projected columns come out mirrored:
+                # numerically self-consistent, identical downstream accuracy (a fixed
+                # permutation of features), but NOT byte-identical to previously cached
+                # projections or to a legacy-path run -- so `projection_backend` would
+                # silently stop being a drop-in. Verified to give exactly 0.0 difference.
+                np.save(f_tr, projections[:, :, ::-1])
+            # Truncation is silent, so surface it rather than leaving it to be noticed
+            # in the accuracy numbers. None means the backend does not report it.
+            fidelity = projector.fidelity_estimate()
+            if fidelity is not None and fidelity < 0.999:
+                warnings.warn(
+                    f"projection_backend={projection_backend!r} truncated the state: "
+                    f"fidelity estimate {fidelity:.4g} (1.0 = exact). These projected "
+                    f"features are approximate and any metric computed from them "
+                    f"should be reported as such.",
+                    RuntimeWarning,
+                )
+            session = None
+        else:
+            #  Generate the backend, session and primitive
+            backend, session, prim = qutils.get_backend_session(
+                args, "estimator", num_qubits=num_qubits
             )
 
+            # Transpile
+            if args["backend"] != "simulator":
+                circuit = qutils.transpile_circuit(
+                    circuit, opt_level=3, backend=backend, PT=True, initial_layout=None
+                )
 
-        # Set the global phase to 0 to avoid header size issues
-        circuit.global_phase = 0
+
+            # Set the global phase to 0 to avoid header size issues
+            circuit.global_phase = 0
         
-        for f_tr in [file_projection_train, file_projection_test]:
-            if not os.path.exists(f_tr):
-                projections = []
-                if "train" in f_tr:
-                    dat = X_train.copy()
-                else:
-                    dat = X_test.copy()
+            for f_tr in [file_projection_train, file_projection_test]:
+                if not os.path.exists(f_tr):
+                    projections = []
+                    if "train" in f_tr:
+                        dat = X_train.copy()
+                    else:
+                        dat = X_test.copy()
 
-                # Identity operator on all qubits
-                id = "I" * feat_dimension
+                    # Identity operator on all qubits
+                    id = "I" * feat_dimension
 
-                # We group all commuting observables
-                # These groups are the Pauli X, Y and Z operators on individual qubits
-                # Apply the circuit layout to the observable if mapped to device
-                if args["backend"] != "simulator":
-                    observables_x = []
-                    observables_y = []
-                    observables_z = []
-                    for i in range(feat_dimension):
-                        observables_x.append(
-                            Pauli(id[:i] + "X" + id[(i + 1) :]).apply_layout(
-                                circuit.layout, num_qubits=backend.num_qubits
+                    # We group all commuting observables
+                    # These groups are the Pauli X, Y and Z operators on individual qubits
+                    # Apply the circuit layout to the observable if mapped to device
+                    if args["backend"] != "simulator":
+                        observables_x = []
+                        observables_y = []
+                        observables_z = []
+                        for i in range(feat_dimension):
+                            observables_x.append(
+                                Pauli(id[:i] + "X" + id[(i + 1) :]).apply_layout(
+                                    circuit.layout, num_qubits=backend.num_qubits
+                                )
                             )
-                        )
-                        observables_y.append(
-                            Pauli(id[:i] + "Y" + id[(i + 1) :]).apply_layout(
-                                circuit.layout, num_qubits=backend.num_qubits
+                            observables_y.append(
+                                Pauli(id[:i] + "Y" + id[(i + 1) :]).apply_layout(
+                                    circuit.layout, num_qubits=backend.num_qubits
+                                )
                             )
-                        )
-                        observables_z.append(
-                            Pauli(id[:i] + "Z" + id[(i + 1) :]).apply_layout(
-                                circuit.layout, num_qubits=backend.num_qubits
+                            observables_z.append(
+                                Pauli(id[:i] + "Z" + id[(i + 1) :]).apply_layout(
+                                    circuit.layout, num_qubits=backend.num_qubits
+                                )
                             )
-                        )
-                else:
-                    observables_x = [
-                        Pauli(id[:i] + "X" + id[(i + 1) :]) for i in range(feat_dimension)
-                    ]
-                    observables_y = [
-                        Pauli(id[:i] + "Y" + id[(i + 1) :]) for i in range(feat_dimension)
-                    ]
-                    observables_z = [
-                        Pauli(id[:i] + "Z" + id[(i + 1) :]) for i in range(feat_dimension)
-                    ]
+                    else:
+                        observables_x = [
+                            Pauli(id[:i] + "X" + id[(i + 1) :]) for i in range(feat_dimension)
+                        ]
+                        observables_y = [
+                            Pauli(id[:i] + "Y" + id[(i + 1) :]) for i in range(feat_dimension)
+                        ]
+                        observables_z = [
+                            Pauli(id[:i] + "Z" + id[(i + 1) :]) for i in range(feat_dimension)
+                        ]
 
-                # projections[i][j][k] will be the expectation value of the j-th Pauli operator (0: X, 1: Y, 2: Z)
-                # of datapoint i on qubit k
-                projections = []
+                    # projections[i][j][k] will be the expectation value of the j-th Pauli operator (0: X, 1: Y, 2: Z)
+                    # of datapoint i on qubit k
+                    projections = []
 
-                for i in range(len(dat)):
-                    if i % 100 == 0:
-                        print(f"at datapoint {str(i)}")
+                    for i in range(len(dat)):
+                        if i % 100 == 0:
+                            print(f"at datapoint {str(i)}")
 
-                    # Get training sample
-                    parameters = dat[i]
+                        # Get training sample
+                        parameters = dat[i]
 
-                    # We define the primitive unified blocs (PUBs) consisting of the embedding circuit,
-                    # set of observables and the circuit parameters
-                    pub_x = (circuit, observables_x, parameters)
-                    pub_y = (circuit, observables_y, parameters)
-                    pub_z = (circuit, observables_z, parameters)
+                        # We define the primitive unified blocs (PUBs) consisting of the embedding circuit,
+                        # set of observables and the circuit parameters
+                        pub_x = (circuit, observables_x, parameters)
+                        pub_y = (circuit, observables_y, parameters)
+                        pub_z = (circuit, observables_z, parameters)
 
-                    job = prim.run([pub_x, pub_y, pub_z])
-                    job_result_x = job.result()[0].data.evs
-                    job_result_y = job.result()[1].data.evs
-                    job_result_z = job.result()[2].data.evs
+                        job = prim.run([pub_x, pub_y, pub_z])
+                        job_result_x = job.result()[0].data.evs
+                        job_result_y = job.result()[1].data.evs
+                        job_result_z = job.result()[2].data.evs
 
-                    # Record <X>, <Y> and <Z> on all qubits for the current datapoint
-                    projections.append([job_result_x, job_result_y, job_result_z])
-                np.save(f_tr, projections)
+                        # Record <X>, <Y> and <Z> on all qubits for the current datapoint
+                        projections.append([job_result_x, job_result_y, job_result_z])
+                    np.save(f_tr, projections)
 
         if not isinstance(session, type(None)):
             session.close()

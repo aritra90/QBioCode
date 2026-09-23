@@ -7,7 +7,7 @@ qbiocode.utils.qutils module
 .. currentmodule:: qbiocode.utils.qutils
 
 .. automodule:: qbiocode.utils.qutils
-    :members: SUPPORTED_ENTANGLEMENTS, SUPPORTED_FEATURE_MAPS, SUPPORTED_OPTIMIZERS, execute_circuit, get_ansatz, get_backend_session, get_estimator, get_feature_map, get_observable, get_optimizer, get_sampler, retrieve_probabilities, transpile_circuit, unit_coefficient_data_map
+    :members: SUPPORTED_ENTANGLEMENTS, SUPPORTED_FEATURE_MAPS, SUPPORTED_OPTIMIZERS, SUPPORTED_SIM_METHODS, execute_circuit, get_ansatz, get_backend_session, get_estimator, get_feature_map, get_observable, get_optimizer, get_sampler, retrieve_probabilities, transpile_circuit, unit_coefficient_data_map
     :undoc-members:
     :show-inheritance:
     :member-order: bysource

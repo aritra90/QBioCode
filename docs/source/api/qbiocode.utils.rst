@@ -21,6 +21,8 @@ qbiocode.utils package
        qbiocode.utils.generate_qml_configs
        qbiocode.utils.helper_fn
        qbiocode.utils.ibm_account
+       qbiocode.utils.mps_backend
+       qbiocode.utils.projection
        qbiocode.utils.qc_winner_finder
        qbiocode.utils.qutils
        qbiocode.utils.tabpfn_account
@@ -36,10 +38,14 @@ qbiocode.utils package
 
     .. list-table::
     
+       * - :func:`check_tabpfn_access <qbiocode.utils.tabpfn_account.check_tabpfn_access>`
+         - Report which gate is actually blocking TabPFN's weights.
        * - :func:`checkpoint_restart <qbiocode.utils.dataset_checkpoint.checkpoint_restart>`
          - Identify completed datasets from a previous run to enable checkpoint restart.
        * - :func:`combine_results <qbiocode.utils.combine_evals_results.combine_results>`
          - Combine results from interrupted and resumed computational jobs.
+       * - :func:`describe_token_source <qbiocode.utils.tabpfn_account.describe_token_source>`
+         - Whether a token is configured, and from where -- with no key material.
        * - :func:`execute_circuit <qbiocode.utils.qutils.execute_circuit>`
          - Execute quantum circuit on Aer simulator.
        * - :func:`feature_encoding <qbiocode.utils.helper_fn.feature_encoding>`
@@ -68,12 +74,16 @@ qbiocode.utils package
          - This function provides a quick way to instantiate QiskitRuntimeService in one place.
        * - :func:`label_to_array <qbiocode.utils.data_encoding.label_to_array>`
          - Convert binary labels to one-hot encoded arrays.
+       * - :func:`load_tabpfn_token <qbiocode.utils.tabpfn_account.load_tabpfn_token>`
+         - Put the TabPFN token into the environment so TabPFN can find it.
        * - :func:`normalize_data <qbiocode.utils.data_encoding.normalize_data>`
          - Normalize data vector for quantum state encoding.
        * - :func:`prepare_training_set <qbiocode.utils.data_encoding.prepare_training_set>`
          - Select and prepare balanced training subset for quantum ensemble.
        * - :func:`qml_winner <qbiocode.utils.qc_winner_finder.qml_winner>`
          - This function finds data sets where QML was beneficial (higher F1 scores than CML) and create new .csv files with the relevant evaluation and performance for these specific datasets, for further analysis.
+       * - :func:`redacted <qbiocode.utils.ibm_account.redacted>`
+         - A copy of a credentials dict that is safe to print.
        * - :func:`retrieve_probabilities <qbiocode.utils.qutils.retrieve_probabilities>`
          - Extract probability predictions from measurement counts.
        * - :func:`scaler_fn <qbiocode.utils.helper_fn.scaler_fn>`
@@ -84,6 +94,8 @@ qbiocode.utils package
          - Return the directories :func:`tutorial_data_path` searches, in order.
        * - :func:`tutorial_data_path <qbiocode.utils.tutorial_data.tutorial_data_path>`
          - Return the absolute path of a tutorial fixture.
+       * - :func:`write_token_template <qbiocode.utils.tabpfn_account.write_token_template>`
+         - Create the token file with a placeholder, and lock its permissions down.
     
 
 

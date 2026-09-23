@@ -124,3 +124,8 @@ tutorial/**/PQK_OV_results.csv
 # Generated locally by `pip freeze`; specific to one OS/arch/Python, so never
 # committed. See requirements/requirements.txt for the recipe.
 requirements/requirements-lock.txt
+# Timing cache written by tutorial/MPS_vs_Statevector_Scaling.ipynb. Every key carries
+# the notebook's HARNESS_VERSION, so entries stop being read the moment a timing path
+# changes, and the seconds in them describe one machine. The notebook re-measures
+# anything it does not find, so there is nothing here worth versioning.
+tutorial/mps_bench_cache.json

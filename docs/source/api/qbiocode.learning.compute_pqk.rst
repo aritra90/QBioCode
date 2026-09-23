@@ -7,7 +7,7 @@ qbiocode.learning.compute_pqk module
 .. currentmodule:: qbiocode.learning.compute_pqk
 
 .. automodule:: qbiocode.learning.compute_pqk
-    :members: compute_pqk, create_svc_model
+    :members: compute_pqk, compute_pqk_opt, create_svc_model
     :undoc-members:
     :show-inheritance:
     :member-order: bysource
@@ -21,6 +21,7 @@ qbiocode.learning.compute_pqk module
         :nosignatures:
 
         compute_pqk
+        compute_pqk_opt
         create_svc_model
 
 

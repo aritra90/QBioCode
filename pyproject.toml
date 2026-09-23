@@ -86,6 +86,17 @@ quvine = [
     "ripser",
     "torch-geometric",
 ]
+# Tensor-network projection backends (qbiocode.utils.mps_backend, .projection). An extra
+# rather than a base dependency: `import qbiocode` never needs it, and the projected-kernel
+# paths fall back to the dense StatevectorEstimator when it is absent. Worth installing when
+# a feature map is wider than ~24 qubits, where the dense statevector runs out of memory --
+# see tutorial/MPS_vs_Statevector_Scaling.ipynb for which backend wins where. cotengra is
+# quimb's own contraction-path dependency and is not imported by qbiocode directly, but it
+# is named here because `import quimb` fails without it.
+mps = [
+    "quimb>=1.11",
+    "cotengra>=0.7",
+]
 # TabPFN classical learner (qbiocode.learning.compute_tabpfn). An extra rather than a base
 # dependency because of its weight -- it brings torch's ecosystem plus mlx, lightgbm,
 # huggingface-hub and safetensors, and `import qbiocode` must not pull torch in. No API
@@ -142,7 +153,7 @@ dev = [
 ]
 # Union of every extra above. Keep in sync when adding to any tier.
 all = [
-    "qbiocode[apps,quvine,tabpfn,docs,dev]",
+    "qbiocode[apps,quvine,tabpfn,mps,docs,dev]",
 ]
 
 [project.scripts]
