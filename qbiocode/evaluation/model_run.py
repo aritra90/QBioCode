@@ -107,6 +107,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         y_test (pd.Series): Testing labels.
         data_key (str): Key for the dataset being processed.
         args (dict): Dictionary containing configuration parameters, including:
+
             - model: List of models to run.
             - n_jobs: Number of parallel jobs to run.
             - grid_search: Boolean indicating whether to tune hyperparameters.

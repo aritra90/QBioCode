@@ -91,6 +91,7 @@ def compute_nb_opt(
     datasets, without having to repeat the search.  The model is trained on the training dataset and validated on the test dataset. The function returns the evaluation of the model
     on the test dataset, including accuracy, AUC, F1 score, and the time taken to train and validate the model across the search.
     This function is designed to be used in a supervised learning context, where the goal is to classify data points.
+
     Args:
         X_train (numpy.ndarray): Training features.
         X_test (numpy.ndarray): Test features.
@@ -109,6 +110,7 @@ def compute_nb_opt(
             automatically when the configured values describe fewer distinct
             combinations than that, so a small block does not re-evaluate the same
             models.
+
     Returns:
         modeleval (dict): A dictionary containing the evaluation metrics of the model on the test dataset, including accuracy, AUC, F1 score,
                           and the time taken to train and validate the model, along with the best parameters found during the search.

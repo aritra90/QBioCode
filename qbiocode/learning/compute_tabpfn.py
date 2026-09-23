@@ -89,14 +89,14 @@ _TABPFN_CLASSIFIER = None
 #: TabPFN's *code* is under the Prior Labs License (Apache 2.0 plus an attribution
 #: clause). Its *weights* are licensed per model version, and the two regimes differ:
 #:
-#: ===========  ==========================================  ==================
-#: version      weights licence                             commercial use
-#: ===========  ==========================================  ==================
-#: ``v2``       Prior Labs License v1.1 (Apache 2.0 + attr) permitted
-#: ``v2.5``     TABPFN-2.5 Non-Commercial License           **no**
-#: ``v2.6``     TABPFN-2.6 Non-Commercial License           **no**
-#: ``v3``       TABPFN-3 Non-Commercial License             **no**
-#: ===========  ==========================================  ==================
+#: ========  ===========================================  ==============
+#: version   weights licence                              commercial use
+#: ========  ===========================================  ==============
+#: ``v2``    Prior Labs License v1.1 (Apache 2.0 + attr)  permitted
+#: ``v2.5``  TABPFN-2.5 Non-Commercial License            **no**
+#: ``v2.6``  TABPFN-2.6 Non-Commercial License            **no**
+#: ``v3``    TABPFN-3 Non-Commercial License              **no**
+#: ========  ===========================================  ==============
 #:
 #: The three newest are non-commercial *and non-production*, and reaching them requires
 #: accepting that licence against your account -- which upstream does interactively, so

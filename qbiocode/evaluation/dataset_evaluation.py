@@ -36,22 +36,22 @@ difficulty and from broadband noise. See that module's docstring.
 
 This module keeps the measures pyMFE does **not** cover:
 
-============================== =============================================
-``Intrinsic_Dimension``        ``skdim`` lPCA. pyMFE's ``t3``/``t4`` are also
-                               PCA-based but use a 95 %-explained-variance
-                               criterion, a different estimator; QSage's
-                               ``SLGH`` feature is defined on this column.
-``Condition number``           No pyMFE equivalent.
-``Fisher Discriminant Ratio``  See the note below -- pyMFE does not cover it.
-``Coefficient of Variation %`` pyMFE has ``mean`` and ``sd`` separately but
-``std_co_of_v``                not their ratio.
-``# Low variance features``    No pyMFE equivalent.
-``# Non-zero entries``         pyMFE's ``sparsity`` counts distinct values per
-                               attribute, which is a different quantity.
-``Mean Log Kernel Density``    pyMFE's ``density`` is graph-based, unrelated.
+=============================== =============================================
+``Intrinsic_Dimension``         ``skdim`` lPCA. pyMFE's ``t3``/``t4`` are also
+                                PCA-based but use a 95 %-explained-variance
+                                criterion, a different estimator; QSage's
+                                ``SLGH`` feature is defined on this column.
+``Condition number``            No pyMFE equivalent.
+``Fisher Discriminant Ratio``   See the note below -- pyMFE does not cover it.
+``Coefficient of Variation %``  pyMFE has ``mean`` and ``sd`` separately but
+``std_co_of_v``                 not their ratio.
+``# Low variance features``     No pyMFE equivalent.
+``# Non-zero entries``          pyMFE's ``sparsity`` counts distinct values per
+                                attribute, which is a different quantity.
+``Mean Log Kernel Density``     pyMFE's ``density`` is graph-based, unrelated.
 ``Isomap Reconstruction Error`` No pyMFE equivalent.
-``Fractal dimension``          Higuchi. No pyMFE equivalent.
-============================== =============================================
+``Fractal dimension``           Higuchi. No pyMFE equivalent.
+=============================== =============================================
 
 **Why ``Fisher Discriminant Ratio`` is still computed here.** It looks like
 pyMFE's ``f1`` covers it, and it does not. ``f1`` is ``1 / (1 + r_j)`` evaluated
