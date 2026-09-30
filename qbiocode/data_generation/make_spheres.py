@@ -120,7 +120,6 @@ def generate_spheres_datasets(
 
     # populate all the configs with the corresponding argument values
     for n_s, n_d, n_r in configurations:
-        config = "samples={}, dimensions={}, radius={}".format(n_s, n_d, n_r)
         # print(count_configs)
         radius1 = n_r
         radius2 = radius1 * 0.5
@@ -129,12 +128,11 @@ def generate_spheres_datasets(
         X = np.concatenate((Xa, Xb))
         y = [0] * len(Xa) + [1] * len(Xb)
 
-        # print("Configuration {}/{}: {}".format(count_configs, len(configurations), config))
         X_df = pd.DataFrame(X)
         y_dict = {"class": y}
         y_df = pd.DataFrame(y_dict)
         df = pd.concat([X_df, y_df], axis=1)
-        with open(os.path.join(save_path, "dataset_config.json"), "w") as outfile:
+        with open(os.path.join(save_path, "dataset_config.json"), "w", encoding="utf-8") as outfile:
             dataset_config.update(
                 {
                     "spheres_data-{}.csv".format(count_configs): {
@@ -145,9 +143,7 @@ def generate_spheres_datasets(
                 }
             )
             json.dump(dataset_config, outfile, indent=4)
-        new_dataset = df.to_csv(
-            os.path.join(save_path, "spheres_data-{}.csv".format(count_configs)), index=False
-        )
+        df.to_csv(os.path.join(save_path, "spheres_data-{}.csv".format(count_configs)), index=False)
         count_configs += 1
 
         # fig = plt.figure()

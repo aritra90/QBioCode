@@ -26,7 +26,8 @@ Main Modules
 - learning: Classical and quantum machine learning algorithms
 - embeddings: Feature embedding and encoding methods
 - evaluation: Model, dataset and graph-complexity evaluation tools
-- data_generation: Synthetic dataset generators
+- data_generation: Synthetic dataset generators, classical and
+  quantum-simulated (exact statevector, binary by construction)
 - visualization: Result visualization and correlation analysis
 - utils: Helper functions and utilities
 - apps: Command-line applications (QProfiler, QSage, QuVINE)
@@ -55,11 +56,16 @@ preload_openmp_libraries()
 from .data_generation import (
     generate_circles_datasets,
     generate_classification_datasets,
+    generate_engineered_kernel_datasets,
+    generate_ground_state_datasets,
+    generate_hamiltonian_learning_datasets,
     generate_moons_datasets,
+    generate_quantum_label_datasets,
     generate_s_curve_datasets,
     generate_spheres_datasets,
     generate_spirals_datasets,
     generate_swiss_roll_datasets,
+    generate_time_evolution_datasets,
 )
 from .data_generation.generator import generate_data
 
@@ -202,6 +208,11 @@ __all__ = [
     "generate_spheres_datasets",
     "generate_spirals_datasets",
     "generate_swiss_roll_datasets",
+    "generate_ground_state_datasets",
+    "generate_time_evolution_datasets",
+    "generate_hamiltonian_learning_datasets",
+    "generate_quantum_label_datasets",
+    "generate_engineered_kernel_datasets",
     # Apps submodule
     "apps",
 ]

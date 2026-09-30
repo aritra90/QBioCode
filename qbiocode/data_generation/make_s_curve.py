@@ -82,10 +82,6 @@ def generate_s_curve_datasets(
 
     # populate all the configs with the corresponding argument values
     for n_s, n_n in configurations:
-        config = "n_samples={}, noise={}".format(
-            n_s,
-            n_n,
-        )
         # print(count_configs)
 
         # iteratively run the function for each combination of arguments
@@ -94,15 +90,14 @@ def generate_s_curve_datasets(
             noise=n_n,
             random_state=random_state,
         )
-        # print("Configuration {}/{}: {}".format(count_configs, len(configurations), config))
         dataset = pd.DataFrame(X)
         dataset["class"] = y
-        with open(os.path.join(save_path, "dataset_config.json"), "w") as outfile:
+        with open(os.path.join(save_path, "dataset_config.json"), "w", encoding="utf-8") as outfile:
             dataset_config.update(
                 {"s_curve_data-{}.csv".format(count_configs): {"n_samples": n_s, "noise": n_n}}
             )
             json.dump(dataset_config, outfile, indent=4)
-        new_dataset = dataset.to_csv(
+        dataset.to_csv(
             os.path.join(save_path, "s_curve_data-{}.csv".format(count_configs)), index=False
         )
         count_configs += 1

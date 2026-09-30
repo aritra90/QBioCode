@@ -112,8 +112,16 @@ qbiocode package
          - Generate multiple high-dimensional classification datasets with varying parameters.
        * - :func:`generate_data <qbiocode.data_generation.generator.generate_data>`
          - Generate synthetic datasets for machine learning benchmarking.
+       * - :func:`generate_engineered_kernel_datasets <qbiocode.data_generation.make_engineered_kernel.generate_engineered_kernel_datasets>`
+         - Generate datasets whose labels saturate the quantum-advantage bound.
+       * - :func:`generate_ground_state_datasets <qbiocode.data_generation.make_ground_state.generate_ground_state_datasets>`
+         - Generate ground-state observable-learning datasets.
+       * - :func:`generate_hamiltonian_learning_datasets <qbiocode.data_generation.make_hamiltonian_learning.generate_hamiltonian_learning_datasets>`
+         - Generate Hamiltonian-learning-as-classification datasets.
        * - :func:`generate_moons_datasets <qbiocode.data_generation.make_moons.generate_moons_datasets>`
          - Generate multiple two-moons datasets with varying parameters.
+       * - :func:`generate_quantum_label_datasets <qbiocode.data_generation.make_quantum_labels.generate_quantum_label_datasets>`
+         - Generate datasets with classical features and circuit-generated labels.
        * - :func:`generate_s_curve_datasets <qbiocode.data_generation.make_s_curve.generate_s_curve_datasets>`
          - Generate multiple 3D S-curve datasets with varying parameters.
        * - :func:`generate_spheres_datasets <qbiocode.data_generation.make_spheres.generate_spheres_datasets>`
@@ -122,6 +130,8 @@ qbiocode package
          - Generate multiple n-dimensional spiral datasets with varying parameters.
        * - :func:`generate_swiss_roll_datasets <qbiocode.data_generation.make_swiss_roll.generate_swiss_roll_datasets>`
          - Generate multiple 3D Swiss roll datasets with varying parameters.
+       * - :func:`generate_time_evolution_datasets <qbiocode.data_generation.make_time_evolution.generate_time_evolution_datasets>`
+         - Generate time-evolution datasets forming a difficulty ladder in evolution time.
        * - :func:`get_embeddings <qbiocode.embeddings.embed.get_embeddings>`
          - Apply an embedding to the training and test datasets.
        * - :func:`is_transductive <qbiocode.embeddings.embed.is_transductive>`

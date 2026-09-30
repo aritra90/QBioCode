@@ -338,6 +338,29 @@ Run the two classical learners added alongside XGBoost, and see the three ways t
 - Optional extras with a manual gate, and why such a model cannot be a base dependency
 - TabPFN's fixed ceilings: 10 classes (unwaivable), 50,000 rows, 2,000 features
 
+---
+
+### 10. Simulated Quantum Datasets in QProfiler
+
+Generate all five families of simulated quantum classification data -- ground-state observable learning, time evolution, Hamiltonian learning, quantum-circuit labels and an engineered kernel -- and benchmark them with QProfiler. Every family is binary by construction with the label in the last column, so they drop into the benchmark beside the classical artificial data with no adapter.
+
+<a href="tutorials/Quantum_Data/quantum_datasets_qprofiler.html">📓 <strong>View Tutorial Notebook</strong></a>
+
+**What You'll Learn:**
+- Verify the simulator with `run_selftest` before trusting a single generated label
+- Generate each family through `qbc.generate_data`, where `dim` is the qubit count and everything family-specific travels in one `quantum_args` dict
+- Read the `x_view` / `phi_view` / `meta` layout, and why `folder_path` must name one view directory rather than the parent
+- Use the two shipped configs, `config_qdata_xview.yaml` and `config_qdata_encoded.yaml`, and why they differ in exactly one key
+- Align a quantum learner's feature map with the encoder that generated the labels -- and see why a `reps` mismatch alone is enough to lose the effect
+- Check that QProfiler's `# Features` equals the qubit count, the cheapest test that the ingestion is correct
+
+**Key Concepts:**
+- Controls as first-class datasets: a negative control (`gs --label sparse`), an alignment control (`ql --encoding evo`) and a positive control (`eng`)
+- Difficulty ladders: `te`'s Walsh-Hadamard effective degree grows with the evolution time, so accuracy should fall monotonically along `taus`
+- Audit triggers -- per-family results that mean the pipeline is wrong rather than that something was discovered
+- Why features in [0, 1] must reach the encoder unscaled when an encoder defined the label
+- What these datasets do **not** show: they are classically simulated, so none of it is evidence of quantum advantage
+
 ```{toctree}
 :hidden:
 :maxdepth: 1
@@ -360,4 +383,5 @@ Quantum Projection Learning <tutorials/Quantum_Projection_Learning/QPL_example>
 PQK on Ovarian Cancer <tutorials/PQK - OV>
 Hyperparameter Tuning: Optuna vs Grid Search <tutorials/Hyperparameter_Tuning/optuna_vs_gridsearch>
 CatBoost and TabPFN <tutorials/CatBoost_and_TabPFN/catboost_and_tabpfn>
+Simulated Quantum Datasets <tutorials/Quantum_Data/quantum_datasets_qprofiler>
 ```

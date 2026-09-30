@@ -8,7 +8,6 @@ useful for testing clustering and classification algorithms.
 
 from sklearn.datasets import make_blobs
 import pandas as pd
-import numpy as np
 import json
 import itertools
 import os
@@ -160,7 +159,9 @@ def generate_blobs_datasets(
                 'dataset_type': 'blobs'
             }
             
-            with open(os.path.join(save_path, f'{config_key}_config.json'), 'w') as f:
+            with open(
+                os.path.join(save_path, f'{config_key}_config.json'), 'w', encoding='utf-8'
+            ) as f:
                 json.dump(metadata, f, indent=2)
     
     return dataset_config

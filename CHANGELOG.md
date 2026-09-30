@@ -8,6 +8,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Simulated quantum datasets as binary-classification benchmarks
+
+- **Five new `generate_data` types built on exact statevector simulation**:
+  `ground_state`, `time_evolution`, `hamiltonian_learning`, `quantum_labels` and
+  `engineered_kernel`. Each writes median-thresholded binary labels, so 0.5 accuracy is
+  exactly chance and class balance is never evidence of anything. The qubit count travels
+  in the existing `dim` argument and the row count in `n_samples`; every family-specific
+  knob travels in one new `quantum_args` dict, rather than adding eighteen top-level
+  keyword arguments to an already wide function. Left at the defaults, each family gets
+  its own documented runsheet size instead of the classical generators' `DIM` sweep,
+  which reaches 12 qubits.
+
+- **The physics is checked, not asserted.** `qbiocode.data_generation.run_selftest` (also
+  `qdata-gen selftest`) runs seven independent checks: the bitmask `Pauli` against dense
+  Kronecker products over every one of the 4^4 four-qubit strings, the sparse Hamiltonian
+  against its dense form, the even-sector ground state by residual, parity and global
+  minimality, the fast Walsh-Hadamard transform by round-trip and Parseval, the
+  short-time `<Z_i(t)> ~ 1 - 2 h_i^2 t^2` expansion, the engineered-label construction
+  saturating `s_Q = 1` and `s_C = g^2`, and this package's native `ZZFeatureMap` against
+  Qiskit's to ~3e-15. All seven are also pytest tests in
+  `tests/test_quantum_data_generation.py`.
+
+- **`data_map` on the two kernel-aligned families**, because QProfiler's two quantum
+  models do not build the same feature map. `compute_qsvc` passes no `data_map_func`, so
+  `qsvc` gets Qiskit's default (`phi(x_i) = x_i`, `phi(x_i,x_j) = (pi-x_i)(pi-x_j)`), while
+  `compute_pqk` hardcodes `unit_coefficient_data_map` (`phi(x_i) = x_i/2`,
+  `phi(x_i,x_j) = x_i x_j / 2`). These are different unitaries, not a reparameterisation,
+  so `K_Q` is a different kernel and a family whose labels are tuned to one arm is a
+  *negative* control for the other -- no downstream `gamma` search recovers it.
+  `quantum_args={"data_map": "unit"}` (CLI `--data-map unit`) targets the `pqk` arm;
+  the default `"qiskit"` targets `qsvc` and leaves every previously generated dataset
+  bit-for-bit reproducible, adding no name suffix. Measured through QProfiler on
+  `eng` at n=4: `pqk` accuracy 0.444 with the mismatched map and 0.944 with the matching
+  one, and over 40 stratified 70/30 splits 0.403 +/- 0.108 versus 0.797 +/- 0.073 --
+  *below* chance when mismatched, because the labels are anti-aligned with the other
+  encoding's geometry. The map is recorded in `meta/<name>.json` under `data_map`, the
+  `ZZFeatureMap` selftest now cross-checks both maps against Qiskit, and the tutorial
+  gates the quantum arm on the pairing before anything is fit.
+
+- **Each dataset ships its own difficulty diagnostics** in `meta/<name>.json`: the
+  even-sector gap, the Walsh effective degree, the level-spacing ratio (GOE 0.53 vs
+  Poisson 0.39), the geometric difference `g`, and the holdout accuracy of the analytic
+  product criterion. They are what makes a benchmark result readable: `te` accuracy is
+  *supposed* to fall as the effective degree grows, and a flat ladder means the pipeline
+  is wrong rather than that something was discovered.
+
+- **Two QProfiler configs, `config_qdata_xview` and `config_qdata_encoded`.** Both set
+  `embeddings: ['none']` -- the shipped `['pca','nmf','none']` default at
+  `n_components: 3` would compress away the physical structure, and `nmf` cannot take the
+  signed `phi_view` features at all. They differ in exactly one key: the `quantum_labels`
+  and `engineered_kernel` inputs are already in `[0,1]` and must reach the encoder
+  unscaled, so the encoded config sets `scaling: false`.
+
+- **`folder_path` names a view, not the save path.** These generators write
+  `x_view/`, `phi_view/` and `meta/` subdirectories, because CSV discovery in QProfiler
+  is a non-recursive `os.listdir`. Documented in `docs/source/quantum_datasets.md`
+  together with the runsheet, the per-family scientific role, and an explicit
+  **non-claims** section: none of this is evidence of quantum advantage, since the labels
+  were computed by a classical simulator, and n <= 12 qubits is a regime where classical
+  simulation is easy by definition.
+
+- **`threadpoolctl` is a new core dependency.** Below a Hilbert dimension of 1024 the
+  per-row `eigh` calls are small enough that BLAS threading costs more than it buys:
+  60 x `eigh(256x256)` measured 9.01 s with default threading and 0.39 s pinned to one
+  thread. The generators pin threads under that size and leave threading alone above it.
+
 #### Tensor-network projection backends: `projection_backend`
 
 - **`projection_backend`, plus the new `[mps]` extra.** `pqk` and `qpl` encode one qubit

@@ -188,14 +188,12 @@ def generate_spirals_datasets(
 
     # populate all the configs with the corresponding argument values
     for n_s, n_c, n_n, n_d in configurations:
-        config = "samples={}, classes={}, noise={}, dimensions={}".format(n_s, n_c, n_n, n_d)
         # print(count_configs)
 
         X, y = make_spirals(n_samples=n_s, n_classes=n_c, noise=n_n, dim=n_d)
-        # print("Configuration {}/{}: {}".format(count_configs, len(configurations), config))
         dataset = pd.DataFrame(X)
         dataset["class"] = y
-        with open(os.path.join(save_path, "dataset_config.json"), "w") as outfile:
+        with open(os.path.join(save_path, "dataset_config.json"), "w", encoding="utf-8") as outfile:
             dataset_config.update(
                 {
                     "spirals_data-{}.csv".format(count_configs): {
@@ -206,7 +204,7 @@ def generate_spirals_datasets(
                 }
             )
             json.dump(dataset_config, outfile, indent=4)
-        new_dataset = dataset.to_csv(
+        dataset.to_csv(
             os.path.join(save_path, "spirals_data-{}.csv".format(count_configs)), index=False
         )
         count_configs += 1

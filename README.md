@@ -388,7 +388,14 @@ Projected Quantum Kernels on real multi-omics cancer genomics:
 - Create 3-year survival labels from clinical data
 - Compare quantum-enhanced against classical SVM performance across four modalities
 
-All twelve are also rendered on the [documentation site](https://qiskit-community.github.io/QBioCode/tutorials.html).
+### 13. [Simulated Quantum Datasets in QProfiler](tutorial/Quantum_Data/quantum_datasets_qprofiler.ipynb)
+Generate binary-classification data from exact statevector simulation and benchmark it:
+- Build all five families -- ground state, time evolution, Hamiltonian learning, quantum labels, engineered kernel
+- Read the physics diagnostics that say how hard each dataset should be
+- Point QProfiler at a view directory with the two shipped `config_qdata_*` configs
+- Check the profiled feature count against the qubit count, which catches most ingestion mistakes
+
+Every notebook under `tutorial/` is also rendered on the [documentation site](https://qiskit-community.github.io/QBioCode/tutorials.html).
 
 ## 🔧 Core Modules
 
@@ -396,11 +403,29 @@ All twelve are also rendered on the [documentation site](https://qiskit-communit
 ```python
 import qbiocode as qbc
 
-# Generate various dataset types
+# Classical shapes and classification data
 qbc.generate_data(type_of_data='circles', ...)
 qbc.generate_data(type_of_data='moons', ...)
 qbc.generate_data(type_of_data='classes', ...)
+
+# Binary labels from exact statevector simulation: the qubit count travels in
+# `dim` and every family-specific knob in one `quantum_args` dict.
+qbc.generate_data(type_of_data='ground_state', dim=[6], n_samples=[400], ...)
+qbc.generate_data(type_of_data='time_evolution', ...)
+qbc.generate_data(type_of_data='hamiltonian_learning', ...)
+# 'quantum_args' carries `data_map`: 'qiskit' (the default) is aligned with the
+# qsvc arm, 'unit' with pqk. They build different unitaries, so one dataset cannot
+# be a positive control for both -- measured end-to-end, the 'unit' arm separates
+# (pqk 0.91 vs 0.84 best classical) while the 'qiskit' arm reproduces the predicted
+# model *ranking* at close to chance for every model. Pass it explicitly.
+qbc.generate_data(type_of_data='quantum_labels', quantum_args={'data_map': 'unit'}, ...)
+qbc.generate_data(type_of_data='engineered_kernel', quantum_args={'data_map': 'unit'}, ...)
 ```
+
+The five quantum families write `x_view/`, `phi_view/` and `meta/` subdirectories
+rather than a flat CSV, so QProfiler's `folder_path` names a *view*, not the save
+path. See [Simulated quantum datasets](docs/source/quantum_datasets.md) for the
+runsheet and the non-claims, and `qdata-gen selftest` for the physics checks.
 
 ### Machine Learning Models
 

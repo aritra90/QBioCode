@@ -9,11 +9,16 @@ datasets for machine learning benchmarking and evaluation.
 
 import qbiocode.data_generation.make_circles as circles
 import qbiocode.data_generation.make_class as make_class
+import qbiocode.data_generation.make_engineered_kernel as engineered_kernel
+import qbiocode.data_generation.make_ground_state as ground_state
+import qbiocode.data_generation.make_hamiltonian_learning as hamiltonian_learning
 import qbiocode.data_generation.make_moons as moons
+import qbiocode.data_generation.make_quantum_labels as quantum_labels
 import qbiocode.data_generation.make_s_curve as s_curve
 import qbiocode.data_generation.make_spheres as spheres
 import qbiocode.data_generation.make_spirals as spirals
 import qbiocode.data_generation.make_swiss_roll as swiss_roll
+import qbiocode.data_generation.make_time_evolution as time_evolution
 
 ### Main Function ###
 
@@ -30,6 +35,65 @@ N_REDUNDANT = list(range(2, 8, 4))
 N_CLUSTERS_PER_CLASS = list(range(1, 2, 3))
 WEIGHTS = [[0.3, 0.7], [0.4, 0.6], [0.5, 0.5]]
 
+#: The quantum families, mapped to the module holding each one's generator and
+#: runsheet defaults. Kept as data so the dispatch and the error message that lists
+#: the valid names cannot disagree.
+QUANTUM_MODULES = {
+    "ground_state": (ground_state, "generate_ground_state_datasets"),
+    "time_evolution": (time_evolution, "generate_time_evolution_datasets"),
+    "hamiltonian_learning": (hamiltonian_learning, "generate_hamiltonian_learning_datasets"),
+    "quantum_labels": (quantum_labels, "generate_quantum_label_datasets"),
+    "engineered_kernel": (engineered_kernel, "generate_engineered_kernel_datasets"),
+}
+
+
+def _quantum_kwargs(module, quantum_args, save_path, n_samples, dim, random_state):
+    """Assemble the keyword arguments for one quantum generator.
+
+    ``dim`` carries the qubit count and ``n_samples`` the row count, so the quantum
+    families need no parameters of their own on
+    :func:`generate_data`'s already wide signature. But their *defaults* cannot be
+    shared: :data:`DIM` reaches 12 qubits, a 4096-dimensional Hilbert space
+    diagonalised once per row, and :data:`N_SAMPLES` holds ten row counts that no
+    dataset name distinguishes. So a caller who leaves them alone gets the family's
+    documented runsheet configuration instead, and a caller who sets either one gets
+    exactly what they asked for.
+
+    Anything else -- ``label``, ``kappa``, ``taus``, ``shots``, ``encoding``,
+    ``reps``, ``blas_threads`` -- goes in ``quantum_args`` and is passed straight
+    through, so an unknown key raises :class:`TypeError` naming it rather than being
+    silently dropped. Keys there win over the positional arguments, which is how
+    ``random_state`` can be set back to the runsheet's 0.
+
+    Parameters
+    ----------
+    module : module
+        The ``make_*`` module, read for its ``N_QUBITS`` and ``N_SAMPLES`` defaults.
+    quantum_args : dict or None
+        Family-specific keyword arguments.
+    save_path : str
+        Directory to write into.
+    n_samples : list of int
+        Row counts, honoured only if not :data:`N_SAMPLES`.
+    dim : list of int
+        Qubit counts, honoured only if not :data:`DIM`.
+    random_state : int
+        Seed.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for the family's ``generate_*_datasets`` function.
+    """
+    kwargs = dict(
+        n_qubits=module.N_QUBITS if dim is DIM else dim,
+        n_samples=module.N_SAMPLES if n_samples is N_SAMPLES else n_samples,
+        save_path=save_path,
+        random_state=random_state,
+    )
+    kwargs.update(quantum_args or {})
+    return kwargs
+
 
 def generate_data(
     type_of_data=None,
@@ -45,6 +109,7 @@ def generate_data(
     n_redundant=N_REDUNDANT,
     n_clusters_per_class=N_CLUSTERS_PER_CLASS,
     weights=WEIGHTS,
+    quantum_args=None,
     random_state=42,
 ):
     """
@@ -57,8 +122,10 @@ def generate_data(
     Parameters
     ----------
     type_of_data : str
-        Type of dataset to generate. Options: 'circles', 'moons', 'classes',
-        's_curve', 'spheres', 'spirals', 'swiss_roll'.
+        Type of dataset to generate. Classical options: 'circles', 'moons',
+        'classes', 's_curve', 'spheres', 'spirals', 'swiss_roll'. Simulated-quantum
+        options: 'ground_state', 'time_evolution', 'hamiltonian_learning',
+        'quantum_labels', 'engineered_kernel'.
     save_path : str
         Directory path where datasets will be saved.
     n_samples : list of int, default=range(100, 300, 20)
@@ -83,6 +150,15 @@ def generate_data(
         Clusters per class (for classes only).
     weights : list of list of float, default=[[0.3, 0.7], [0.4, 0.6], [0.5, 0.5]]
         Class weight distributions (for classes only).
+    quantum_args : dict, optional
+        Extra keyword arguments for the quantum families, passed straight to the
+        family's generator -- ``label`` and ``kappa`` for 'ground_state', ``taus``
+        for 'time_evolution', ``times`` and ``shots`` for 'hamiltonian_learning',
+        ``encoding`` and ``reps`` for 'quantum_labels', ``gamma_q`` for
+        'engineered_kernel', and ``margin``, ``name`` or ``blas_threads`` for any of
+        them. For these families ``dim`` is the qubit count and ``n_samples`` the row
+        count; left at their defaults, each family's documented runsheet
+        configuration is used instead, since ``dim``'s default reaches 12 qubits.
     random_state : int, default=42
         Random seed for reproducibility.
 
@@ -101,6 +177,11 @@ def generate_data(
     >>> from qbiocode.data_generation import generate_data
     >>> generate_data(type_of_data='circles', save_path='data/circles')
     Generating circles dataset...
+    Dataset generation complete.
+
+    >>> generate_data(type_of_data='ground_state', save_path='data/quantum',
+    ...               dim=[4], n_samples=[16])                      # doctest: +SKIP
+    Generating ground-state observable datasets...
     Dataset generation complete.
     """
 
@@ -156,9 +237,20 @@ def generate_data(
             save_path=save_path,
             random_state=random_state,
         )
+    elif type_of_data in QUANTUM_MODULES:
+        # Simulated quantum datasets: binary by construction, with the label rule
+        # recorded per dataset in <save_path>/meta/<name>.json.
+        module, function = QUANTUM_MODULES[type_of_data]
+        getattr(module, function)(
+            **_quantum_kwargs(module, quantum_args, save_path, n_samples, dim, random_state)
+        )
     else:
+        valid = ["circles", "moons", "classes", "s_curve", "spheres", "spirals",
+                 "swiss_roll"] + list(QUANTUM_MODULES)
         raise ValueError(
-            "Invalid type_of_data. Choose from 'circles', 'moons', 'classes', 's_curve', 'spheres', 'spirals', or 'swiss_roll'."
+            f"Invalid type_of_data {type_of_data!r}. Choose from "
+            + ", ".join(repr(name) for name in valid[:-1])
+            + f", or {valid[-1]!r}."
         )
 
     print("Dataset generation complete.")

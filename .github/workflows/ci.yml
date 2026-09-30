@@ -104,6 +104,7 @@ jobs:
 
     - name: Every console script answers --help
       run: |
+        qdata-gen --help > /dev/null
         qprofiler --help > /dev/null
         qsage --help > /dev/null
         quvine --help > /dev/null

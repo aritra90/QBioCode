@@ -157,6 +157,7 @@ all = [
 ]
 
 [project.scripts]
+qdata-gen = "qbiocode.data_generation.quantum_cli:main"
 qprofiler = "qbiocode.apps.qprofiler.cli:main"
 qprofiler-batch = "qbiocode.apps.qprofiler.qprofiler_batchmode:main"
 qsage = "qbiocode.apps.sage.sage:main"

@@ -117,9 +117,6 @@ def generate_classification_datasets(
     # populate all the configs with the corresponding argument values
     for n_s, n_f, n_i, n_r, n_cla, n_clu, weights in configurations:
         if (n_i + n_r) <= n_f:
-            config = "n_samples={}, n_features={}, n_informative={}, n_redundant={}, n_classes={}, n_clusters_per_class={}, weights={}".format(
-                n_s, n_f, n_i, n_r, n_cla, n_clu, weights
-            )
             # print(count_configs)
 
             # iteratively run the function for each combination of arguments
@@ -133,13 +130,14 @@ def generate_classification_datasets(
                 weights=weights,
                 random_state=random_state,
             )
-            # print("Configuration {}/{}: {}".format(count_configs, len(configurations), config))
             dataset = pd.DataFrame(X)
             dataset["class"] = y
-            with open(os.path.join(save_path, "dataset_config.json"), "w") as outfile:
+            with open(
+                os.path.join(save_path, "dataset_config.json"), "w", encoding="utf-8"
+            ) as outfile:
                 dataset_config.update(
                     {
-                        "hd_data-{}.csv".format(count_configs): {
+                        "class_data-{}.csv".format(count_configs): {
                             "n_samples": n_s,
                             "n_features": n_f,
                             "n_informative": n_i,
@@ -151,7 +149,7 @@ def generate_classification_datasets(
                     }
                 )
                 json.dump(dataset_config, outfile, indent=4)
-            new_dataset = dataset.to_csv(
+            dataset.to_csv(
                 os.path.join(save_path, "class_data-{}.csv".format(count_configs)), index=False
             )
             count_configs += 1

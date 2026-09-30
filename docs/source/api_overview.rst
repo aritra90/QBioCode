@@ -198,6 +198,41 @@ QBioCode supports the following synthetic dataset generators:
   - Class imbalance through weight parameters
   - Cluster structure within classes
 
+**Quantum-Simulated Datasets**
+
+.. autosummary::
+    ~qbiocode.data_generation.make_ground_state.generate_ground_state_datasets
+    ~qbiocode.data_generation.make_time_evolution.generate_time_evolution_datasets
+    ~qbiocode.data_generation.make_hamiltonian_learning.generate_hamiltonian_learning_datasets
+    ~qbiocode.data_generation.make_quantum_labels.generate_quantum_label_datasets
+    ~qbiocode.data_generation.make_engineered_kernel.generate_engineered_kernel_datasets
+    ~qbiocode.data_generation.quantum_selftest.run_selftest
+
+Five families produced by exact statevector simulation (NumPy, :math:`n \le 12` qubits),
+binary by construction: the label thresholds a continuous physical quantity at its median,
+so the classes are balanced and 50% accuracy is exactly chance.
+
+- **Ground state**: features are the couplings of a disordered transverse-field Ising
+  Hamiltonian; the label is an observable of its even-sector ground state
+- **Time evolution**: features are an :math:`n`-bit input; the label is a sparse observable
+  after :math:`e^{-iH\tau}`, with ``taus`` acting as a difficulty ladder
+- **Hamiltonian learning**: features are shot-noisy local expectations after a quench; the
+  label is a property of the hidden Hamiltonian
+- **Quantum labels**: features are circuit parameters; the label comes from the circuit,
+  so a learner can be aligned or misaligned with the encoder that produced it -- including
+  its ``data_map``, which QProfiler's ``qsvc`` and ``pqk`` do not share
+- **Engineered kernel**: labels constructed to saturate the geometric-difference bound, as
+  a positive control for **one** arm: the default ``data_map='qiskit'`` targets ``qsvc``
+  and ``data_map='unit'`` targets ``pqk``
+
+Unlike the classical generators these write three views --
+``x_view/``, ``phi_view/`` and ``meta/`` -- and they take the qubit count through ``dim``
+and everything family-specific through one ``quantum_args`` dict. See
+:doc:`quantum_datasets` for the runsheet, the verification table and the non-claims.
+
+.. important::
+   The data is classically simulated, so no result on it is evidence of quantum advantage.
+
 Configurable Parameters
 """""""""""""""""""""""
 
@@ -265,6 +300,25 @@ Example Usage
        random_state=42  # Same seed produces identical results
    )
 
+   # Generate a simulated quantum dataset. For these families 'dim' is the QUBIT count
+   # and 'n_samples' the row count; every other knob travels in 'quantum_args'.
+   generate_data(
+       type_of_data='quantum_labels',
+       dim=[6],                      # 6 qubits -> 6 features
+       n_samples=[400],
+       # 'data_map' picks the arm this is aligned with: 'qiskit' (default) -> qsvc,
+       # 'unit' -> pqk. They are different unitaries, so no other setting substitutes.
+       quantum_args={'encoding': 'zz', 'tau': 1.0, 'reps': 2, 'data_map': 'qiskit'},
+       save_path='./qdata',
+       random_state=0
+   )
+
+   # Verify the simulator before using anything it produced: seven checks against
+   # independently computed answers, including Qiskit's own ZZFeatureMap.
+   from qbiocode.data_generation import run_selftest
+
+   ok, checks = run_selftest()
+
 Dataset Characteristics
 """""""""""""""""""""""
 
@@ -298,6 +352,21 @@ Each dataset type is designed to test specific ML capabilities:
    * - Classification
      - High-D
      - Feature selection, curse of dimensionality
+   * - Ground state
+     - :math:`2n-1` (11--15)
+     - Learning an observable from a Hamiltonian's description; negative control
+   * - Time evolution
+     - :math:`n` (binary features)
+     - Graded difficulty: effective degree grows with the evolution time
+   * - Hamiltonian learning
+     - :math:`2n \cdot |\mathrm{times}|`
+     - Robustness to measurement (shot) noise
+   * - Quantum labels
+     - :math:`n`, in :math:`[0,1]`
+     - Feature-map alignment between learner and label generator
+   * - Engineered kernel
+     - :math:`n`, in :math:`[0,1]`
+     - Positive control: labels built to favour a quantum kernel
 
 Batch Generation
 """"""""""""""""

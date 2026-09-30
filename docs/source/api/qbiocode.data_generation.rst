@@ -17,11 +17,19 @@ qbiocode.data_generation package
        qbiocode.data_generation.make_blobs
        qbiocode.data_generation.make_circles
        qbiocode.data_generation.make_class
+       qbiocode.data_generation.make_engineered_kernel
+       qbiocode.data_generation.make_ground_state
+       qbiocode.data_generation.make_hamiltonian_learning
        qbiocode.data_generation.make_moons
+       qbiocode.data_generation.make_quantum_labels
        qbiocode.data_generation.make_s_curve
        qbiocode.data_generation.make_spheres
        qbiocode.data_generation.make_spirals
        qbiocode.data_generation.make_swiss_roll
+       qbiocode.data_generation.make_time_evolution
+       qbiocode.data_generation.quantum_cli
+       qbiocode.data_generation.quantum_core
+       qbiocode.data_generation.quantum_selftest
 
 
 
@@ -41,8 +49,16 @@ qbiocode.data_generation package
          - Generate multiple high-dimensional classification datasets with varying parameters.
        * - :func:`generate_default_blobs_datasets <qbiocode.data_generation.make_blobs.generate_default_blobs_datasets>`
          - Generate blob datasets with default parameter configurations.
+       * - :func:`generate_engineered_kernel_datasets <qbiocode.data_generation.make_engineered_kernel.generate_engineered_kernel_datasets>`
+         - Generate datasets whose labels saturate the quantum-advantage bound.
+       * - :func:`generate_ground_state_datasets <qbiocode.data_generation.make_ground_state.generate_ground_state_datasets>`
+         - Generate ground-state observable-learning datasets.
+       * - :func:`generate_hamiltonian_learning_datasets <qbiocode.data_generation.make_hamiltonian_learning.generate_hamiltonian_learning_datasets>`
+         - Generate Hamiltonian-learning-as-classification datasets.
        * - :func:`generate_moons_datasets <qbiocode.data_generation.make_moons.generate_moons_datasets>`
          - Generate multiple two-moons datasets with varying parameters.
+       * - :func:`generate_quantum_label_datasets <qbiocode.data_generation.make_quantum_labels.generate_quantum_label_datasets>`
+         - Generate datasets with classical features and circuit-generated labels.
        * - :func:`generate_s_curve_datasets <qbiocode.data_generation.make_s_curve.generate_s_curve_datasets>`
          - Generate multiple 3D S-curve datasets with varying parameters.
        * - :func:`generate_spheres_datasets <qbiocode.data_generation.make_spheres.generate_spheres_datasets>`
@@ -51,6 +67,10 @@ qbiocode.data_generation package
          - Generate multiple n-dimensional spiral datasets with varying parameters.
        * - :func:`generate_swiss_roll_datasets <qbiocode.data_generation.make_swiss_roll.generate_swiss_roll_datasets>`
          - Generate multiple 3D Swiss roll datasets with varying parameters.
+       * - :func:`generate_time_evolution_datasets <qbiocode.data_generation.make_time_evolution.generate_time_evolution_datasets>`
+         - Generate time-evolution datasets forming a difficulty ladder in evolution time.
+       * - :func:`run_selftest <qbiocode.data_generation.quantum_selftest.run_selftest>`
+         - Run every check and report.
     
 
 

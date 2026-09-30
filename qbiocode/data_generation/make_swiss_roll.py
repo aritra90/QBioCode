@@ -87,7 +87,6 @@ def generate_swiss_roll_datasets(
 
     # populate all the configs with the corresponding argument values
     for n_s, n_n, n_h in configurations:
-        config = "n_samples={}, noise={}, hole={}".format(n_s, n_n, n_h)
         # print(count_configs)
 
         # iteratively run the function for each combination of arguments
@@ -97,10 +96,9 @@ def generate_swiss_roll_datasets(
             hole=n_h,
             random_state=random_state,
         )
-        # print("Configuration {}/{}: {}".format(count_configs, len(configurations), config))
         dataset = pd.DataFrame(X)
         dataset["class"] = y
-        with open(os.path.join(save_path, "dataset_config.json"), "w") as outfile:
+        with open(os.path.join(save_path, "dataset_config.json"), "w", encoding="utf-8") as outfile:
             dataset_config.update(
                 {
                     "swiss_roll_data-{}.csv".format(count_configs): {
@@ -111,7 +109,7 @@ def generate_swiss_roll_datasets(
                 }
             )
             json.dump(dataset_config, outfile, indent=4)
-        new_dataset = dataset.to_csv(
+        dataset.to_csv(
             os.path.join(save_path, "swiss_roll_data-{}.csv".format(count_configs)), index=False
         )
         count_configs += 1

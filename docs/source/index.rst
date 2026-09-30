@@ -45,6 +45,7 @@ Ready to dive into the world of quantum healthcare and life sciences?
     Installation <installation.md>
     Background <background.md>
     Tutorials <tutorials.md>
+    Simulated quantum datasets <quantum_datasets.md>
     Applications <apps>
     API <api_overview>
     Citing <citing>
