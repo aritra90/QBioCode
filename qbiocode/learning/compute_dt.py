@@ -122,6 +122,7 @@ def compute_dt_opt(
     model="Decision Tree",
     cv=5,
     criterion=None,
+    splitter=None,
     max_depth=None,
     min_samples_split=None,
     min_samples_leaf=None,
@@ -152,6 +153,12 @@ def compute_dt_opt(
         model (str): Name of the model being used, default is 'Decision Tree'.
         cv (int): Number of cross-validation folds. Default is 5.
         criterion (list): List of criteria to consider for splitting. Default is empty list.
+        splitter (list): Strategies to consider for choosing the split at each node,
+            ``'best'`` or ``'random'``. Default is empty list. Accepted here as well as in
+            :func:`compute_dt` because ``model_run`` splats whichever block applies into
+            whichever twin runs, so a name only one twin takes is a ``TypeError`` raised
+            inside a joblib worker -- which, because the delayed list is built before
+            Parallel starts, takes down every model in the run rather than just this one.
         max_depth (list): List of maximum depths to consider. Default is empty list.
         min_samples_split (list): List of minimum samples required to split an internal node. Default is empty list.
         min_samples_leaf (list): List of minimum samples required to be at a leaf node. Default is empty list.
@@ -176,6 +183,7 @@ def compute_dt_opt(
     # `[]` default; see qbiocode.learning._grid.
     candidates = {
         "criterion": criterion,
+        "splitter": splitter,
         "max_depth": max_depth,
         "min_samples_split": min_samples_split,
         "min_samples_leaf": min_samples_leaf,

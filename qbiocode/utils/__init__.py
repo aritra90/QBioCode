@@ -9,7 +9,11 @@ Available Functions
 -------------------
 - scaler_fn: Data scaling and normalization
 - feature_encoding: Encode features for quantum circuits
-- qml_winner: Identify best performing quantum model
+- qml_winner: Identify best performing quantum model (DESCRIPTIVE ONLY -- biased
+  post-hoc argmax; reports classical wins on 84/84 datasets under a pure null)
+- select_winners: unbiased classical-vs-quantum verdicts with confidence intervals
+- fair_winner: select_winners plus the CSVs, as a drop-in for qml_winner
+- corpus_inference: corpus-level t / Wilcoxon / sign tests over per-dataset deltas
 - checkpoint_restart: Save and load model checkpoints
 - track_progress: Track progress of dataset processing
 - combine_results: Combine evaluation results from multiple runs
@@ -58,7 +62,21 @@ from .tabpfn_account import (
     load_tabpfn_token,
     write_token_template,
 )
-from .qc_winner_finder import qml_winner
+from .qc_winner_finder import (
+    aggregate_benchmark,
+    collect_kernel_diagnostics,
+    fair_winner,
+    qml_winner,
+)
+from .kernel_diagnostics import kernel_report
+from .fair_selection import (
+    WinnerReport,
+    arm_iteration_table,
+    corpus_inference,
+    iteration_floor_half_width,
+    model_side,
+    select_winners,
+)
 from .tutorial_data import tutorial_data_dirs, tutorial_data_path
 from .qutils import (
     execute_circuit,
@@ -87,6 +105,16 @@ __all__ = [
     "feature_encoding",
     # Model management
     "qml_winner",
+    "fair_winner",
+    "aggregate_benchmark",
+    "collect_kernel_diagnostics",
+    "kernel_report",
+    "select_winners",
+    "corpus_inference",
+    "arm_iteration_table",
+    "iteration_floor_half_width",
+    "model_side",
+    "WinnerReport",
     "checkpoint_restart",
     # Results management
     "track_progress",

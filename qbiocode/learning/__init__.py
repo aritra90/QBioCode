@@ -64,11 +64,9 @@ from .compute_xgb import compute_xgb, compute_xgb_opt
 # that module's docstring and tests/test_openmp_import_order.py.
 from .compute_tabpfn import compute_tabpfn, compute_tabpfn_opt
 
-from .compute_pqk import compute_pqk, compute_pqk_opt
-from .compute_qpl import compute_qpl, compute_qpl_opt
-
 # Quantum ML algorithms
 from .compute_pqk import compute_pqk, compute_pqk_opt
+from .compute_qpl import compute_qpl, compute_qpl_opt
 from .compute_qensemble import compute_qensemble
 from .compute_qnn import compute_qnn, compute_qnn_opt
 from .compute_qsvc import compute_qsvc, compute_qsvc_opt

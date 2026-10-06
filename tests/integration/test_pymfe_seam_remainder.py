@@ -302,9 +302,20 @@ class TestTheNativeBranchThatReturnsNone:
         ``IndexError: index 0 is out of bounds for axis 0 with size 0`` -- so the fixture
         would exercise a second, unrelated degeneracy and never reach the branch this
         class is about.
+
+        The base vector is small *integers* rather than ``linspace`` floats so that the
+        variances are bit-identical across permutations, not merely equal to within
+        floating-point noise: the mean is exact and every squared deviation is exactly
+        representable, so the summation order a permutation imposes cannot change the
+        result. That distinction became load-bearing when ``get_low_var_features``
+        started thresholding on ``var(ddof=0)`` to match ``VarianceThreshold``. The old
+        ``ddof=1`` threshold was inflated by ``N/(N-1)``, which swamped the ~4e-16 spread
+        of a shuffled ``linspace`` and dropped every feature by accident; on the exact
+        threshold that spread instead decides which columns survive, and the helper
+        returned a noise-determined ``2`` rather than ``None``.
         """
         rng = np.random.default_rng(3)
-        base = np.linspace(-2.0, 2.0, 60)
+        base = np.arange(-30, 30, dtype=float)
         columns = {}
         for i in range(6):
             shuffled = base.copy()
@@ -319,10 +330,11 @@ class TestTheNativeBranchThatReturnsNone:
     def test_the_helper_really_returns_none_on_this_input(self):
         """The premise. If this stops being None the tests below prove nothing."""
         frame = self._equal_variance_frame()
-        # Shuffling leaves the variances equal only to floating-point noise, which is
-        # enough: the threshold is their 25th percentile, so all of them sit at or below
-        # it. Asserting the spread rather than exact equality keeps the premise honest.
-        assert frame.var().std() < 1e-12, "fixture variances are no longer near-identical"
+        # Exactly equal, not near-equal: the threshold is the 25th percentile of these
+        # variances and VarianceThreshold keeps only those strictly above it, so the
+        # premise holds if and only if there is no spread at all for the percentile to
+        # cut through. An integer base guarantees that (see the fixture's docstring).
+        assert frame.var(ddof=0).std() == 0.0, "fixture variances are no longer identical"
         assert get_low_var_features(frame, frame.shape[1]) is None
 
     def test_evaluate_turns_it_into_nan_rather_than_failing(self):

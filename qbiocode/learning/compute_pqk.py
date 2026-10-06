@@ -14,6 +14,7 @@
 
 # ====== Base class imports ======
 import hashlib
+import json
 import os
 import time
 import warnings
@@ -39,6 +40,48 @@ from qbiocode.learning._tuning import (
     record_tuned_params,
     run_function_study,
 )
+
+
+def _dump_pqk_projections(
+    args, data_key, model, Z_train, Z_test, X_train, y_train, y_test, best_params
+):
+    """Write the projected features PQK's classical head was fitted on.
+
+    Unlike QSVC's fidelity Gram, PQK's kernel is cheap to *recompute* -- the head is an SVC
+    over the projections, so ``pairwise_kernels(Z, metric=kernel, gamma=gamma)`` reproduces
+    it exactly and costs no circuits. What blocks the diagnostic is bookkeeping, not cost:
+
+      * the projection cache is keyed by a sha256 over the feature-map parameters **and**
+        ``dataset_fingerprint(X_train, X_test)``, so locating the right ``.npy`` after the
+        fact requires already holding the exact split that produced it;
+      * the cache stores no labels, and kernel-target alignment needs ``y`` in the row order
+        of ``Z``, which is a property of the split;
+      * ``X_train`` is needed for the classical side of ``g(K_c || K_q)`` and is persisted
+        nowhere -- ``qprofiler`` pickles only the results frame.
+
+    The head searches ``kernel`` over ``['linear', 'rbf', 'poly', 'sigmoid']``, so the chosen
+    kernel is **not** necessarily RBF. ``best_params`` is stored here so a reader reconstructs
+    what was actually fitted instead of assuming a radial basis.
+
+    Projections are ``n x feat_dimension``, so this file is smaller than a QSVC Gram by a
+    factor of ``n / feat_dimension``.
+    """
+    dump_dir = args.get("kernel_dump_dir") if isinstance(args, Mapping) else None
+    if not dump_dir:
+        return
+    os.makedirs(dump_dir, exist_ok=True)
+    stem = os.path.join(dump_dir, f"proj_{model}_{data_key}")
+    np.savez_compressed(
+        stem + ".npz",
+        Z_train=np.asarray(Z_train),
+        Z_test=np.asarray(Z_test),
+        X_train=np.asarray(X_train),
+        y_train=np.asarray(y_train),
+        y_test=np.asarray(y_test),
+        # npz holds arrays, not mappings: the SVC choice travels as a JSON scalar and is
+        # read back with json.loads(str(z["best_params"])).
+        best_params=np.asarray(json.dumps(best_params, default=str)),
+    )
 
 
 def compute_pqk(
@@ -195,6 +238,18 @@ def compute_pqk(
     _projection_backend = args.get("projection_backend")
     if _projection_backend:
         fingerprint_parts = fingerprint_parts + (_projection_backend,)
+    # The data itself, plus the two settings that change the numbers a projection holds
+    # without changing the circuit. Without them the key names the feature map and the
+    # dataset but never the rows, so a different fold of the same dataset, a regenerated
+    # CSV under an unchanged name, or a different shot count all reach the same file -- and
+    # the row-count/width validation below cannot reject any of them, because those cases
+    # share a shape. This does orphan projections cached under the older key, which costs a
+    # recompute rather than correctness; only the tutorial trees hold any.
+    fingerprint_parts = fingerprint_parts + (
+        qutils.dataset_fingerprint(X_train, X_test),
+        args.get("shots"),
+        args.get("backend"),
+    )
     feature_map_fingerprint = hashlib.sha256(
         repr(fingerprint_parts).encode()
     ).hexdigest()[:10]
@@ -380,23 +435,35 @@ def compute_pqk(
                         # These groups are the Pauli X, Y and Z operators on individual qubits
                         # Apply the circuit layout to the observable if mapped to device
                         if args["backend"] != "simulator":
+                            # num_qubits comes from the CIRCUIT, not the backend. On a device the two agree:
+                            # transpiling against a 127-qubit backend returns a 127-qubit circuit, and the
+                            # observables built either way are byte-identical (checked on FakeManilaV2 and
+                            # FakeSherbrooke). On Aer they do not agree -- AerSimulator reports num_qubits=63,
+                            # a memory-derived capacity rather than a device width, while transpiling leaves
+                            # the circuit at its own width and sets circuit.layout to None. Laying the Pauli
+                            # out onto 63 qubits raised, for every estimator-primitive model reached through
+                            # backend: 'mps_simulator':
+                            #   ValueError: The number of qubits of the circuit (10) does not match the
+                            #              number of qubits of the (0,)-th observable (63).
+                            # With layout None and num_qubits == circuit.num_qubits the call is the identity,
+                            # so this branch now agrees with the else branch on Aer and is unchanged on hardware.
                             observables_x = []
                             observables_y = []
                             observables_z = []
                             for i in range(feat_dimension):
                                 observables_x.append(
                                     Pauli(id[:i] + "X" + id[(i + 1) :]).apply_layout(
-                                        circuit.layout, num_qubits=backend.num_qubits
+                                        circuit.layout, num_qubits=circuit.num_qubits
                                     )
                                 )
                                 observables_y.append(
                                     Pauli(id[:i] + "Y" + id[(i + 1) :]).apply_layout(
-                                        circuit.layout, num_qubits=backend.num_qubits
+                                        circuit.layout, num_qubits=circuit.num_qubits
                                     )
                                 )
                                 observables_z.append(
                                     Pauli(id[:i] + "Z" + id[(i + 1) :]).apply_layout(
-                                        circuit.layout, num_qubits=backend.num_qubits
+                                        circuit.layout, num_qubits=circuit.num_qubits
                                     )
                                 )
                         else:
@@ -517,6 +584,18 @@ def compute_pqk(
     }
     model_params = hyperparameters
 
+    _dump_pqk_projections(
+        args,
+        data_key,
+        model,
+        projections_train,
+        projections_test,
+        X_train,
+        y_train,
+        y_test,
+        estimator.best_params_,
+    )
+
     return modeleval(
         y_test,
         y_predicted,
@@ -530,6 +609,24 @@ def compute_pqk(
 
 
 
+
+
+# Parallelism for the classical SVC head below. It was ``n_jobs=-1``, which is wrong in
+# the one place this function is actually called from: ``compute_pqk``/``compute_pqk_opt``
+# run inside a joblib worker, because ``model_run`` fans the model list out over loky.
+# joblib does not let a nested ``Parallel`` start new processes -- it swaps in the
+# threading backend -- so this never deadlocked and never showed up as an error. What it
+# did instead, measured on a 128-core host with only four outer workers, was take each
+# worker from 3 OS threads to ~150. At the pilot's ``n_jobs: 13`` that is well over a
+# thousand runnable threads inside a 16-slot cgroup: the job does not fail, it thrashes,
+# which from the outside is indistinguishable from being stuck. ``OMP_NUM_THREADS`` does
+# not help, since these are joblib's own threads rather than OpenMP's.
+#
+# 1, not a cap like ``compute_qpl._SEARCH_N_JOBS``: the search is 40 candidates x 5 folds
+# of SVC on a projected kernel of a few hundred rows, so each fit is milliseconds and the
+# outer loop already has every core busy. ``_tuning.py`` pins its own searches to 1 for
+# the same reason.
+_SEARCH_N_JOBS = 1
 
 
 def create_svc_model(seed):
@@ -549,7 +646,7 @@ def create_svc_model(seed):
         n_iter=40,
         cv=5,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_SEARCH_N_JOBS,
     )
 
     return svc_model
@@ -635,6 +732,7 @@ def compute_pqk_opt(
         n_trials=n_trials,
         seed=args.get("seed") if isinstance(args, dict) else None,
         validation_split=validation_split,
+        data_key=data_key,
     )
 
     frame = compute_pqk(

@@ -276,6 +276,7 @@ def compute_qnn_opt(
         n_trials=n_trials,
         seed=args.get("seed") if isinstance(args, dict) else None,
         validation_split=validation_split,
+        data_key=data_key,
     )
 
     frame = compute_qnn(

@@ -35,6 +35,50 @@ import warnings
 from collections.abc import Mapping, Sequence
 
 
+def to_plain(value):
+    """Strip config-library wrappers out of a hyperparameter value, recursively.
+
+    OmegaConf hands a YAML list to these builders as a ``ListConfig`` and a mapping as a
+    ``DictConfig``. Both behave like the ``Sequence`` and ``Mapping`` the builders test
+    for, and a *scalar* leaf reads back as a plain ``int`` or ``str``, which is why this
+    went unnoticed for so long. What does not survive is a *container* leaf.
+    ``gridsearch_mlp_args`` writes ``hidden_layer_sizes: [[20], [50], [100]]``, and
+    ``list(values)`` unwraps only the outer ``ListConfig`` -- each choice is still a
+    ``ListConfig``. Optuna eventually puts that choice through ``json.dumps`` and raises
+    ``TypeError: Object of type ListConfig is not JSON serializable`` inside a joblib
+    worker, which takes all 13 models of the pass down with it. All 12 pilot jobs died
+    exactly this way, having fit nothing.
+
+    Two things about the trigger are worth recording, because both are reasons a test
+    can be written and still miss it. It is version-dependent: the ``json.dumps`` is
+    Optuna's constant-liar bookkeeping, and ``TPESampler`` only began defaulting
+    ``constant_liar=True`` in Optuna 5, so the same configs ran on Optuna 4. And it is
+    late: the sampler draws its first ``n_startup_trials`` (10) independently at random
+    and only then consults the relative path, so the failure lands on trial 10 of a
+    50-trial search rather than trial 0.
+
+    Done structurally rather than through ``OmegaConf.to_object`` so the learning layer
+    stays independent of the config library -- a direct caller passing plain dicts and
+    lists is the ordinary case, and the defect is "a ``Sequence`` that is not a ``list``",
+    which is not unique to OmegaConf. Nothing is lost by not using OmegaConf's own
+    converter: iterating a ``ListConfig`` resolves ``${...}`` interpolations on element
+    access, so the values seen here are already resolved.
+
+    Args:
+        value: Whatever the config supplied, at any nesting depth.
+
+    Returns:
+        The same value with every ``Mapping`` rebuilt as a ``dict`` and every non-string
+        ``Sequence`` or set rebuilt as a ``list``. Scalars, ``None`` and objects that are
+        neither (a numpy array, say) are returned unchanged.
+    """
+    if isinstance(value, Mapping):
+        return {key: to_plain(item) for key, item in value.items()}
+    if isinstance(value, (Sequence, set, frozenset)) and not isinstance(value, (str, bytes)):
+        return [to_plain(item) for item in value]
+    return value
+
+
 def build_param_grid(model, candidates):
     """Build a ``GridSearchCV`` ``param_grid`` from the values actually supplied.
 
@@ -56,6 +100,7 @@ def build_param_grid(model, candidates):
     """
     grid = {}
     for name, values in candidates.items():
+        values = to_plain(values)
         if values is None:
             continue
         # A `{low, high}` range is meaningful to the Optuna tuner but not to a grid,
@@ -108,3 +153,64 @@ def warn_ignored_hyperparameter(model, name, reason):
         UserWarning,
         stacklevel=3,
     )
+
+
+def one_value(name, value, why, block):
+    """Resolve a parameter that ``_opt`` passes to every trial rather than searching.
+
+    Every *searched* key in a ``gridsearch_*`` block is written as a list, so a
+    one-element list is the natural way to spell a constant there, and it is taken
+    as that constant. The parameters routed through here are not searched, so
+    without this unwrapping the list reaches the estimator verbatim -- and a list
+    where the estimator wants a scalar does not fail in the estimator. It fails
+    later, in sklearn's ``clone`` during cross-validation, inside a joblib worker::
+
+        RuntimeError: Cannot clone object CatBoostClassifier(..., thread_count=[1],
+        ...), as the constructor either does not set or modifies parameter
+        thread_count
+
+    That names the parameter but not the block it came from, surfaces three layers
+    from the config key that caused it, and breaks the *tuned* path -- which
+    ``grid_search: True`` makes the only path that runs, since it replaces the
+    result label rather than adding to it. Every pilot config paired
+    ``'thread_count': [1]`` with ``grid_search: True``, so catboost fit nothing.
+
+    Several values are the opposite mistake: the author believed the parameter was
+    searched when it is not, and quietly keeping the first would hide that. So that
+    is refused, naming the block, the key and ``why``. An empty list is the shipped
+    default for a key the config never set (see :func:`build_param_grid`) and means
+    the same as ``None``.
+
+    ``block`` is required rather than defaulted: the whole value of the message is
+    that it names the config block to edit, and a default would silently name the
+    wrong one for every caller that forgot it.
+
+    Args:
+        name (str): The config key, as written in ``block``.
+        value: Whatever the config supplied -- a scalar, a one-element list, an
+            empty list, or None.
+        why (str): Why this parameter is not searched, in a clause that reads after
+            "but it is not searched: ".
+        block (str): The config block ``value`` came from, e.g.
+            ``'gridsearch_xgb_args'``.
+
+    Returns:
+        The single value, or None if the config did not set one.
+
+    Raises:
+        ValueError: If ``value`` holds more than one value.
+    """
+    value = to_plain(value)
+    if value is None:
+        return None
+    if isinstance(value, (Sequence, set, frozenset, Mapping)) and not isinstance(value, str):
+        values = list(value)
+        if not values:
+            return None
+        if len(values) > 1:
+            raise ValueError(
+                f"{block!r} gives {name!r} several values ({value!r}), but it is not "
+                f"searched: {why}. Give it a single value instead."
+            )
+        return values[0]
+    return value

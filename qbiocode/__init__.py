@@ -125,7 +125,8 @@ from .learning.compute_tabpfn import compute_tabpfn, compute_tabpfn_opt
 # ====== Import helper functions ======
 from .utils.dataset_checkpoint import checkpoint_restart
 from .utils.helper_fn import feature_encoding, scale_train_test, scaler_fn
-from .utils.qc_winner_finder import qml_winner
+from .utils.qc_winner_finder import fair_winner, qml_winner
+from .utils.fair_selection import corpus_inference, select_winners
 from .utils.tutorial_data import tutorial_data_dirs, tutorial_data_path
 from .version import __version__
 
@@ -187,6 +188,9 @@ __all__ = [
     "scale_train_test",
     "feature_encoding",
     "qml_winner",
+    "fair_winner",
+    "select_winners",
+    "corpus_inference",
     "checkpoint_restart",
     "tutorial_data_path",
     "tutorial_data_dirs",

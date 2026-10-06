@@ -7,7 +7,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import RandomizedSearchCV
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.neural_network import MLPRegressor
 import xgboost as xgb
@@ -17,6 +17,10 @@ import dill as pickle
 
 # The complexity-column schema is owned by the evaluation layer, which produces it --
 # not by this app, which only consumes it. qbiocode.visualization also consumes it.
+from qbiocode.evaluation.model_evaluation import (
+    SCORE_COLUMNS,
+    available_metric_columns,
+)
 from qbiocode.evaluation.dataset_evaluation import (
     SAMPLE_COUNT_COLUMN,
     detect_complexity_schema,
@@ -56,7 +60,31 @@ class QuantumSage():
         self._complexity_schema, self._columns_data_features = detect_complexity_schema(
             data_input
         )
-        self._columns_metrics = ['accuracy', 'f1_score', 'auc']
+        # Detected from the frame for the same reason the complexity block above is:
+        # the metrics row grew balanced_accuracy, mcc and pr_auc after the committed
+        # benchmark table was produced, and line 97 below does
+        # `data_input[self._columns_metrics]`, which raises KeyError on any table that
+        # predates a hardcoded name. SCORE_COLUMNS, not METRIC_COLUMNS: 'time' is a cost
+        # and a sub-sage regressing on it would be predicting hardware, not learnability.
+        #
+        # The second filter is on CONTENT, not presence. 'auc' and 'pr_auc' are NaN for
+        # every row whose model exposed no usable ranking score -- multiclass
+        # predict_proba has one column per class and no way to reduce it to one score --
+        # so a corpus of such rows carries the column but no finite value in it, and a
+        # sub-sage fitted on that target trains on nothing. Dropping it here reports one
+        # fewer metric; keeping it would report a model whose every prediction is NaN.
+        candidate_metrics = available_metric_columns(data_input.columns, SCORE_COLUMNS)
+        self._columns_metrics = [
+            name for name in candidate_metrics
+            if pd.to_numeric(data_input[name], errors='coerce').notna().any()
+        ]
+        if not self._columns_metrics:
+            raise ValueError(
+                "None of the metric columns "
+                f"{list(SCORE_COLUMNS)} is present in data_input with at least one "
+                "finite value, so there is no target for QuantumSage to regress on. "
+                f"Columns seen: {sorted(data_input.columns)[:20]}..."
+            )
         # The column recording how each model was parameterized is named for the
         # branch that produced it: model_evaluation.py writes 'BestParams_Tuned'
         # when grid_search is on and 'Model_Parameters' when it is off, never both.
@@ -202,6 +230,84 @@ class QuantumSage():
         return predictions_df
 
 
+    def _split_holding_out_datasets(self, X, y, groups, test_size, metric, model):
+        """Split rows so no dataset lands on both sides, dropping undefined targets.
+
+        Two defects this exists to prevent. Both inflate a sub-sage's reported
+        R-squared rather than making it fail visibly, which is the dangerous kind.
+
+        **A dataset on both sides of the split.** One dataset contributes a separate row
+        per (embedding, iteration), and the complexity features are a property of the
+        (embedded) dataset -- so all ``iter`` rows of one (dataset, embedding) carry an
+        identical feature vector, and the two embeddings of one dataset carry
+        near-identical ones. A plain ``train_test_split`` shuffles rows, so most test
+        rows have an exact feature twin in training and the score measures recall of
+        dataset identity, not the generalisation to an unseen dataset that
+        :meth:`predict` is actually asked for. Held out by dataset instead.
+
+        **A missing metric read as a score of zero.** ``auc`` and ``pr_auc`` are NaN for
+        any row whose model exposed no usable ranking score. ``fillna(0)`` does not
+        encode "unknown", it encodes "worse than random", so a regressor fitted on it
+        learns to predict failure for exactly the configurations whose metric could not
+        be computed -- and :meth:`predict` ranks on ``metric * r2``, so that bias
+        propagates into the recommendation. Those rows are dropped instead.
+
+        Allocation is by dataset rather than by row, so the realised test fraction only
+        approximates ``test_size``: datasets contribute unequal numbers of rows.
+
+        Args:
+            X (pd.DataFrame): Feature rows for one model, indexed as the input frame.
+            y (pd.Series): The target metric for those rows, NaN where undefined.
+            groups (pd.Series): The ``Dataset`` label of each row, aligned with ``X``.
+            test_size (float): Fraction of DATASETS -- not rows -- to hold out.
+            metric (str): Target metric name, for messages only.
+            model (str): Model whose sub-sage is being trained, for messages only.
+
+        Returns:
+            tuple: ``(X_train, X_test, y_train, y_test)``, the targets as arrays.
+
+        Raises:
+            ValueError: If fewer than two rows have a finite target, so nothing can be
+                fitted for this (model, metric) pair.
+        """
+        finite = y.notna().to_numpy()
+        if not finite.all():
+            logger.warning(
+                "%s/%s: dropping %d of %d rows whose %s is undefined. They are not "
+                "trained on as %s = 0, which would teach the sub-sage that these "
+                "configurations perform worse than random.",
+                model, metric, int((~finite).sum()), len(finite), metric, metric,
+            )
+        X, y, groups = X[finite], y[finite], groups[finite]
+        if len(y) < 2:
+            raise ValueError(
+                f"{model}/{metric}: only {len(y)} row(s) carry a finite {metric}, so no "
+                f"sub-sage can be fitted for this pair. {metric} is undefined for a "
+                "model that exposes no usable ranking score -- multiclass "
+                "predict_proba has one column per class and no way to reduce it to "
+                f"one. Either drop {metric!r} from the metric block of the input "
+                f"frame, or drop the {model!r} rows, then re-train."
+            )
+
+        y = y.to_numpy()
+        n_groups = groups.nunique()
+        if n_groups < 2:
+            logger.warning(
+                "%s/%s: the input covers %d dataset(s), so no dataset can be held out "
+                "and the split falls back to shuffling rows. The reported R-squared "
+                "then measures recall of near-duplicate training rows, not "
+                "generalisation to an unseen dataset, and is not comparable with a run "
+                "over several datasets.",
+                model, metric, n_groups,
+            )
+            return train_test_split(X, y, test_size=test_size, random_state=self._seed)
+
+        splitter = GroupShuffleSplit(
+            n_splits=1, test_size=test_size, random_state=self._seed
+        )
+        train_idx, test_idx = next(splitter.split(X, y, groups=groups))
+        return X.iloc[train_idx], X.iloc[test_idx], y[train_idx], y[test_idx]
+
     def train_sub_sages(self, test_size=0.2, sage_type='random_forest', n_iter=None, cv=5):
         """
         Train sub-sage predictors for each ML model and performance metric.
@@ -328,10 +434,17 @@ class QuantumSage():
                 model_indices = self._input_data_metadata[ self._input_data_metadata['model'] == model ].index
                 X = self._input_data_features_only.loc[ model_indices ]
                 X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
-                y = self._input_data_metrics.loc[model_indices][metric].fillna(0).to_numpy()
-                
+                # NOT .fillna(0): a NaN metric means "undefined here", and zero-filling
+                # it would train the sub-sage to predict failure for exactly the
+                # configurations whose metric could not be computed. Dropped instead,
+                # inside the split helper, which also holds out whole datasets.
+                y = self._input_data_metrics.loc[model_indices][metric]
+
                 print(f"Working on {model}")
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state = self._seed)
+                X_train, X_test, y_train, y_test = self._split_holding_out_datasets(
+                    X, y, self._input_data_metadata.loc[model_indices, 'Dataset'],
+                    test_size, metric, model,
+                )
 
                 # Calculate SLGH (Scaled Latent Geometric Hardness)
                 X_train = calculate_SLGH(X_train)

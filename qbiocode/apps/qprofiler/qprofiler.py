@@ -151,6 +151,159 @@ def _resolve_scaling(scaling):
     )
 
 
+def _resolve_backend_alias(args, log):
+    """Rewrite ``args['backend']`` from a config-facing alias to the internal name.
+
+    The aliases (``statevector_simulator``, ``mps_simulator``) say which *simulator*
+    runs, which the internal pair (``backend``, ``sim_method``) only says together.
+    :func:`qbiocode.utils.qutils.normalize_backend` does that translation, but it was
+    applied inside ``get_backend_session`` -- and eight other sites read the raw string
+    and branch on ``args["backend"] != "simulator"``
+    (:mod:`qbiocode.embeddings.embed`, ``compute_qsvc``/``qnn``/``vqc``/``pqk``/``qpl``,
+    and ``ensure_tuning_is_affordable``). An alias reaching those comparisons is not an
+    unknown-value error: ``statevector_simulator != "simulator"`` is simply *true*, so
+    every one of them would take its hardware branch -- building a pass manager, and
+    refusing to tune at all -- while the session itself ran locally as asked. Nothing
+    raises; the run is just wrong and slow.
+
+    So the alias is resolved once, here, before any of that code sees the config.
+    ``normalize_backend`` is idempotent, so ``get_backend_session`` normalising again
+    later is harmless.
+
+    Args:
+        args: the run config, mutated in place.
+        log: logger for the resolution line.
+    """
+    from qbiocode.utils.qutils import normalize_backend
+
+    raw = args.get("backend")
+    resolved = normalize_backend(args)
+    if resolved.get("backend") == raw and "sim_method" not in resolved:
+        return
+    try:
+        from omegaconf import DictConfig, OmegaConf
+
+        if isinstance(args, DictConfig):
+            OmegaConf.set_struct(args, False)
+    except ImportError:  # pragma: no cover - omegaconf ships with hydra
+        pass
+    args["backend"] = resolved["backend"]
+    if "sim_method" in resolved:
+        args["sim_method"] = resolved["sim_method"]
+    if resolved["backend"] != raw:
+        log.info(
+            f"backend {raw!r} resolved to backend={resolved['backend']!r}"
+            + (
+                f", sim_method={resolved['sim_method']!r}"
+                if "sim_method" in resolved
+                else ""
+            )
+        )
+
+
+def _resolve_model_lists(args, log):
+    """Build ``args['model']`` from ``classical_model`` plus ``quantum_model``.
+
+    Two lists instead of one, because the single ``model`` list mixed two populations
+    whose costs differ by three orders of magnitude and whose results are compared
+    *against each other*. Reading a run's scope off one flat list meant counting which
+    names happened to be quantum; and a model filed on the wrong side of that
+    comparison -- ``qsvc`` written into what the reader believed was the classical
+    arm -- was invisible, because ``model`` has no notion of sides. Splitting the key
+    makes the side an assertion the config states and this function checks.
+
+    ``model`` remains the internal name: everything downstream
+    (:mod:`qbiocode.evaluation.model_run`, the results columns, the tuning dispatch)
+    reads ``args['model']``, and rewriting those would be a much larger change for no
+    gain. So the two config keys are joined here, once, before any validation runs.
+
+    Precedence:
+      * Either new key present -> ``model`` is *derived* (classical first, then
+        quantum) and an explicitly written ``model`` is an error rather than a
+        silently-ignored key or a third source of truth.
+      * Neither present -> ``model`` is required, exactly as before. Every existing
+        config keeps working.
+
+    Args:
+        args: the run config, mutated in place so the rest of the run sees ``model``.
+        log: logger for the resolution line.
+
+    Raises:
+        ValueError: if a classical name appears under ``quantum_model`` or vice versa,
+            if either list holds duplicates, or if ``model`` is written alongside them.
+    """
+    from qbiocode.evaluation.model_run import QUANTUM_MODELS
+
+    has_split = "classical_model" in args or "quantum_model" in args
+    if not has_split:
+        if "model" not in args:
+            raise ValueError(
+                "Config names none of 'model', 'classical_model' or 'quantum_model'. "
+                "Prefer the two-list form: classical_model: ['lr', ...] and "
+                "quantum_model: ['qsvc', ...]."
+            )
+        return
+
+    if "model" in args and args["model"]:
+        raise ValueError(
+            "Config sets 'model' as well as 'classical_model'/'quantum_model'. "
+            "'model' is derived from the other two, so writing all three leaves no "
+            "single answer to which models run. Delete the 'model' line."
+        )
+
+    classical = [str(m) for m in (args.get("classical_model") or [])]
+    quantum = [str(m) for m in (args.get("quantum_model") or [])]
+
+    # Checked here, where the two lists still exist as separate objects. Once they are
+    # concatenated, model_run can only report that a name is unknown -- not that a
+    # known name was filed under the wrong population, which is the mistake that
+    # corrupts a quantum-vs-classical comparison without failing anything.
+    misfiled_q = [m for m in classical if m in QUANTUM_MODELS]
+    if misfiled_q:
+        raise ValueError(
+            f"classical_model names quantum model(s) {misfiled_q}. The quantum models "
+            f"are {sorted(QUANTUM_MODELS)}; move these to quantum_model. Left here "
+            f"they would run normally and be counted as classical baselines."
+        )
+    misfiled_c = [m for m in quantum if m not in QUANTUM_MODELS]
+    if misfiled_c:
+        raise ValueError(
+            f"quantum_model names {misfiled_c}, which {'is' if len(misfiled_c) == 1 else 'are'} "
+            f"not quantum. The quantum models are {sorted(QUANTUM_MODELS)}; move these "
+            f"to classical_model."
+        )
+
+    merged = classical + quantum
+    duplicated = sorted({m for m in merged if merged.count(m) > 1})
+    if duplicated:
+        raise ValueError(
+            f"Duplicate model(s) {duplicated} across classical_model and "
+            f"quantum_model; each model may appear once."
+        )
+    if not merged:
+        raise ValueError(
+            "classical_model and quantum_model are both empty; there is nothing to "
+            "fit."
+        )
+
+    # Hydra composes the config in struct mode, which rejects assignment to a key the
+    # YAML does not define -- and the point here is that the YAML no longer defines
+    # 'model'. Unlocked for this one assignment, and only when the object is a
+    # DictConfig; a plain dict (the unit tests, and any direct caller) needs nothing.
+    try:
+        from omegaconf import DictConfig, OmegaConf
+
+        if isinstance(args, DictConfig):
+            OmegaConf.set_struct(args, False)
+    except ImportError:  # pragma: no cover - omegaconf ships with hydra
+        pass
+    args["model"] = merged
+    log.info(
+        f"model resolved from classical_model + quantum_model: "
+        f"{len(classical)} classical {classical} + {len(quantum)} quantum {quantum}"
+    )
+
+
 def _validate_config(args, log):
     """Check the whole config before any dataset is read.
 
@@ -328,6 +481,11 @@ def main(args):
     # statement -- the exact "error attributed to the wrong thing" that
     # _validate_config exists to replace, and it reported one missing key where
     # the validator reports all of them at once.
+    # Before _validate_config, which requires 'model': with the two-list form that key
+    # does not exist in the YAML at all and is derived here.
+    _resolve_model_lists(args, log)
+    # Must precede every consumer of args['backend'], not just get_backend_session.
+    _resolve_backend_alias(args, log)
     scaler_name = _validate_config(args, log)
 
     # Authorise TabPFN's weight download before any worker starts, if the model was asked
@@ -337,17 +495,34 @@ def main(args):
     # is logged; the token itself is never written to the log, which is committed into
     # results directories and pasted into issues.
     if "tabpfn" in args["model"]:
+        from qbiocode.learning.compute_tabpfn import (
+            TABPFN_DEFAULT_VERSION,
+            tabpfn_versions_requiring_token,
+        )
         from qbiocode.utils.tabpfn_account import load_tabpfn_token
 
         source = load_tabpfn_token(args)
+        # Only the restricted checkpoints need one. Warning whenever a token is merely
+        # absent announced a failure that was not going to happen on every job of the
+        # first pilot, all of which pin the token-free 'v2'.
+        needs_token = tabpfn_versions_requiring_token(args)
         if source:
             log.info(f"TabPFN token {source}")
-        else:
+        elif needs_token:
             log.warning(
-                "'tabpfn' is in the model list but no API token was found, so its "
-                "pretrained weights cannot be downloaded and the model will fail. "
-                "Put the key in ~/.config/qbiocode/tabpfn.json as {\"token\": \"...\"}, "
-                "set tabpfn_json_path in the config, or export TABPFN_TOKEN."
+                f"'tabpfn' is in the model list and this config selects "
+                f"{', '.join(needs_token)}, whose weights need a licence accepted "
+                f"against a Prior Labs account, but no API token was found -- so they "
+                f"cannot be downloaded and the model will fail. Put the key in "
+                f"~/.config/qbiocode/tabpfn.json as {{\"token\": \"...\"}}, set "
+                f"tabpfn_json_path in the config, or export TABPFN_TOKEN. Alternatively "
+                f"use model_version {TABPFN_DEFAULT_VERSION!r}, which needs neither."
+            )
+        else:
+            log.info(
+                f"TabPFN needs no API token here: this config selects only token-free "
+                f"weights (default {TABPFN_DEFAULT_VERSION!r}, Apache 2.0 plus "
+                f"attribution), which download anonymously and cache locally."
             )
 
     log.info(f"The number of ML methods being parallelized is {min(args['n_jobs'], len(args['model']))}")
@@ -527,6 +702,14 @@ def main(args):
                     n_components=args["n_components"],
                     method=None,
                     quvine_args=args.get("quvine_args", {}),
+                    # Seeded by the split, like train_test_split above. Unseeded, UMAP
+                    # read numpy's global stream -- which a model run in this process
+                    # (n_jobs: 1, one model per config) re-seeds and advances -- and ran
+                    # numba-parallel SGD, which is not reproducible even from a fixed
+                    # stream. Two jobs of one (dataset, embedding) but different models
+                    # therefore scored those models on DIFFERENT features from the second
+                    # split on, and nothing failed to say so.
+                    random_state=split_seed,
                 )
                 summary.update({'embeddings': embed})
                 model_results.update({'embeddings': embed})
@@ -543,7 +726,46 @@ def main(args):
                 #log.info(f"\nThe characteristics of the embedding train dataset are: \n{evaluate_data}")
                 summary.update({'iteration': iter})
                 model_results.update({'iteration': iter})
-                data_key = '_'.join( [re.sub( r'\..*', '', file ), embed, str(args["n_components"]), str(iter)])
+                # os.path.splitext, not re.sub(r'\..*'): that regex truncated at the
+                # FIRST dot, so any dataset whose name carries a decimal parameter lost
+                # everything after it and collapsed onto a shared key. Two pairs in the
+                # curated 84-dataset corpus collide that way --
+                # GAMETES_Epistasis_2_Way_20atts_0.1H vs _0.4H, and
+                # GAMETES_Heterogeneity_20atts_1600_Het_0.4_0.2_50 vs _75 -- and since the
+                # colliding members share (n=1600, p=20), the row-count and width checks in
+                # compute_pqk/compute_qpl cannot tell them apart. The second dataset of each
+                # pair was scored on the first one's cached projections, without a warning,
+                # and the parameter that differs between them is the one that sets the
+                # difficulty the comparison is meant to measure.
+                data_key = '_'.join( [os.path.splitext( file )[0], embed, str(args["n_components"]), str(iter)])
+                # `summary` is created ONCE per dataset (line 396), above both the
+                # iteration and the embedding loop, and is only ever updated in place --
+                # so any key a pass does not itself write survives from the previous
+                # pass. model_run ends in `pd.melt(pd.concat(results)).dropna()`
+                # (model_run.py:501), and dropna DELETES a column whose single value is
+                # None rather than preserving it. `y_score_<model>` is None for any model
+                # that exposed no usable ranking score, so without the clear below such a
+                # pass inherits the PREVIOUS pass's y_score array and pairs it with the
+                # current pass's y_test -- a post-hoc ROC-AUC or PR-AUC computed from
+                # results.pkl would then score one split's probabilities against another
+                # split's labels. Silent, and wrong only for the threshold-free metrics,
+                # which is precisely why it has to be closed here rather than noticed
+                # later.
+                #
+                # This is the same bug class as the `row_base = dict(model_results)` fix
+                # a few lines below, which cured it for ModelResults.csv; the
+                # `summary` -> results.pkl side was never fixed. All four per-model
+                # prefixes are cleared, not just y_score: that also stops a stale
+                # `results_<model>` from being re-written to the CSV under the current
+                # pass's iteration and embedding.
+                for stale in [
+                    key
+                    for key in summary
+                    if key.startswith(
+                        ("results_", "y_test_", "y_predicted_", "y_score_")
+                    )
+                ]:
+                    del summary[stale]
                 summary.update(model_run(X_train_emb, X_test_emb, y_train, y_test, data_key, args))
                 # print(summary)
                 # Snapshot the per-(dataset, iteration, embedding) part ONCE, then build
@@ -568,9 +790,26 @@ def main(args):
                     results = []
                 # #Append the list with new summary data
                 results.append(summary)
-                # Save summary data
-                with open('results.pkl', 'wb') as pklfile:
+                # Dumped to a temporary file and renamed into place rather than opened
+                # 'wb' over the live one. The three lines above are a read-modify-write of
+                # the WHOLE history -- every pass loads the accumulated list, appends one
+                # summary, and writes all of it back -- so 'wb' truncated the only copy of
+                # every previous pass before writing the new one. A job killed inside that
+                # window (an LSF wall kill, an OOM, a Ctrl-C) therefore lost not the pass
+                # in flight but the entire dataset's history, and left a half-written
+                # pickle whose `pickle.load` raises UnpicklingError rather than the
+                # FileNotFoundError the reader above is written to tolerate. The window is
+                # small but it is entered once per pass, and the wall kill is exactly the
+                # failure this run is sized against. os.replace is atomic within a
+                # filesystem, so a reader sees either the previous complete pickle or the
+                # new one; ModelResults.csv needs no such care because it is appended to,
+                # never rewritten.
+                tmp_pkl = 'results.pkl.tmp'
+                with open(tmp_pkl, 'wb') as pklfile:
                     pickle.dump(results, pklfile)
+                    pklfile.flush()
+                    os.fsync(pklfile.fileno())
+                os.replace(tmp_pkl, 'results.pkl')
             iter_run_time = time.time() - iter_start_time
             
         # start logging times

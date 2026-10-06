@@ -20,11 +20,69 @@ except Exception as e:
 from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 
 # ====== Additional local imports ======
-from qbiocode.learning._grid import warn_ignored_hyperparameter
+from qbiocode.learning._grid import one_value, warn_ignored_hyperparameter
 from qbiocode.learning._tuning import search_hyperparameters
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Begin functions ======
+
+
+#: Why the thread cap is passed to every fit rather than searched. Quoted into the
+#: message :func:`qbiocode.learning._grid.one_value` raises.
+_NTHREAD_WHY = (
+    "it caps the threads each fit may use, which is a resource decision rather than a "
+    "model one -- `model_run` already fans the models out over joblib, so anything above "
+    "1 oversubscribes the cores the job asked for"
+)
+
+
+def _thread_kwargs(n_jobs, nthread, block):
+    """Settle XGBoost's thread cap from whichever of its two spellings the config used.
+
+    XGBoost's sklearn wrapper documents ``n_jobs``; the native API calls the same knob
+    ``nthread`` and the wrapper still accepts it. A config author reaches for either, and
+    until this existed the other one was not a silent no-op but a crash: the block's keys
+    arrive as keyword arguments to this module's functions, so ``'nthread': 1`` raised
+    ``TypeError: compute_xgb_opt() got an unexpected keyword argument 'nthread'`` from
+    inside a joblib worker. Both spellings are taken, and disagreement is refused rather
+    than resolved by precedence -- there is no reading of two different caps that is what
+    the author meant.
+
+    Unset means unset. XGBoost then takes ``omp_get_max_threads()``, which is the right
+    default for a single interactive fit and the wrong one under ``model_run``'s joblib
+    fan-out; the pilot configs pin it to 1 and ``submit_pilot.sh`` exports
+    ``OMP_NUM_THREADS=1`` as the outer belt. Defaulting it to 1 here would instead impose
+    a permanent single-thread ceiling on every caller, which is not this function's
+    decision to make -- the same reason ``compute_catboost`` leaves ``thread_count`` unset.
+
+    Args:
+        n_jobs: Value from the ``n_jobs`` key, if the block set one.
+        nthread: Value from the ``nthread`` key, if the block set one.
+        block (str): The config block both came from, for the error message.
+
+    Returns:
+        dict: ``{'n_jobs': cap}``, or empty to leave XGBoost at its own default. Returning
+        the keyword rather than the value keeps an unset cap out of ``get_params()`` and
+        out of the estimator's identity under sklearn's ``clone``, so a config that sets
+        nothing builds exactly the estimator it built before this argument existed.
+
+    Raises:
+        ValueError: If the block sets both spellings to different values.
+    """
+    resolved_n_jobs = one_value("n_jobs", n_jobs, _NTHREAD_WHY, block)
+    resolved_nthread = one_value("nthread", nthread, _NTHREAD_WHY, block)
+    if (
+        resolved_n_jobs is not None
+        and resolved_nthread is not None
+        and resolved_n_jobs != resolved_nthread
+    ):
+        raise ValueError(
+            f"{block!r} sets both 'n_jobs' ({resolved_n_jobs!r}) and 'nthread' "
+            f"({resolved_nthread!r}), which are two spellings of one XGBoost setting, to "
+            f"different values. Give one of them, or give both the same value."
+        )
+    cap = resolved_n_jobs if resolved_n_jobs is not None else resolved_nthread
+    return {} if cap is None else {"n_jobs": cap}
 
 
 def compute_xgb(
@@ -45,6 +103,8 @@ def compute_xgb(
     colsample_bytree=1,
     min_child_weight=1,
     random_state=None,
+    n_jobs=None,
+    nthread=None,
 ):
     """
     This function generates a model using an Extreme Gradient Boositing (xgb) Classifier method as implemented in xgboost. It takes in parameter
@@ -69,6 +129,15 @@ def compute_xgb(
         colsample_bytree  (float): subsample ratio of columns when constructing each tree. Default is 1
         min_child_weight (int) : Minimum sum of instance weight (hessian) needed in a child. Default is 1
         random_state (int or None): Seed for the estimator's own randomness. QProfiler fills this in from the run's ``seed`` so two runs at one seed agree; None leaves the estimator drawing from the global RNG.
+        n_jobs (int or None): Threads each XGBoost fit may use. ``nthread`` is XGBoost's
+            own name for the same setting and is accepted as an alias; giving both
+            different values is an error. Left unset XGBoost takes every core
+            ``omp_get_max_threads()`` reports, which oversubscribes badly underneath
+            ``model_run``'s joblib fan-out -- measured on a 128-core node, one 42-row fit
+            went from over 280 s to 0.06 s once threads were capped. Distinct from the
+            top-level ``n_jobs`` in a config, which sizes that fan-out rather than a
+            single fit.
+        nthread (int or None): Alias for ``n_jobs``; see above.
      Returns:
         modeleval (dict): A dictionary containing the evaluation metrics of the model, including accuracy, AUC, F1 score, and the time taken for training and validation.
 
@@ -100,6 +169,7 @@ def compute_xgb(
             colsample_bytree=colsample_bytree,
             min_child_weight=min_child_weight,
             random_state=random_state,
+            **_thread_kwargs(n_jobs, nthread, "xgb_args"),
         )
     )
     # Fit the training datset
@@ -143,6 +213,8 @@ def compute_xgb_opt(
     n_estimators=None,
     min_child_weight=None,
     random_state=None,
+    n_jobs=None,
+    nthread=None,
     *,
     tuner="optuna",
     n_trials=50,
@@ -175,6 +247,15 @@ def compute_xgb_opt(
         n_estimators (list): List of number of estimators options for the search.
         min_child_weight (list): List of minimum sum of instance weight (hessian) needed in a childoptions for the search.
         random_state (int or None): Seed for the estimator's own randomness. QProfiler fills this in from the run's ``seed`` so two runs at one seed agree; None leaves the estimator drawing from the global RNG.
+        n_jobs (int or None): Threads each XGBoost fit may use. ``nthread`` is XGBoost's
+            own name for the same setting and is accepted as an alias; giving both
+            different values is an error. Left unset XGBoost takes every core
+            ``omp_get_max_threads()`` reports, which oversubscribes badly underneath
+            ``model_run``'s joblib fan-out -- measured on a 128-core node, one 42-row fit
+            went from over 280 s to 0.06 s once threads were capped. Distinct from the
+            top-level ``n_jobs`` in a config, which sizes that fan-out rather than a
+            single fit.
+        nthread (int or None): Alias for ``n_jobs``; see above.
 
         tuner (str): Which search to run. ``'optuna'`` (default) spends ``n_trials`` on
             Optuna's TPE sampler, which also allows a hyperparameter to be given as a
@@ -225,6 +306,13 @@ def compute_xgb_opt(
         "bootstrap": bootstrap,
     }
 
+    # Resolved before the search so a contradictory block fails now, with a message naming
+    # the config key, rather than on whichever trial first samples it.
+    fixed = {
+        "random_state": random_state,
+        **_thread_kwargs(n_jobs, nthread, "gridsearch_xgb_args"),
+    }
+
     best_params = search_hyperparameters(
         "xgb",
         XGBClassifier,
@@ -235,9 +323,14 @@ def compute_xgb_opt(
         tuner=tuner,
         n_trials=n_trials,
         seed=random_state,
-        fixed={"random_state": random_state},
+        fixed=fixed,
     )
-    best_xgb = XGBClassifier(**best_params, random_state=random_state)  # type: ignore
+    # `**fixed` rather than `random_state=random_state`: `search_hyperparameters` applies
+    # `fixed` to every trial's estimator but returns only the searched parameters, so a
+    # refit that names one of them by hand silently drops the rest -- here, the thread cap,
+    # on the one fit whose cost is not amortised over a cross-validation. This is what
+    # `compute_catboost` already does with its own `fixed`.
+    best_xgb = XGBClassifier(**best_params, **fixed)  # type: ignore
     best_xgb.fit(X_train, y_train)
 
     # Make predictions and calculate accuracy

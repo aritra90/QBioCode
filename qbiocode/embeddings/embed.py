@@ -115,23 +115,35 @@ def pqk(
             # These groups are the Pauli X, Y and Z operators on individual qubits
             # Apply the circuit layout to the observable if mapped to device
             if args["backend"] != "simulator":
+                # num_qubits comes from the CIRCUIT, not the backend. On a device the two agree:
+                # transpiling against a 127-qubit backend returns a 127-qubit circuit, and the
+                # observables built either way are byte-identical (checked on FakeManilaV2 and
+                # FakeSherbrooke). On Aer they do not agree -- AerSimulator reports num_qubits=63,
+                # a memory-derived capacity rather than a device width, while transpiling leaves
+                # the circuit at its own width and sets circuit.layout to None. Laying the Pauli
+                # out onto 63 qubits raised, for every estimator-primitive model reached through
+                # backend: 'mps_simulator':
+                #   ValueError: The number of qubits of the circuit (10) does not match the
+                #              number of qubits of the (0,)-th observable (63).
+                # With layout None and num_qubits == circuit.num_qubits the call is the identity,
+                # so this branch now agrees with the else branch on Aer and is unchanged on hardware.
                 observables_x = []
                 observables_y = []
                 observables_z = []
                 for i in range(feat_dimension):
                     observables_x.append(
                         Pauli(id[:i] + "X" + id[(i + 1) :]).apply_layout(
-                            circuit.layout, num_qubits=backend.num_qubits
+                            circuit.layout, num_qubits=circuit.num_qubits
                         )
                     )
                     observables_y.append(
                         Pauli(id[:i] + "Y" + id[(i + 1) :]).apply_layout(
-                            circuit.layout, num_qubits=backend.num_qubits
+                            circuit.layout, num_qubits=circuit.num_qubits
                         )
                     )
                     observables_z.append(
                         Pauli(id[:i] + "Z" + id[(i + 1) :]).apply_layout(
-                            circuit.layout, num_qubits=backend.num_qubits
+                            circuit.layout, num_qubits=circuit.num_qubits
                         )
                     )
             else:
@@ -537,6 +549,7 @@ def get_embeddings(
     n_components=None,
     method=None,
     quvine_args=None,
+    random_state=None,
 ):
     """Apply an embedding to the training and test datasets.
 
@@ -568,6 +581,15 @@ def get_embeddings(
             when ``embedding`` is a QuVINE method, e.g.
             ``{"walks": {"steps": 4}, "train": {"epochs": 10}}``. Ignored for the
             sklearn modes.
+        random_state (int, optional): Seed for the embeddings that draw random numbers:
+            ``'umap'``, ``'pca'`` (only when sklearn picks its randomized solver),
+            ``'nmf'``, ``'lle'`` and ``'spectral'``. None keeps each estimator's own
+            default, which for UMAP means numpy's global stream AND numba-parallel SGD --
+            not reproducible even from a fixed ``np.random.seed``, because the parallel
+            updates race. An int makes the result a function of the data and the seed
+            alone: UMAP then runs its deterministic single-threaded path. That matters
+            whenever two processes must see the same features, e.g. one LSF job per model
+            on the same split.
 
     Returns:
         tuple: ``(X_train_embedded, X_test_embedded)``.
@@ -648,7 +670,16 @@ def get_embeddings(
             quvine_args=quvine_args,
         )
 
-    if n_components > X_train.shape[1]:
+    # 'none' is exempt: it is a pass-through that returns X unchanged and never produces
+    # components, so n_components simply does not apply to it. This mirrors the QuVINE
+    # route above, which skips the same check for the same reason. Without the exemption
+    # every config pairing embeddings: ['none'] with an n_components meant for the wide
+    # datasets (the pilot sets 8 for the > 20-feature band, where it is load-bearing) died
+    # at iteration 1 on any dataset narrower than that value:
+    #   ValueError: n_components=8 exceeds the 4 features in X_train; 'none' cannot
+    #               produce more components than input features.
+    # That took out 3 of the 12 pilot datasets (4, 6 and 7 features) before a single fit.
+    if embedding != "none" and n_components > X_train.shape[1]:
         raise ValueError(
             f"n_components={n_components} exceeds the {X_train.shape[1]} features in "
             f"X_train; {embedding!r} cannot produce more components than input features."
@@ -658,17 +689,19 @@ def get_embeddings(
     else:
         embedding_model = None
         if "pca" == embedding:
-            embedding_model = PCA(n_components=n_components)
+            embedding_model = PCA(n_components=n_components, random_state=random_state)
         elif "nmf" == embedding:
-            embedding_model = NMF(n_components=n_components)
+            embedding_model = NMF(n_components=n_components, random_state=random_state)
         elif "lle" == embedding:
             if method is None:
                 embedding_model = LocallyLinearEmbedding(
-                    n_neighbors=n_neighbors, n_components=n_components, method="standard"
+                    n_neighbors=n_neighbors, n_components=n_components, method="standard",
+                    random_state=random_state,
                 )
             else:
                 embedding_model = LocallyLinearEmbedding(
-                    n_neighbors=n_neighbors, n_components=n_components, method="modified"
+                    n_neighbors=n_neighbors, n_components=n_components, method="modified",
+                    random_state=random_state,
                 )
         elif "isomap" == embedding:
             embedding_model = Isomap(
@@ -676,9 +709,13 @@ def get_embeddings(
                 n_components=n_components,
             )
         elif "umap" == embedding:
+            # n_jobs=1 alongside a seed is what UMAP would force anyway; saying so
+            # up front skips its "n_jobs value -1 overridden to 1" warning.
+            seeded = {} if random_state is None else {"random_state": random_state, "n_jobs": 1}
             embedding_model = UMAP(
                 n_neighbors=n_neighbors,
                 n_components=n_components,
+                **seeded,
             )
 
         if "spectral" == embedding:
@@ -688,7 +725,9 @@ def get_embeddings(
             # the UserWarning above declares it. Same protocol as the QuVINE arms.
             n_train = X_train.shape[0]
             X_all = np.vstack([X_train, X_test])
-            Z = SpectralEmbedding(n_components=n_components, eigen_solver="arpack").fit_transform(X_all)
+            Z = SpectralEmbedding(
+                n_components=n_components, eigen_solver="arpack", random_state=random_state
+            ).fit_transform(X_all)
             return Z[:n_train], Z[n_train:]
 
         X_train = embedding_model.fit_transform(X_train)

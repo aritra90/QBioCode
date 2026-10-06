@@ -120,7 +120,22 @@ UNWRAPPED_MODELS = ["catboost", "tabpfn"]
 #: of a written contract because tests/integration/conftest.py deliberately excludes
 #: it from the *reproducibility* contract -- a different question from whether the key
 #: is there.
-DOCUMENTED_KEYS = {"model", "accuracy", "f1_score", "time", "auc", "Model_Parameters"}
+# ``balanced_accuracy``, ``mcc`` and ``pr_auc`` joined the row when weighted F1 was
+# found to be unusable on its own as the benchmark's ranking statistic: a
+# majority-class dummy scores weighted F1 0.906 on openml__ozone-level-8hr, whose
+# minority fraction is 0.063. Adding them widens every row this suite pins, which is
+# why this set is a named constant and not restated at each assertion.
+DOCUMENTED_KEYS = {
+    "model",
+    "accuracy",
+    "f1_score",
+    "balanced_accuracy",
+    "mcc",
+    "time",
+    "auc",
+    "pr_auc",
+    "Model_Parameters",
+}
 
 #: The three scores every downstream reader selects on.
 METRICS = ["accuracy", "f1_score", "auc"]
@@ -158,6 +173,28 @@ def _run(model, **overrides):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return model_run(X_train, X_test, y_train, y_test, "tiny", args)
+
+
+@pytest.fixture(autouse=True)
+def _gate_the_one_learner_that_can_be_absent(request):
+    """Skip the ``tabpfn`` nodes when the extra or its weights are unavailable.
+
+    ``tabpfn`` sits in ``CLASSICAL_MODELS`` for the cross-model half of the contract,
+    but unlike the other eight it can be legitimately missing from a *supported*
+    install: it lives in the ``[tabpfn]`` extra, and ``[dev]`` does not pull that in.
+    So ``pip install -e ".[dev]"`` -- exactly what .github/workflows/ci.yml does before
+    running pytest -- left twelve nodes here failing on ``compute_tabpfn``'s ImportError
+    instead of skipping, and none of them carries a ``slow`` or ``requires_quantum``
+    mark that the default ``-m`` filter would have deselected.
+
+    The probe is requested only for the ``tabpfn`` nodes, not declared as a parameter,
+    so the other eight models do not pay for conftest's subprocess fit -- the same
+    reasoning, and the same ``getfixturevalue`` shape, as
+    tests/test_model_run_edges.py::test_a_direct_compute_call_is_not_covered_by_the_dispatcher.
+    """
+    callspec = getattr(request.node, "callspec", None)
+    if callspec is not None and callspec.params.get("model") == "tabpfn":
+        request.getfixturevalue("tabpfn_ready")
 
 
 @pytest.fixture(scope="module")
@@ -402,7 +439,12 @@ def test_each_compute_function_labels_its_own_columns_with_the_name_it_declares(
         frame = fn(X_train, X_test, y_train, y_test, dict(BASE_ARGS))
 
     expected_columns = sorted(
-        [f"results_{declared}", f"y_predicted_{declared}", f"y_test_{declared}"]
+        [
+            f"results_{declared}",
+            f"y_predicted_{declared}",
+            f"y_score_{declared}",
+            f"y_test_{declared}",
+        ]
     )
     assert sorted(frame.columns) == expected_columns, (
         f"compute_{model} declares model={declared!r} but a call that accepts that "

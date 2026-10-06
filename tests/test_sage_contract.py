@@ -89,12 +89,27 @@ SAMPLES_COLUMN = {"legacy": "# Samples", "pymfe": "mfe.nr_inst"}
 #: A feature column present in each schema, for the missing-column assertions.
 PROBE_COLUMN = {"legacy": "Entropy", "pymfe": "mfe.one_nn.mean"}
 
-METRICS = ["accuracy", "f1_score", "auc"]
+#: Every metric QProfiler now writes. QSage detects the block from the frame rather
+#: than hardcoding it, so this fixture has to write the CURRENT set for the detection to
+#: be exercised at all -- with only the three names this used to list, a QSage that had
+#: gone back to a hardcoded ['accuracy', 'f1_score', 'auc'] would still have passed.
+#: LEGACY_METRICS below is the set a pre-2026 ModelResults.csv carries; the committed
+#: benchmark table is one of those and cannot be regenerated, so both must load.
+METRICS = ["accuracy", "f1_score", "balanced_accuracy", "mcc", "auc", "pr_auc"]
+
+#: The metric block as it stood before balanced_accuracy, MCC and PR-AUC were added.
+LEGACY_METRICS = ["accuracy", "f1_score", "auc"]
 MODELS = ["rf", "svc"]
 
 
-def results_table(parameter_column="Model_Parameters", n_datasets=6, schema="legacy"):
+def results_table(
+    parameter_column="Model_Parameters",
+    n_datasets=6,
+    schema="legacy",
+    metrics=None,
+):
     """A QProfiler-shaped results table with one parameter column, as QProfiler writes."""
+    metrics = METRICS if metrics is None else metrics
     rng = np.random.default_rng(0)
     rows = []
     for dataset in range(n_datasets):
@@ -111,7 +126,7 @@ def results_table(parameter_column="Model_Parameters", n_datasets=6, schema="leg
                     model=model,
                     iteration=1,
                 )
-                row.update({metric: float(rng.uniform(0.5, 1.0)) for metric in METRICS})
+                row.update({metric: float(rng.uniform(0.5, 1.0)) for metric in metrics})
                 row[parameter_column] = "{}"
                 rows.append(row)
     frame = pd.DataFrame(rows)
@@ -181,6 +196,46 @@ def test_it_accepts_whichever_parameter_column_qprofiler_wrote(parameter_column,
     assert sage._columns_parameters == [parameter_column]
     assert sage._available_models == sorted(MODELS)
     assert sage._available_metrics == sorted(METRICS)
+
+
+def test_it_still_reads_a_table_written_before_the_metric_block_grew():
+    """The committed benchmark table has three metrics and cannot be regenerated.
+
+    QSage selects the metric block with ``data_input[self._columns_metrics]``, so a
+    hardcoded list naming a column that table lacks raises ``KeyError`` on the only
+    input the repository ships -- the same failure mode the 'BestParams_GridSearch'
+    comment in sage.py records for the parameter column.
+    """
+    sage = _sage.QuantumSage(data_input=results_table(metrics=LEGACY_METRICS))
+
+    assert sage._available_metrics == sorted(LEGACY_METRICS)
+
+
+def test_a_metric_column_with_no_finite_value_is_not_offered_as_a_target():
+    """PR-AUC and AUC are NaN for every row whose model exposed no ranking score.
+
+    A corpus of such rows carries the column and nothing in it. Regressing a sub-sage
+    on that target trains on an all-NaN y and reports a model whose every prediction is
+    NaN, which reads downstream as a metric that was modelled badly rather than one that
+    was never measured.
+    """
+    frame = results_table()
+    frame["pr_auc"] = np.nan
+
+    sage = _sage.QuantumSage(data_input=frame)
+
+    assert "pr_auc" not in sage._available_metrics
+    assert sage._available_metrics == sorted(set(METRICS) - {"pr_auc"})
+
+
+def test_a_table_with_no_usable_metric_at_all_is_refused():
+    """Nothing to regress on is a broken input, not an empty result set."""
+    frame = results_table()
+    for metric in METRICS:
+        frame[metric] = np.nan
+
+    with pytest.raises(ValueError, match="no target for QuantumSage"):
+        _sage.QuantumSage(data_input=frame)
 
 
 @pytest.mark.parametrize("schema", sorted(SCHEMAS))

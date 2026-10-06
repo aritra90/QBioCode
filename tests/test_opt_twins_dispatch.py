@@ -98,6 +98,7 @@ from sklearn.tree import DecisionTreeClassifier
 import qbiocode  # noqa: F401
 from qbiocode import scale_train_test
 from qbiocode.evaluation.model_run import model_run
+from qbiocode.learning.compute_tabpfn import tabpfn_is_available
 
 # The dispatcher narrates the untuned-quantum case and Optuna's samplers warn about
 # choices they cannot persist; neither is what any test here is about.
@@ -283,7 +284,7 @@ def results_rows(raw):
 # from build_search_space (nothing to search) or report a default, and both are visible.
 # Two values per model, so the reported choice is a real selection rather than the only
 # possibility -- the one-value case is pinned separately below.
-CLASSICAL_BLOCKS = [
+_ALL_CLASSICAL_BLOCKS = [
     ("svc", {"kernel": ["linear", "sigmoid"]}),          # SVC defaults to 'rbf'
     ("dt", {"max_depth": [2, 3]}),                       # default None
     ("lr", {"C": [0.25, 0.5]}),                          # default 1.0
@@ -292,11 +293,33 @@ CLASSICAL_BLOCKS = [
     ("xgb", {"max_depth": [2, 3]}),                      # default 6
     ("mlp", {"alpha": [0.01, 0.02], "max_iter": [50]}),  # default alpha 1e-4
     ("catboost", {"depth": [2, 3], "iterations": [10]}),  # default depth 6
-    # TabPFN carries no skip guard on purpose. QBioCode pins model version v2, whose
-    # weights are ungated -- no API token and no license acceptance -- so a tuned
-    # TabPFN either dispatches or the [tabpfn] extra is missing, and the latter is a
-    # broken dev install rather than a condition to tolerate quietly.
     ("tabpfn", {"n_estimators": [1, 2]}),
+]
+
+#: The blocks actually parametrized: every one above, less ``tabpfn`` when the
+#: ``[tabpfn]`` extra is not installed.
+#:
+#: An earlier version of this comment said TabPFN carried no skip guard *on purpose*,
+#: reasoning that v2's weights are ungated -- no API token, no license acceptance -- so
+#: a tuned TabPFN either dispatches or the install is broken. Half of that is right and
+#: half of it conflates two different gates. The *license* gate genuinely does not apply
+#: (QBioCode pins model_version 'v2'; only v2.5/v2.6/v3 are restricted), but the *extra*
+#: gate does: ``tabpfn`` is not a core dependency at all. requirements-base.txt:19 states
+#: why in so many words -- weight, since it brings torch's ecosystem plus mlx, lightgbm,
+#: huggingface-hub and safetensors -- and the ``[dev]`` extra that CI installs
+#: (.github/workflows/ci.yml:33) does not pull it in. So "the extra is missing" is not a
+#: broken dev install; it is the state every CI run is in, and ungated these two
+#: parametrizations fail there on an ``ImportError`` raised before the dispatcher is
+#: even reached.
+#:
+#: The criterion that separates the two cases is the one DEFAULT_QPL_HEADS below uses:
+#: declared in requirements-base.txt or not. ``xgb`` and ``catboost`` are, so their
+#: absence is not a supported install and they carry no guard. ``tabpfn`` is not, so it
+#: gets the same treatment tests/test_mps_backend.py:22 gives ``quimb`` and the
+#: ``[mps]`` extra. This condition is the extra's presence only; a test that needs the
+#: weights to load as well wants conftest's ``tabpfn_ready`` fixture, which probes a fit.
+CLASSICAL_BLOCKS = [
+    block for block in _ALL_CLASSICAL_BLOCKS if block[0] != "tabpfn" or tabpfn_is_available()
 ]
 
 CLASSICAL_IDS = [name for name, _ in CLASSICAL_BLOCKS]
@@ -858,8 +881,9 @@ def tuned_pqk(tmp_path_factory):
 #: against it by *equality*, which is what makes a missing head fail as well as a surplus
 #: one. Equality is honest here: ``compute_qpl`` does drop ``xgb`` or ``catboost`` when
 #: their import fails, but both are declared in requirements-base.txt, so neither is
-#: absent in any supported install -- the same reasoning CLASSICAL_BLOCKS above uses to
-#: carry no skip guard.
+#: absent in any supported install. That declaration is the criterion, and it is also why
+#: CLASSICAL_BLOCKS above guards ``tabpfn`` and nothing else: ``tabpfn`` is the one entry
+#: that is an optional extra rather than a core dependency.
 DEFAULT_QPL_HEADS = ("rf", "mlp", "svc", "lr", "xgb", "catboost")
 
 #: The labels an *untuned* QPL run writes. ``compute_qpl`` names each head's columns

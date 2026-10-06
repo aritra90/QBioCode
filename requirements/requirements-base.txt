@@ -54,6 +54,7 @@ scikit-dimension
 scikit-learn
 scipy
 seaborn
+threadpoolctl
 torch
 tqdm
 umap-learn

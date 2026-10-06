@@ -53,6 +53,7 @@ import importlib
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 
 # Imported at module scope, deliberately: `qbiocode` orders the OpenMP runtimes (see
@@ -68,7 +69,24 @@ pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 #: The keys ``modeleval`` puts in a row when ``grid_search`` is off. Six, not five:
 #: ``time`` is a wall clock and no reproducibility test compares it, but it is part of
 #: the dict every downstream reader parses, so a rename has to fail somewhere.
-DOCUMENTED_KEYS = frozenset({"model", "accuracy", "f1_score", "time", "auc", "Model_Parameters"})
+# ``balanced_accuracy``, ``mcc`` and ``pr_auc`` joined the row when weighted F1 was
+# found to be unusable on its own as the benchmark's ranking statistic: a
+# majority-class dummy scores weighted F1 0.906 on openml__ozone-level-8hr, whose
+# minority fraction is 0.063. Adding them widens every row this suite pins, which is
+# why this set is a named constant and not restated at each assertion.
+DOCUMENTED_KEYS = frozenset(
+    {
+        "model",
+        "accuracy",
+        "f1_score",
+        "balanced_accuracy",
+        "mcc",
+        "time",
+        "auc",
+        "pr_auc",
+        "Model_Parameters",
+    }
+)
 
 #: The three scores QuantumSage and qc_winner_finder select on.
 METRICS = ("accuracy", "f1_score", "auc")
@@ -277,13 +295,21 @@ class TestEveryQuantumModelFitsAndReportsTheSameRow:
 
     @pytest.mark.parametrize("model", sorted(EXPECTED_LABELS))
     def test_the_labels_and_predictions_come_back_beside_every_row(self, model, fit_once, data):
-        """``model_run`` returns three keys per label, not one.
+        """``model_run`` returns four keys per label, not one.
 
-        The docstring promises "keys as model names"; the truth is
-        ``results_``/``y_test_``/``y_predicted_`` per label, and the other two thirds of
-        the return value have never been asserted on. They are what ``qml_winner`` and
-        any post-hoc metric recomputation read, so their length and content matter as
-        much as the metrics do.
+        The docstring once promised "keys as model names"; the truth is
+        ``results_``/``y_test_``/``y_predicted_``/``y_score_`` per label, and the other
+        three quarters of the return value went unasserted for a long time. They are
+        what ``qml_winner`` and any post-hoc metric recomputation read, so their length
+        and content matter as much as the metrics do.
+
+        ``y_score_`` is the newest of the four and the one worth pinning hardest: it is
+        the ranking score ``auc`` and ``pr_auc`` are computed from, persisted so a curve
+        can be redrawn or a threshold moved without re-fitting a quantum circuit. It is
+        legitimately ``None`` for a model exposing neither ``predict_proba`` nor
+        ``decision_function`` -- but when it is present it must be one score per test
+        row, because a length mismatch would make every recomputed curve silently wrong
+        rather than raise.
         """
         _, _, _, y_test = data
         out = fit_once(model)
@@ -291,7 +317,7 @@ class TestEveryQuantumModelFitsAndReportsTheSameRow:
         assert set(out) == {
             f"{prefix}_{label}"
             for label in labels
-            for prefix in ("results", "y_test", "y_predicted")
+            for prefix in ("results", "y_test", "y_predicted", "y_score")
         }
         for label in labels:
             returned = np.asarray(out[f"y_test_{label}"][0])
@@ -303,6 +329,27 @@ class TestEveryQuantumModelFitsAndReportsTheSameRow:
             # A model that predicted a class it never saw would make every metric
             # above meaningless while staying finite and in range.
             assert set(np.unique(predicted)) <= set(np.unique(y_test))
+
+            score = out[f"y_score_{label}"][0]
+            if score is None:
+                # Then the two ranking metrics have nothing to be computed from, and
+                # must not carry a number that looks like one.
+                row = _row(out, label)
+                for metric in ("auc", "pr_auc"):
+                    if metric in row:
+                        assert pd.isna(row[metric]), (
+                            f"{label} persisted no y_score yet reported "
+                            f"{metric}={row[metric]!r}"
+                        )
+            else:
+                score = np.asarray(score)
+                assert len(score) == len(y_test), (
+                    f"y_score_{label} has {len(score)} scores for {len(y_test)} test "
+                    "rows, so any curve recomputed from it is misaligned"
+                )
+                assert np.isfinite(np.asarray(score, dtype=float)).all(), (
+                    f"y_score_{label} carries a non-finite score"
+                )
 
     def test_qpl_reports_one_row_per_head_and_they_are_schema_identical(self, fit_once):
         """Each QPL head is a full row, not a variation on one.

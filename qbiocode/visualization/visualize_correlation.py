@@ -19,6 +19,7 @@ from scipy.stats import pearsonr, spearmanr
 
 from qbiocode.evaluation.dataset_evaluation import complexity_feature_columns
 from qbiocode.evaluation.mfe_features import MFE_COLUMN_PREFIX
+from qbiocode.evaluation.model_evaluation import available_metric_columns
 from qbiocode.evaluation.model_run import QUANTUM_MODELS
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import MinMaxScaler
@@ -296,7 +297,13 @@ def compute_results_correlation(results_df, correlation="spearman", thresh=0.7):
             "column names.",
             MFE_COLUMN_PREFIX,
         )
-    metrics = ["accuracy", "f1_score", "time", "auc"]
+    # Detected, not hardcoded. The four names this used to list were the whole of the
+    # metrics row when it was written; the row now also carries balanced_accuracy, mcc
+    # and pr_auc, and a hardcoded list would have quietly plotted correlations for the
+    # old four and said nothing about the rest. Selecting from the frame instead also
+    # keeps a pre-existing ModelResults.csv readable, which a literal list of the new
+    # names would not: the loop below indexes dat_temp_m[s] directly.
+    metrics = available_metric_columns(results_df.columns)
 
     # A misspelt name used to fall through the `if correlation == "spearman"` test below
     # and append nothing at all, so `compute_results_correlation(df, correlation="pearson")`
@@ -613,15 +620,20 @@ def _plot_correlation_figures(
     # Remove top and right spines for cleaner look
     sns.despine(ax=ax)
 
-    # Create size legend with 4 dots showing ACTUAL median metric values from data
+    # Create a size legend showing ACTUAL median metric values from the data
     handles_size, labels_size = scatter.legend_elements(
         prop="sizes", alpha=0.75, num=4, markeredgecolor="#34495E", markeredgewidth=1.2
     )
 
-    # Use REAL median metric values from the data
+    # Use REAL median metric values from the data. num=4 above is a target, not a
+    # guarantee: legend_elements hands it to a tick locator, which returns however many
+    # "nice" levels the observed size range admits -- often 3. Hardcoding 4 labels here
+    # made matplotlib warn ("Mismatched number of handles and labels") and silently drop
+    # the last label, so the remaining swatches were captioned with the wrong values.
+    # Size the label list from the handles actually returned.
     smin = np.min(data[size])
     smax = np.max(data[size])
-    labels_size = [f"{x:.2f}" for x in np.linspace(smin, smax, 4)]
+    labels_size = [f"{x:.2f}" for x in np.linspace(smin, smax, len(handles_size))]
 
     # Position legend on the right side, well below the colorbar with proper spacing
     legend = ax.legend(

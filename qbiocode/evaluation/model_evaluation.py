@@ -10,7 +10,14 @@ import pandas as pd
 
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
-from sklearn.metrics import f1_score, accuracy_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    matthews_corrcoef,
+    roc_auc_score,
+)
 
 from qbiocode.utils.helper_fn import print_results
 
@@ -147,6 +154,76 @@ def extract_binary_scores(estimator, X):
     return None
 
 
+#: The quality metrics ``modeleval`` writes into every ``results_<model>`` row, in the
+#: order they appear there. ``time`` is deliberately excluded: it is in the row, but it
+#: is a cost, not a score, so a consumer that ranks or averages over the block must not
+#: fold it in with the rest. Use ``METRIC_COLUMNS`` where cost belongs alongside quality.
+SCORE_COLUMNS = (
+    "accuracy",
+    "f1_score",
+    "balanced_accuracy",
+    "mcc",
+    "auc",
+    "pr_auc",
+)
+
+#: Every numeric column of the metrics row: the scores above plus wall-clock cost.
+METRIC_COLUMNS = SCORE_COLUMNS + ("time",)
+
+
+def available_metric_columns(columns, candidates=METRIC_COLUMNS):
+    """Those of ``candidates`` that ``columns`` actually holds, in ``candidates`` order.
+
+    Selecting the metric block by hardcoded name raises ``KeyError`` on every
+    ModelResults.csv written before that name existed. That is not hypothetical: it is
+    the same failure the ``BestParams_GridSearch`` comment in ``apps/sage/sage.py``
+    records, where demanding a column older tables lack made QuantumSage
+    unconstructible from its own documented input in either configuration.
+    ``balanced_accuracy``, ``mcc`` and ``pr_auc`` were added after the committed
+    benchmark table was produced, and that table cannot be regenerated from this
+    repository, so every consumer of the block has to tolerate their absence rather
+    than require them.
+
+    Returns a list rather than a tuple, so the result can be used directly as a
+    DataFrame key.
+    """
+    present = set(columns)
+    return [name for name in candidates if name in present]
+
+
+def _positive_label(y_true):
+    """The label ``average_precision_score`` must be told to treat as positive.
+
+    This exists because two sklearn metrics disagree about what "positive" means, and
+    the scores handed to them here are oriented for only one of the two.
+
+    ``roc_auc_score`` infers the positive class as the *larger* of the two labels in
+    ``y_true``, and :func:`_positive_class_column` orients ``y_score`` to match that --
+    it selects ``classes.max()``. ``average_precision_score`` does not infer anything:
+    it defaults to ``pos_label=1``. Those coincide for a ``{0, 1}`` target and diverge
+    for every other encoding, and PMLB/OpenML/libsvm targets are not all ``{0, 1}`` --
+    ``{1, 2}`` and ``{-1, 1}`` both occur. On a ``{1, 2}`` target the default would
+    score class ``1`` against a ranking built for class ``2``, returning roughly
+    ``1 - AP`` rather than ``AP``: a silently *inverted* precision-recall curve, worst
+    on exactly the imbalanced datasets PR-AUC was added to describe.
+
+    Returning ``classes.max()`` keeps PR-AUC on the same orientation as ``auc`` and as
+    ``y_score`` itself, so the three are comparable.
+
+    Args:
+        y_true (array-like): The true labels.
+
+    Returns:
+        The label to pass as ``pos_label``, or ``None`` when ``y_true`` does not hold
+        exactly two classes -- in which case a binary PR-AUC is undefined and the
+        caller records NaN.
+    """
+    classes = np.unique(np.asarray(y_true))
+    if classes.size != 2:
+        return None
+    return classes.max()
+
+
 def _was_tuned(model, tuned):
     """Whether this row's parameters came from a hyperparameter search.
 
@@ -182,7 +259,8 @@ def modeleval(
     tuned=None,
 ):
     """
-    Evaluates the model performance using accuracy, F1 score, and ROC AUC.
+    Evaluates the model performance using accuracy, F1 score, balanced accuracy,
+    Matthews correlation, ROC AUC and PR AUC.
 
     ``accuracy`` and ``f1_score`` are computed from ``y_predicted``. ``auc`` is
     computed from ``y_score`` and from nothing else.
@@ -215,14 +293,21 @@ def modeleval(
         y_predicted (array-like): Predicted labels by the model.
         beg_time (float): Start time for measuring execution time.
         params (dict): Model parameters used during training.
-        args (dict): Retained for signature compatibility; no longer read.
-            ``args['grid_search']`` was the only key this function ever used, and it was
-            the wrong signal -- a run-wide flag deciding a per-row column (see the comment
-            at the parameter-column branch below). ``tuned`` replaced it. The parameter
-            stays because all 24 call sites pass it positionally, and because dropping it
-            would be a breaking change to a public function for no gain. One incidental
-            benefit: a direct ``compute_<model>(...)`` call with an ``args`` dict that has
-            no ``'grid_search'`` key used to raise ``KeyError`` here, *after* the fit had
+        args (dict): Read for one key only, ``'average'``, and never for model
+            configuration. ``args['grid_search']`` used to be the only key this function
+            touched, and it was the wrong signal -- a run-wide flag deciding a per-row
+            column (see the comment at the parameter-column branch below). ``tuned``
+            replaced it, and nothing here reads it any more. ``'average'`` is the opposite
+            case: a genuinely run-wide choice about how a multiclass metric is averaged,
+            which is exactly what a run-wide dict should carry. It is read with ``.get``
+            and falls back to the ``average`` parameter's own default, so an ``args`` that
+            omits it behaves as before.
+
+            The parameter stays because all 24 call sites pass it positionally, and
+            because dropping it would be a breaking change to a public function for no
+            gain. One incidental benefit of the ``grid_search`` removal: a direct
+            ``compute_<model>(...)`` call with an ``args`` dict that has no
+            ``'grid_search'`` key used to raise ``KeyError`` here, *after* the fit had
             completed. It no longer can.
         model (str): Name of the model being evaluated.
         verbose (bool): If True, prints the evaluation results.
@@ -239,8 +324,26 @@ def modeleval(
             ``qpl_opt_<head>`` and the marker is not a suffix.
 
     Returns:
-        pd.DataFrame: DataFrame containing the evaluation results, including accuracy, F1 score, AUC, and model parameters.
+        pd.DataFrame: A ONE-ROW frame with three columns per model, named for it:
+        ``y_test_<model>``, ``y_predicted_<model>`` and ``y_score_<model>`` each hold one
+        array in a single cell (``y_score_<model>`` holds ``None`` when the estimator
+        publishes no ranking), and ``results_<model>`` holds a dict of the six metrics --
+        ``accuracy``, ``f1_score``, ``balanced_accuracy``, ``mcc``, ``auc``, ``pr_auc`` --
+        plus ``time`` and exactly one parameter column, ``BestParams_Tuned`` if this model
+        was tuned and ``Model_Parameters`` if it was not.
+
+        ``qprofiler`` flattens ``results_<model>`` into one CSV row per model with
+        ``{**row_base, **outervalue[0]}``, so a key added to that dict reaches
+        ModelResults.csv with no change to the writer, and ``_append_model_row`` widens an
+        existing header rather than misaligning it.
     """
+    # `average` is a documented config key, so honour it. No call site passes it -- all 24
+    # pass `args` positionally and stop before this parameter -- so the signature default
+    # silently won and a config asking for 'macro' got 'weighted' without a word. `args`
+    # is already here, so read it from there and keep the parameter as the fallback for
+    # direct calls whose `args` omits the key.
+    average = (args or {}).get("average", average) or average
+
     # Calculate evaluation metrics
     if y_score is None:
         auc = float("nan")
@@ -253,7 +356,56 @@ def modeleval(
             # ``evaluation_metrics`` below answers a malformed AUC request the same way.
             auc = float("nan")
     accuracy = accuracy_score(y_test, y_predicted, normalize=True)
-    f1 = f1_score(y_test, y_predicted, average=average)
+    # zero_division=0 is explicit rather than inherited: a model that predicts a single
+    # class leaves the other label with no predicted samples, and the default emits an
+    # UndefinedMetricWarning per fold while returning 0.0 anyway. 0.0 is the reading we
+    # want (see the mcc note below on why 0.0 beats NaN here), and every other f1_score
+    # call in this repo already passes zero_division=0 -- this was the one that did not.
+    f1 = f1_score(y_test, y_predicted, average=average, zero_division=0)
+
+    # Three further metrics, added because `accuracy` and a *weighted* F1 cannot carry an
+    # imbalance result on their own. On this corpus a majority-class DummyClassifier
+    # reaches a weighted F1 of 0.906 (openml__ozone-level-8hr, minority fraction 0.063),
+    # so a headline weighted F1 near 0.9 there says nothing at all about whether a model
+    # learned anything. Each of these three fails differently on that dataset, which is
+    # the point of carrying all of them:
+    #
+    #   balanced_accuracy  mean of per-class recall; 0.5 for the majority-class dummy on
+    #                      ANY imbalance, so it exposes the dummy that weighted F1 hides.
+    #   mcc                Matthews correlation; 0.0 for the dummy, and unlike balanced
+    #                      accuracy it also penalises a model that buys minority recall
+    #                      with a flood of false positives. Symmetric in the two classes,
+    #                      so it needs no pos_label.
+    #   pr_auc             average precision: the threshold-free companion to `auc` that
+    #                      does not credit true negatives, which is the whole difficulty
+    #                      with ROC-AUC under heavy imbalance.
+    #
+    # `mcc` and `balanced_accuracy` read `y_predicted`, so they are available for every
+    # model. `pr_auc` needs the ranking, so it is NaN for exactly the estimators whose
+    # `auc` is NaN -- see the docstring.
+    try:
+        balanced_accuracy = balanced_accuracy_score(y_test, y_predicted)
+    except ValueError:
+        balanced_accuracy = float("nan")
+    # Returns 0.0, not NaN, when a denominator vanishes -- a model predicting one class
+    # everywhere. That is the correct reading (no correlation with the truth), and it is
+    # deliberately not converted to NaN: 0.0 is an informative score here, whereas NaN
+    # would be dropped from a mean over datasets and quietly flatter the model.
+    try:
+        mcc = matthews_corrcoef(y_test, y_predicted)
+    except ValueError:
+        mcc = float("nan")
+    pos_label = _positive_label(y_test)
+    if y_score is None or pos_label is None:
+        pr_auc = float("nan")
+    else:
+        try:
+            pr_auc = average_precision_score(
+                y_test, np.asarray(y_score, dtype=float), pos_label=pos_label
+            )
+        except ValueError:
+            pr_auc = float("nan")
+
     compile_time = time.time() - beg_time
     if verbose == True:
         print_results(model, accuracy, f1, compile_time, params)
@@ -283,14 +435,30 @@ def modeleval(
         {
             "y_test_" + model: [y_test],
             "y_predicted_" + model: [y_predicted],
+            # Persisted so that every threshold-free metric stays recomputable from
+            # results.pkl without re-fitting anything. Before this, `y_score` was built by
+            # `extract_binary_scores`, consumed once for `auc`, and dropped -- which made
+            # `auc` and `pr_auc` the only ranking statistics this benchmark could ever
+            # report. Adding a metric later (a calibration curve, a Brier score, an AUC at
+            # a different positive class) would have meant re-running the whole sweep,
+            # ~3500 quantum fits included. `y_predicted` alone cannot substitute: hard
+            # labels carry no ranking.
+            #
+            # Stored as `None` when the estimator offers no ranking at all, which is a real
+            # answer and not a failure -- see `extract_binary_scores`. Readers must expect
+            # the column to hold None for those rows.
+            "y_score_" + model: [y_score],
             "results_"
             + model: [
                 {
                     "model": model,
                     "accuracy": accuracy,
                     "f1_score": f1,
+                    "balanced_accuracy": balanced_accuracy,
+                    "mcc": mcc,
                     "time": compile_time,
                     "auc": auc,
+                    "pr_auc": pr_auc,
                     parameter_column: params,
                 }
             ],

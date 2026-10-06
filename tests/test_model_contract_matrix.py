@@ -71,6 +71,7 @@ from sklearn.model_selection import train_test_split
 import qbiocode
 from qbiocode import learning
 from qbiocode.evaluation.model_run import QUANTUM_MODELS, model_run
+from qbiocode.learning.compute_tabpfn import tabpfn_is_available
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODEL_RUN_SOURCE = REPO_ROOT / "qbiocode" / "evaluation" / "model_run.py"
@@ -81,15 +82,28 @@ PACKAGE_ROOT = REPO_ROOT / "qbiocode"
 #: tests/integration/conftest.py) but it is part of the *schema*, and the schema is
 #: what the append-mode CSV writer is sized against.
 RESULT_KEYS = frozenset(
-    {"model", "accuracy", "f1_score", "time", "auc", "Model_Parameters"}
+    {
+        "model",
+        "accuracy",
+        "f1_score",
+        "balanced_accuracy",
+        "mcc",
+        "time",
+        "auc",
+        "pr_auc",
+        "Model_Parameters",
+    }
 )
 
 #: The tuned branch swaps exactly one key. Everything else must stay put, or a run
 #: with grid_search on writes a differently-shaped table from one without.
 TUNED_RESULT_KEYS = (RESULT_KEYS - {"Model_Parameters"}) | {"BestParams_Tuned"}
 
-#: ``model_run`` files three columns per model label.
-LABEL_PREFIXES = ("results", "y_test", "y_predicted")
+#: ``model_run`` files four columns per model label. ``y_score`` is the ranking score
+#: ``modeleval`` feeds to ``roc_auc_score`` and ``average_precision_score``; it is
+#: persisted rather than discarded so a threshold-free metric added later needs no
+#: re-fit. An array, so it is a frame column -- only ``results_*`` reaches the CSV.
+LABEL_PREFIXES = ("results", "y_test", "y_predicted", "y_score")
 
 
 # ----------------------------------------------------------------------------------
@@ -146,9 +160,25 @@ DISPATCH = _read_dispatch_source()
 QUANTUM_KEYS = QUANTUM_MODELS
 
 #: The classical learners, derived: everything that is neither a tuned twin nor
-#: quantum. Nine today (svc dt lr nb rf xgb catboost tabpfn mlp).
+#: quantum. Nine with the ``[tabpfn]`` extra installed (svc dt lr nb rf xgb catboost
+#: tabpfn mlp), eight without it.
+#:
+#: ``tabpfn`` drops out when its extra is absent, and the drop belongs *here* rather
+#: than in a skip on each test, because the assertions below are label-set
+#: *equalities* derived from this one list: a key the run cannot produce has to leave
+#: the expectation too, or the equality fails for something that is not the run's
+#: fault. The ``[tabpfn]`` extra is optional by weight and not by accident --
+#: requirements/requirements-base.txt:19 says so, and the ``[dev]`` extra CI installs
+#: does not pull it in -- so its absence is a supported install, which is the same
+#: reasoning tests/test_mps_backend.py:22 applies to ``quimb`` and the ``[mps]`` extra.
+#: The gate is the extra's *presence* only; a test that also needs TabPFN's weights to
+#: load wants conftest's ``tabpfn_ready`` fixture, which probes a real fit.
 CLASSICAL_KEYS = sorted(
-    k for k in DISPATCH if not k.endswith("_opt") and k not in QUANTUM_KEYS
+    k
+    for k in DISPATCH
+    if not k.endswith("_opt")
+    and k not in QUANTUM_KEYS
+    and (k != "tabpfn" or tabpfn_is_available())
 )
 
 #: TabPFN is excluded from the ``n_jobs > 1`` run only. Its first fit imports torch,

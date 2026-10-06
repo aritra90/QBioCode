@@ -49,7 +49,7 @@ from collections.abc import Mapping, Sequence
 import optuna
 from sklearn.model_selection import GridSearchCV, cross_val_score
 
-from qbiocode.learning._grid import build_param_grid
+from qbiocode.learning._grid import build_param_grid, to_plain
 
 # Optuna logs one INFO line per trial. With the default budget across seven models,
 # each running inside a joblib worker that interleaves its stdout with the others,
@@ -69,6 +69,13 @@ class _Categorical:
         # `gridsearch_mlp_args` writes `hidden_layer_sizes: [[20], [50], [100]]`, and
         # `best_params` should report the value the user wrote. See
         # `_suppress_unstorable_choice_warning` for why that does not produce a warning.
+        #
+        # "As configured" means the *values*, not the config library's wrapper types:
+        # `build_search_space` has already put them through `_grid.to_plain`, so a choice
+        # that is a container is a plain `list` and not a `ListConfig`. That conversion is
+        # load-bearing rather than cosmetic -- Optuna puts the chosen value through
+        # `json.dumps`, which a `list` survives and a `ListConfig` does not. `list(values)`
+        # here is only the outer copy; it cannot reach the elements.
         self.values = list(values)
 
     def __len__(self):
@@ -185,6 +192,9 @@ def build_search_space(model, candidates):
     """
     space = {}
     for name, values in candidates.items():
+        # Before any type test below, because every one of them passes for an OmegaConf
+        # node and the damage is done later, in Optuna. See `to_plain`.
+        values = to_plain(values)
         if values is None:
             continue
         if isinstance(values, Mapping):
@@ -428,7 +438,11 @@ def search_hyperparameters(
 
 #: Backends that cost nothing but local CPU time. Tuning against anything else means
 #: one queued hardware job per trial, so it has to be asked for explicitly.
-_FREE_BACKENDS = frozenset({"simulator", "simulator_aer"})
+# Both the internal names and the config-facing aliases: qprofiler resolves aliases
+# before tuning runs, but a direct caller of the tuning API may not have.
+_FREE_BACKENDS = frozenset(
+    {"simulator", "simulator_aer", "statevector_simulator", "mps_simulator"}
+)
 
 
 def _metric_dicts(frame, model):
@@ -500,6 +514,7 @@ def run_function_study(
     seed=None,
     validation_split=0.25,
     fixed=None,
+    data_key=None,
 ):
     """Tune a ``compute_*`` function by scoring it on an inner validation split.
 
@@ -518,9 +533,14 @@ def run_function_study(
         seed (int or None): Seeds both the sampler and the inner split.
         validation_split (float): Fraction of the training data held out to score on.
         fixed (dict or None): Passed to every trial but not searched.
+        data_key (str or None): The per-pass key from ``model_run``. Only used to
+            freeze and reuse the search across resamples when the config sets
+            ``freeze_quantum_params: True``; ``None`` disables that entirely, so a
+            caller that does not pass it behaves exactly as before.
 
     Returns:
-        dict: The best trial's hyperparameters.
+        dict: The best trial's hyperparameters -- from a fresh search, or from the
+        frozen file written by the first resample when freezing is on.
 
     Raises:
         ValueError: If tuning would run against real hardware without
@@ -529,6 +549,20 @@ def run_function_study(
     """
     import numpy as np
     from sklearn.model_selection import train_test_split
+
+    from qbiocode.learning._param_cache import load_frozen_params, save_frozen_params
+
+    # Checked before every guard below, deliberately. On a hit no search runs at all, so
+    # the hardware-affordability check, the trial budget and the class-count feasibility
+    # of the inner split are all moot -- they constrain searching, not refitting. The
+    # caller then refits on the real split at these parameters exactly as it would have
+    # done with a freshly searched set, and the row keeps its '_opt' label, which matters:
+    # a frozen resample labelled '<model>' instead would split one arm across the
+    # iteration axis and break the pairing that fair_selection depends on.
+    if data_key is not None:
+        frozen = load_frozen_params(args, data_key, model, space)
+        if frozen is not None:
+            return frozen
 
     ensure_tuning_is_affordable(args, model)
     _validate_budget(model, n_trials)
@@ -619,7 +653,12 @@ def run_function_study(
             UserWarning,
             stacklevel=2,
         )
-    return dict(study.best_params)
+    best = dict(study.best_params)
+    if data_key is not None:
+        # Best-effort: a failed write is logged and ignored, costing later resamples a
+        # redundant search rather than aborting a sweep hours in over a cache file.
+        save_frozen_params(args, data_key, model, best)
+    return best
 
 
 def record_tuned_params(frame, best_params, beg_time):

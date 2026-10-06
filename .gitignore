@@ -66,6 +66,29 @@ docs/outputdir/*
 # (`git rm -r --cached archive`) and kept on disk.
 /archive/
 
+# Benchmark runs. experiments/<name>/ versions its scripts, its generated configs and its
+# compiled result table. What its LSF jobs write beside them -- ~230 MB for the 12-dataset
+# pilot -- is reproduced by rerunning those configs, and is the four directories
+# generate_pilot_configs.py calls run output: per-job ModelResults.csv, results.pkl,
+# hydra's .hydra/ dumps and PQK projections (results/), fidelity Gram matrices (kernels/),
+# frozen quantum parameters (quantum_tuned_params/) and the LSF .out/.err logs
+# (lsf_logs/). `**/` because a run writes them at more than one depth: beside the
+# combined configs, and under each runs/<dataset>/ of the split layout. The configs
+# themselves stay tracked -- tests/test_pilot_*_contract.py read them from disk.
+experiments/**/results/
+experiments/**/kernels/
+experiments/**/quantum_tuned_params/
+experiments/**/lsf_logs/
+# A run set aside after it was stopped (aborted_<date>_<why>/), and one-off probes.
+experiments/**/aborted_*/
+experiments/**/.stale_probe/
+# collate_results.py merges runs/ into collated/. Only the merged ModelResults.csv is
+# versioned: it is the one file analyze_pilot.py reads from there. The rest is rewritten
+# by every collate -- results.pkl is a pickle, and collate_manifest.csv's run_dir column
+# is absolute paths into the runs/ results ignored above.
+experiments/**/collated/*
+!experiments/**/collated/ModelResults.csv
+
 # Tutorial generated outputs
 tutorial/**/ModelResults.csv
 tutorial/**/RawDataEvaluation.csv

@@ -63,7 +63,22 @@ def _call_with_global_seeds(compute_fn, seed, q_seed, *fn_args, **fn_kwargs):
     and how far an earlier task advanced a shared global stream depends on
     timing. Seeding here covers the randomness that has no ``random_state`` to
     set.
+
+    The caller's numpy global stream is restored on return. Under loky this runs in a
+    throwaway worker and that is moot, but with ``n_jobs: 1`` joblib runs it in the
+    calling process, and the re-seed plus the model's own draws then moved the CALLER's
+    stream -- so whatever qprofiler drew next depended on which model had just run.
     """
+    import numpy as np
+
+    caller_state = np.random.get_state()
+    try:
+        return _seed_and_call(compute_fn, seed, q_seed, fn_args, fn_kwargs)
+    finally:
+        np.random.set_state(caller_state)
+
+
+def _seed_and_call(compute_fn, seed, q_seed, fn_args, fn_kwargs):
     import numpy as np
 
     if seed is not None:
@@ -127,13 +142,20 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         results directory are written when the main profiler runs
         (qbiocode-profiler.py).
 
-        The keys are NOT the model names. Each model contributes three of them, each
+        The keys are NOT the model names. Each model contributes four of them, each
         prefixed, where <label> is the name from args['model'] with '_opt' appended
         when that model was tuned:
 
             'results_<label>'      the metrics row
             'y_test_<label>'       the true labels it was scored against
             'y_predicted_<label>'  the labels it predicted
+            'y_score_<label>'      the ranking score behind those labels, or None
+
+        'y_score_<label>' is what the threshold-free metrics are computed from, and it
+        is persisted so a reader can recompute a PR or ROC curve, or re-threshold, from
+        the results table instead of re-fitting. It is None for a model that exposes
+        neither predict_proba nor decision_function, which is also when 'auc' and
+        'pr_auc' are NaN.
 
         So args['model'] = ['dt'] yields 'results_dt', not 'dt', and turning
         grid_search on yields 'results_dt_opt'. Every value is a one-entry dict keyed
@@ -141,12 +163,15 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         to_dict() -- read a metrics row as result['results_dt'][0], not
         result['results_dt'].
 
-        That row holds 'model', 'accuracy', 'f1_score', 'time', 'auc' and one
-        parameter key: 'Model_Parameters' when the model ran at its configured
+        That row holds 'model', the METRIC_COLUMNS of
+        qbiocode.evaluation.model_evaluation -- 'accuracy', 'f1_score',
+        'balanced_accuracy', 'mcc', 'auc', 'pr_auc', 'time' -- and one parameter key: 'Model_Parameters' when the model ran at its configured
         hyperparameters, 'BestParams_Tuned' when it was tuned. See
         qbiocode.evaluation.model_evaluation.modeleval, which builds it -- in
-        particular for 'auc', which is a ranking ROC AUC and NaN where no score
-        exists.
+        particular for 'auc' and 'pr_auc', which are ranking metrics and NaN where no
+        score exists. 'balanced_accuracy' and 'mcc' are always finite; they are
+        reported because 'accuracy' is misleading on the imbalanced datasets in the
+        corpus and 'f1_score' ignores the true negatives.
 
     Raises:
         ValueError: If args['model'] is empty, names a model that is not in the
@@ -394,6 +419,31 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         the gap. Functions that take no ``random_state`` (naive Bayes) are left
         alone.
         """
+        # Drop keys that model_run itself passes explicitly at every call site below.
+        # A config block is splatted as **kwargs into the same namespace as those fixed
+        # arguments, so any overlap is a TypeError raised while the delayed() list is
+        # being BUILT -- before Parallel runs, so it takes down all 13 models having fit
+        # nothing, not just the one model that owns the key. `verbose` was live: every
+        # pilot config carries 'verbose' in catboost_args and gridsearch_catboost_args
+        # (it is a real CatBoost parameter), which produced
+        #   TypeError: _call_with_global_seeds() got multiple values for keyword
+        #              argument 'verbose'
+        # CatBoost's own training chatter is already silenced by `_QUIET` in
+        # compute_catboost, and QBioCode's `verbose` selects the result summary -- a
+        # different thing, as that module's comment says -- so the config key is
+        # redundant here and the explicit value must win. Warn rather than drop
+        # silently, so a key that was meant to do something is not simply ignored.
+        model_kwargs = dict(model_kwargs)
+        for reserved in ("model", "data_key", "n_trials", "validation_split",
+                         "cv", "tuner", "verbose"):
+            if reserved in model_kwargs:
+                logger.warning(
+                    "ignoring %r from this model's config block: model_run passes it "
+                    "explicitly, and duplicating it raises TypeError before any model "
+                    "runs. Remove it from the config to silence this.", reserved
+                )
+                del model_kwargs[reserved]
+
         seed = args.get("seed")
         if seed is None or "random_state" in model_kwargs:
             return model_kwargs

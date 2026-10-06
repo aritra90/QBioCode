@@ -392,9 +392,19 @@ def get_low_var_features(df, num_features):
 
     Returns:
         int: count of features with low variance
+
+    Note:
+        The threshold is the 25th percentile of the feature variances, so this count
+        is close to ``num_features / 4`` for most datasets and says more about the
+        feature count than about the data. Treat it as a weak signal.
     """
 
-    threshold = np.percentile(df.var(), 25)
+    # ddof must match VarianceThreshold's, which uses np.nanvar (ddof=0). pandas'
+    # default is ddof=1, which inflates the threshold by N/(N-1) relative to the
+    # variances it is then compared against. Where the feature variances lie within
+    # that factor of each other -- balanced binary features, or standardized data --
+    # every feature fell below the threshold and the metric silently became None.
+    threshold = np.percentile(df.var(ddof=0), 25)
 
     try:
         low_var_features = num_features - VarianceThreshold(threshold).fit(df).get_support().sum()

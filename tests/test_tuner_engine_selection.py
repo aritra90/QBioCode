@@ -83,6 +83,7 @@ from sklearn.tree import DecisionTreeClassifier
 # three vendored OpenMP runtimes before xgboost or torch can map one of their own.
 from qbiocode.evaluation.model_run import model_run
 from qbiocode.learning._tuning import build_search_space, run_function_study, run_study
+from qbiocode.learning.compute_tabpfn import tabpfn_is_available
 
 # --------------------------------------------------------------------------------------
 # One range per learner, chosen so the engines cannot agree about it
@@ -101,7 +102,7 @@ from qbiocode.learning._tuning import build_search_space, run_function_study, ru
 # `catboost` is the one learner deliberately left out: in test_catboost_tabpfn.py,
 # TestCatBoostTuning.test_a_range_is_accepted_by_optuna_and_refused_by_the_grid already
 # makes exactly this pair of calls through the real function.
-RANGE_BLOCKS = [
+_ALL_RANGE_BLOCKS = [
     ("dt", "min_samples_leaf", {"low": 0.05, "high": 0.3}),
     ("lr", "C", {"low": 0.01, "high": 10.0, "log": True}),
     ("nb", "var_smoothing", {"low": 1e-10, "high": 1e-2, "log": True}),
@@ -110,6 +111,25 @@ RANGE_BLOCKS = [
     ("xgb", "learning_rate", {"low": 0.01, "high": 0.5, "log": True}),
     ("mlp", "alpha", {"low": 1e-5, "high": 1e-1, "log": True}),
     ("tabpfn", "softmax_temperature", {"low": 0.5, "high": 1.5}),
+]
+
+#: The blocks actually parametrized, which is every one above except that ``tabpfn`` is
+#: dropped when the ``[tabpfn]`` extra is not installed.
+#:
+#: Without the gate both halves of the asymmetry below fail for the wrong reason:
+#: ``compute_tabpfn_opt`` raises ``ImportError`` from the ``tabpfn_is_available`` gate
+#: before it ever reaches the engine branch, so the grid test's ``pytest.raises(ValueError)``
+#: sees the wrong exception type and the Optuna test simply propagates it. Neither
+#: outcome says anything about engine selection, which is what this file measures.
+#:
+#: Absence is a supported state, not a broken install: requirements-base.txt:19 keeps
+#: ``tabpfn`` out of the core dependencies on purpose (it drags in torch's ecosystem),
+#: and the ``[dev]`` extra CI installs does not pull the extra in -- so CI reaches this
+#: file with TabPFN absent every single run. tests/test_mps_backend.py:22 gates the
+#: ``[mps]`` extra the same way. The condition is the extra's presence only; a test
+#: that needs TabPFN's *weights* wants conftest's ``tabpfn_ready`` fixture instead.
+RANGE_BLOCKS = [
+    block for block in _ALL_RANGE_BLOCKS if block[0] != "tabpfn" or tabpfn_is_available()
 ]
 
 RANGE_IDS = [model for model, _, _ in RANGE_BLOCKS]

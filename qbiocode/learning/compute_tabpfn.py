@@ -70,7 +70,7 @@ from sklearn.model_selection import GridSearchCV
 
 # ====== Additional local imports ======
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
-from qbiocode.learning._grid import build_param_grid
+from qbiocode.learning._grid import build_param_grid, to_plain
 from qbiocode.learning._tuning import build_search_space, run_study
 
 # ====== Module constants ======
@@ -125,6 +125,10 @@ _VERSION_SOURCES = {
 
 #: Versions whose weights are non-commercial and non-production.
 _RESTRICTED_VERSIONS = frozenset({"v2.5", "v2.6", "v3"})
+
+#: The config blocks that can select a checkpoint: the plain fit and the tuned search.
+#: Which one a run uses depends on ``grid_search``, so a pre-flight check reads both.
+_TABPFN_ARG_BLOCKS = ("tabpfn_args", "gridsearch_tabpfn_args")
 
 #: The licence each restricted version is published under, for the warning text.
 _VERSION_LICENCES = {
@@ -298,6 +302,55 @@ def _warn_if_licence_restricted(version):
         UserWarning,
         stacklevel=3,
     )
+
+
+def tabpfn_versions_requiring_token(args):
+    """The restricted TabPFN versions a QProfiler config selects, if any.
+
+    Whether a run needs a token is a property of the *version*, not of the model list:
+    the pinned ``v2`` downloads anonymously under the Prior Labs License, while every
+    member of :data:`_RESTRICTED_VERSIONS` needs that licence accepted against a Prior
+    Labs account first. A caller that warns without asking this question tells the great
+    majority of runs that TabPFN "will fail" moments before it succeeds -- which is worse
+    than saying nothing, because it teaches people to skim past the pre-flight log at
+    exactly the point where it starts carrying a real failure. It did precisely that on
+    all twelve jobs of the first pilot submission, whose configs pin ``v2``.
+
+    Both blocks in :data:`_TABPFN_ARG_BLOCKS` are inspected rather than just the one the
+    run will reach, because that depends on ``grid_search`` and the two errors are not
+    symmetric: a spurious warning costs a moment's confusion, while a missing one costs a
+    job that dies at its first TabPFN fit, hours in.
+
+    A tuned block may offer several candidate versions, so a value is accepted either as
+    one name or as a list of them, and an unrecognised name counts as requiring a token --
+    it cannot be shown to be token-free, and :func:`normalise_model_version` will reject
+    it at fit time regardless.
+
+    Args:
+        args (Mapping): The resolved QProfiler config.
+
+    Returns:
+        list[str]: Sorted, de-duplicated version names needing a token; empty when none
+            does, which is the case for a config that leaves ``model_version`` alone.
+    """
+    found = set()
+    for block in _TABPFN_ARG_BLOCKS:
+        values = args.get(block) if hasattr(args, "get") else None
+        if not values:
+            continue
+        # to_plain because these come off OmegaConf, where a list of candidates is a
+        # ListConfig that is not a `list`; see qbiocode.learning._grid.to_plain.
+        requested = to_plain(values).get("model_version", TABPFN_DEFAULT_VERSION)
+        candidates = requested if isinstance(requested, list) else [requested]
+        for candidate in candidates:
+            try:
+                version = normalise_model_version(candidate)
+            except ValueError:
+                found.add(str(candidate))
+            else:
+                if version in _RESTRICTED_VERSIONS:
+                    found.add(version)
+    return sorted(found)
 
 
 def resolve_model_path(model_path="auto", model_version=TABPFN_DEFAULT_VERSION):

@@ -49,6 +49,7 @@ import nbformat
 #   example_quvine           ~7.5 min (offline)
 #   catboost_and_tabpfn      ~20 s   (needs the [tabpfn] extra and, on a machine with no
 #                                     cached checkpoint, network access to download it)
+#   quantum_datasets_qprofiler ~3.5 min (offline)
 #   example_qprofiler_v2     ~5 min  (needs the [tabpfn] extra; 300 tuned model fits)
 # Notebooks needing anndata/scanpy or a real quantum backend are deliberately
 # absent: they cannot run in a bare CI environment.
@@ -64,6 +65,12 @@ NOTEBOOKS = [
     # runnable without the optional extra, and is skipped when that is absent. See
     # NOTEBOOKS_NEEDING_TABPFN below.
     "tutorial/CatBoost_and_TabPFN/catboost_and_tabpfn.ipynb",
+    # Generates all five quantum families and profiles them, so it is the end-to-end
+    # guard on the generators, the two shipped qdata configs and the view-directory
+    # layout at once. It belongs here rather than among the deliberate absences above
+    # because it needs no backend and no network: every number comes from exact
+    # statevector simulation in numpy, and it writes only beside itself.
+    "tutorial/Quantum_Data/quantum_datasets_qprofiler.ipynb",
     # The widest QProfiler configuration the suite executes: all ten models under Optuna
     # over 3 datasets x 5 splits x 2 embeddings. It is the end-to-end guard for the
     # ModelResults.csv writer, because it is the only notebook that runs tuned classical

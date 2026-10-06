@@ -541,6 +541,55 @@ QPL is scored on the **mean** accuracy across the classical heads it fits on the
 projection, which is what tuning the projection is meant to improve. Taking the best head
 instead would let one lucky head choose the projection, and every head is reported anyway.
 
+#### Freezing the quantum search across iterations
+
+Leaving `tune_quantum: False` while `grid_search: True` is the cheap configuration and it
+is **not a fair comparison**: every classical learner is searched, no quantum learner is,
+and each quantum loss is then confounded with the fact that nobody searched its space.
+Turning `tune_quantum: True` on removes the confound and multiplies the quantum side by
+`n_trials_quantum` *per iteration*.
+
+`freeze_quantum_params` is the middle option -- search each quantum arm once, on iteration
+0, and reuse that configuration for the rest:
+
+```yaml
+grid_search: True
+tune_quantum: True
+n_trials_quantum: 32
+freeze_quantum_params: True
+quantum_param_dir: quantum_tuned_params   # one JSON file per arm
+```
+
+Quantum fits per arm, at `iter: 5`:
+
+| Setting | Fits | |
+|---|---|---|
+| `tune_quantum: False` | 5 | not comparable to a tuned classical arm |
+| `tune_quantum: True` | 160 | `iter * n_trials_quantum` |
+| `+ freeze_quantum_params: True` | 36 | `n_trials_quantum + (iter - 1)` |
+
+**What it costs, and which way.** The frozen configuration was chosen on iteration 0's
+training split, so on iterations 1..I-1 it is a configuration selected elsewhere -- never
+better than a fresh search would have found on that split. The classical side re-searches
+every iteration and keeps its full advantage. Quantum is therefore measured at a handicap
+classical does not carry, so a quantum win observed under this setting is a **lower bound**
+on the win a symmetric budget would show. That asymmetry is acceptable precisely because it
+points away from the interesting claim, but it has to be reported as what it is, and the
+protocol must not be described as symmetric.
+
+The cache key is `(dataset, embedding, n_components, model)` -- deliberately everything
+except the iteration, since reuse across iterations is the point. Editing a
+`gridsearch_<model>_args` block invalidates the affected files automatically, because a
+frozen set whose names no longer match the current space is discarded rather than reused.
+Every failure path -- missing file, truncated file, unwritable directory -- degrades to
+"search this iteration again", so a corrupt cache costs one redundant search and never
+aborts a sweep. Delete `quantum_param_dir` to force a fresh search throughout.
+
+A frozen iteration still reports its model as `<model>_opt`, the same label a freshly
+searched one carries. That matters for
+`qbiocode.utils.select_winners`, which pairs arms across the iteration axis:
+relabelling the reused iterations would split one arm in two and break the pairing.
+
 #### Projection caches
 
 `pqk` and `qpl` cache their projected feature matrices so a rerun does not recompute

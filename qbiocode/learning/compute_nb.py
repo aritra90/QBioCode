@@ -112,8 +112,10 @@ def compute_nb_opt(
             models.
 
     Returns:
-        modeleval (dict): A dictionary containing the evaluation metrics of the model on the test dataset, including accuracy, AUC, F1 score,
-                          and the time taken to train and validate the model, along with the best parameters found during the search.
+        modeleval (dict): A dictionary containing the evaluation metrics of the model on
+            the test dataset, including accuracy, AUC, F1 score, and the time taken to
+            train and validate the model, along with the best parameters found during the
+            search.
     """
 
     beg_time = time.time()

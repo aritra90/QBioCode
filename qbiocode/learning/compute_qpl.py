@@ -40,6 +40,18 @@ except Exception as exc:  # noqa: BLE001 -- see above
     _CATBOOST_ERROR = str(exc)
     CatBoostClassifier = None  # type: ignore
 
+# Cap on the outer parallelism of the RandomizedSearchCV heads below. `n_jobs=-1` asks
+# joblib for one worker per core, and every worker is a fresh process that re-imports
+# xgboost and catboost. CatBoost's extension module is 264 MB; read from a network
+# filesystem that import costs ~17 s on its own, so past a handful of workers startup
+# dominates and the workers contend for the same file. Measured here on a 128-core host,
+# the catboost head's 200-candidate search (n_iter=40, cv=5) over 30x9 data took 12.4 s
+# at n_jobs=1, 11.1 s at 4 and 13.4 s at 8, but did not finish in 8 minutes at -1 -- and
+# with the per-fit thread pins below removed it was killed outright by the OOM reaper.
+# The searches are small and the work per candidate is milliseconds, so the parallelism
+# beyond a few workers buys nothing that the startup cost does not take back.
+_SEARCH_N_JOBS = min(os.cpu_count() or 1, 8)
+
 # from qiskit.primitives import Sampler
 from functools import reduce
 
@@ -158,6 +170,18 @@ def compute_qpl(
     _projection_backend = args.get("projection_backend")
     if _projection_backend:
         fingerprint_parts = fingerprint_parts + (_projection_backend,)
+    # The data itself, plus the two settings that change the numbers a projection holds
+    # without changing the circuit. Without them the key names the feature map and the
+    # dataset but never the rows, so a different fold of the same dataset, a regenerated
+    # CSV under an unchanged name, or a different shot count all reach the same file -- and
+    # the row-count/width validation below cannot reject any of them, because those cases
+    # share a shape. This does orphan projections cached under the older key, which costs a
+    # recompute rather than correctness; only the tutorial trees hold any.
+    fingerprint_parts = fingerprint_parts + (
+        qutils.dataset_fingerprint(X_train, X_test),
+        args.get("shots"),
+        args.get("backend"),
+    )
     feature_map_fingerprint = hashlib.sha256(
         repr(fingerprint_parts).encode()
     ).hexdigest()[:10]
@@ -303,23 +327,35 @@ def compute_qpl(
                     # These groups are the Pauli X, Y and Z operators on individual qubits
                     # Apply the circuit layout to the observable if mapped to device
                     if args["backend"] != "simulator":
+                        # num_qubits comes from the CIRCUIT, not the backend. On a device the two agree:
+                        # transpiling against a 127-qubit backend returns a 127-qubit circuit, and the
+                        # observables built either way are byte-identical (checked on FakeManilaV2 and
+                        # FakeSherbrooke). On Aer they do not agree -- AerSimulator reports num_qubits=63,
+                        # a memory-derived capacity rather than a device width, while transpiling leaves
+                        # the circuit at its own width and sets circuit.layout to None. Laying the Pauli
+                        # out onto 63 qubits raised, for every estimator-primitive model reached through
+                        # backend: 'mps_simulator':
+                        #   ValueError: The number of qubits of the circuit (10) does not match the
+                        #              number of qubits of the (0,)-th observable (63).
+                        # With layout None and num_qubits == circuit.num_qubits the call is the identity,
+                        # so this branch now agrees with the else branch on Aer and is unchanged on hardware.
                         observables_x = []
                         observables_y = []
                         observables_z = []
                         for i in range(feat_dimension):
                             observables_x.append(
                                 Pauli(id[:i] + "X" + id[(i + 1) :]).apply_layout(
-                                    circuit.layout, num_qubits=backend.num_qubits
+                                    circuit.layout, num_qubits=circuit.num_qubits
                                 )
                             )
                             observables_y.append(
                                 Pauli(id[:i] + "Y" + id[(i + 1) :]).apply_layout(
-                                    circuit.layout, num_qubits=backend.num_qubits
+                                    circuit.layout, num_qubits=circuit.num_qubits
                                 )
                             )
                             observables_z.append(
                                 Pauli(id[:i] + "Z" + id[(i + 1) :]).apply_layout(
-                                    circuit.layout, num_qubits=backend.num_qubits
+                                    circuit.layout, num_qubits=circuit.num_qubits
                                 )
                             )
                     else:
@@ -554,8 +590,15 @@ def create_xgb_model(seed):
     # below varies `subsample` and `colsample_bytree`, both of which sample rows and
     # columns at random, so an unseeded estimator made this model irreproducible even
     # though the search itself was seeded.
+    # n_jobs=1 because the RandomizedSearchCV below runs several fits at once. sklearn's
+    # own estimators get their thread pools limited inside a joblib worker by
+    # threadpoolctl; XGBoost drives its own OpenMP pool and does not, so every worker
+    # would otherwise claim every core at once. Unpinned on a 128-core host that
+    # oversubscribes by the worker count and the search is either unusably slow or killed
+    # outright by the OOM reaper. One thread per fit keeps the outer parallelism, which is
+    # the useful one -- see _SEARCH_N_JOBS for the cap on how many workers that is.
     xgb = XGBClassifier(  # type: ignore
-        objective="binary:logistic", eval_metric="logloss", random_state=seed
+        objective="binary:logistic", eval_metric="logloss", random_state=seed, n_jobs=1
     )
 
     xgb_param_distributions = {
@@ -574,7 +617,7 @@ def create_xgb_model(seed):
         n_iter=40,
         cv=5,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_SEARCH_N_JOBS,
     )
 
     return xgb_model
@@ -593,8 +636,12 @@ def create_catboost_model(seed):
 
     * ``allow_writing_files=False`` keeps every fit from dropping a ``catboost_info/``
       directory into the working directory; ``verbose=False`` silences the
-      per-iteration training log. ``n_jobs=-1`` on the search below means many of these
-      run at once, so both matter more here than in a single fit.
+      per-iteration training log. The search below fits several of these at once, so
+      both matter more here than in a single fit.
+
+    * ``thread_count=1`` for the same reason ``create_xgb_model`` pins ``n_jobs=1``:
+      CatBoost manages its own thread pool, which joblib cannot see and threadpoolctl
+      does not limit, so unpinned every parallel worker would claim every core.
     """
     if not CATBOOST_AVAILABLE:
         raise ImportError(
@@ -611,6 +658,7 @@ def create_catboost_model(seed):
         bootstrap_type="Bernoulli",
         verbose=False,
         allow_writing_files=False,
+        thread_count=1,
     )
 
     catboost_param_distributions = {
@@ -628,7 +676,7 @@ def create_catboost_model(seed):
         n_iter=40,
         cv=5,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_SEARCH_N_JOBS,
     )
 
     return catboost_model
@@ -675,7 +723,7 @@ def create_lr_model(seed):
         n_iter=40,
         cv=5,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_SEARCH_N_JOBS,
     )
 
     return lr_model
@@ -700,7 +748,7 @@ def create_rf_model(seed):
         n_iter=40,
         cv=5,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_SEARCH_N_JOBS,
     )
 
     return rf_model
@@ -724,7 +772,7 @@ def create_mlp_model(seed):
         n_iter=40,
         cv=5,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_SEARCH_N_JOBS,
     )
 
     return mlp_model
@@ -747,7 +795,7 @@ def create_svc_model(seed):
         n_iter=40,
         cv=5,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_SEARCH_N_JOBS,
     )
 
     return svc_model
@@ -846,6 +894,7 @@ def compute_qpl_opt(
         n_trials=n_trials,
         seed=args.get("seed") if isinstance(args, dict) else None,
         validation_split=validation_split,
+        data_key=data_key,
         fixed={"classical_models": classical_models},
     )
 

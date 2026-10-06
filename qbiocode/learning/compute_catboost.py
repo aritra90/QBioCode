@@ -62,7 +62,7 @@ also why ``random_state`` is recorded unprefixed rather than as
 # ====== Base class imports ======
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 # ====== CatBoost imports ======
 
@@ -86,6 +86,7 @@ except Exception as exc:  # noqa: BLE001 -- see above
 
 # ====== Additional local imports ======
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
+from qbiocode.learning._grid import one_value
 from qbiocode.learning._tuning import search_hyperparameters
 
 # ====== Module constants ======
@@ -122,6 +123,16 @@ def _require_catboost():
         "If the import itself succeeds outside QBioCode, check that the wheel matches "
         "this interpreter's platform and Python version."
     )
+
+
+def _one_value(name, value, why, block="gridsearch_catboost_args"):
+    """Bind :func:`qbiocode.learning._grid.one_value` to catboost's search block.
+
+    The shared helper takes ``block`` as a required argument, because the value of its
+    message is that it names the config block to edit. Every caller in this module reads
+    the same block, so it is bound once here rather than repeated at each call.
+    """
+    return one_value(name, value, why, block)
 
 
 def _resolve_bootstrap(candidates, fixed, block="gridsearch_catboost_args"):
@@ -505,8 +516,20 @@ def compute_catboost_opt(
     # before the search so a contradictory block fails now, with a message naming the
     # config key, rather than on whichever trial first samples the bad corner.
     fixed = {"random_state": random_state, **_QUIET}
+    thread_count = _one_value(
+        "thread_count",
+        thread_count,
+        "it caps the threads each fit may use, which is a resource decision rather than "
+        "a model one -- `model_run` already fans the models out over joblib, so anything "
+        "above 1 oversubscribes the cores the job asked for",
+    )
     if thread_count is not None:
         fixed["thread_count"] = thread_count
+    loss_function = _one_value(
+        "loss_function",
+        loss_function,
+        "it states which problem is being solved rather than tuning how it is solved",
+    )
     if loss_function is not None:
         fixed["loss_function"] = loss_function
     # `min_data_in_leaf` is passed to every trial rather than searched. CatBoost accepts it
@@ -516,18 +539,15 @@ def compute_catboost_opt(
     # differ under Depthwise. It is still *accepted* here, rather than dropped from the
     # signature, so that a config naming it does not die on an unexpected keyword argument
     # inside a joblib worker -- the asymmetry that `loss_function` had.
-    if min_data_in_leaf is not None and min_data_in_leaf != []:
-        if isinstance(min_data_in_leaf, (Sequence, set, frozenset, Mapping)) and not isinstance(
-            min_data_in_leaf, str
-        ):
-            raise ValueError(
-                f"'gridsearch_catboost_args' gives 'min_data_in_leaf' several values "
-                f"({min_data_in_leaf!r}), but it is not searched: CatBoost honours it only "
-                f"under grow_policy 'Depthwise' or 'Lossguide', so at the default "
-                f"'SymmetricTree' every value produces an identical model and the extra fits "
-                f"buy nothing. Give it a single value instead, and set 'grow_policy' if you "
-                f"want it to take effect -- or search 'grow_policy' and leave this out."
-            )
+    min_data_in_leaf = _one_value(
+        "min_data_in_leaf",
+        min_data_in_leaf,
+        "CatBoost honours it only under grow_policy 'Depthwise' or 'Lossguide', so at the "
+        "default 'SymmetricTree' every value produces an identical model and the extra fits "
+        "buy nothing -- set 'grow_policy' if you want it to take effect, or search "
+        "'grow_policy' and leave this out",
+    )
+    if min_data_in_leaf is not None:
         fixed["min_data_in_leaf"] = min_data_in_leaf
     _resolve_bootstrap(candidates, fixed)
 

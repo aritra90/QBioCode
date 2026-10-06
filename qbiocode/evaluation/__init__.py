@@ -48,7 +48,13 @@ from .dataset_evaluation import (
     evaluate,
 )
 from .mfe_features import MFE_FEATURES, get_mfe_features
-from .model_evaluation import evaluation_metrics, modeleval
+from .model_evaluation import (
+    METRIC_COLUMNS,
+    SCORE_COLUMNS,
+    available_metric_columns,
+    evaluation_metrics,
+    modeleval,
+)
 from .model_run import model_run
 from .task_spectrum import (
     TASK_COLUMN_PREFIX,
@@ -59,6 +65,9 @@ from .task_spectrum import (
 
 __all__ = [
     "modeleval",
+    "METRIC_COLUMNS",
+    "SCORE_COLUMNS",
+    "available_metric_columns",
     "evaluation_metrics",
     "evaluate",
     "model_run",

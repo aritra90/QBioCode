@@ -133,7 +133,24 @@ pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
 #: "the keys written when ``args['grid_search']`` is off", which was the defect: the flag
 #: describes the run and the column describes the row. This learner has no tuned twin, so
 #: these are its keys under either flag (``_was_tuned`` in model_evaluation.py).
-DOCUMENTED_KEYS = frozenset({"model", "accuracy", "f1_score", "time", "auc", "Model_Parameters"})
+# ``balanced_accuracy``, ``mcc`` and ``pr_auc`` joined the row when weighted F1 was
+# found to be unusable on its own as the benchmark's ranking statistic: a
+# majority-class dummy scores weighted F1 0.906 on openml__ozone-level-8hr, whose
+# minority fraction is 0.063. Adding them widens every row this suite pins, which is
+# why this set is a named constant and not restated at each assertion.
+DOCUMENTED_KEYS = frozenset(
+    {
+        "model",
+        "accuracy",
+        "f1_score",
+        "balanced_accuracy",
+        "mcc",
+        "time",
+        "auc",
+        "pr_auc",
+        "Model_Parameters",
+    }
+)
 
 #: The three sampling strategies the docstring documents.
 MODES = ("balanced", "unbalanced", "pair_sample")
@@ -439,12 +456,13 @@ def base_run(data):
 class TestTheEnsembleFitsAndWritesTheStandardRow:
     """The contract every reader of ModelResults.csv depends on."""
 
-    def test_a_fit_returns_the_three_columns_every_learner_writes(self, base_run):
+    def test_a_fit_returns_the_four_columns_every_learner_writes(self, base_run):
         """``modeleval`` names its columns after the model; nothing here may differ."""
         columns, _ = base_run
         assert set(columns) == {
             "y_test_QEnsemble",
             "y_predicted_QEnsemble",
+            "y_score_QEnsemble",
             "results_QEnsemble",
         }
         # Each column is a dict keyed by frame index, not a list: model_run ends in
@@ -583,12 +601,21 @@ class TestTheEnsembleFitsAndWritesTheStandardRow:
         ``modeleval`` reads nothing out of ``args`` and neither does ``compute_qensemble``.
         Two consequences, both asserted here:
 
-        * The recorder sees no reads at all, which is the stronger form of the old claim.
-          It is also the concrete reason this learner cannot be driven by ``model_run``,
-          which passes nothing but ``args``: every dispatchable quantum learner takes
-          ``backend``, ``shots`` and ``seed`` out of it, while this one takes ``n_shots``,
-          ``seed`` and ``device`` as its own parameters. Setting ``args['shots']`` here
-          still gets you 8192.
+        * The recorder sees exactly one read, ``'average'``, and no model-configuration
+          key at all. ``'average'`` is metric formatting -- how a multiclass f1 is
+          averaged -- and is read with ``.get`` against the signature default, which the
+          empty-dict half below proves by not raising. The key this test exists to pin is
+          ``grid_search``, and it must never be read: that was the run-wide flag deciding
+          a per-row column. Asserting the exact list rather than just
+          ``'grid_search' not in read`` is deliberate -- it fails if a future change starts
+          pulling model configuration out of ``args``, which is the regression that would
+          matter.
+
+          The list being short is also the concrete reason this learner cannot be driven
+          by ``model_run``, which passes nothing but ``args``: every dispatchable quantum
+          learner takes ``backend``, ``shots`` and ``seed`` out of it, while this one takes
+          ``n_shots``, ``seed`` and ``device`` as its own parameters. Setting
+          ``args['shots']`` here still gets you 8192.
         * An ``args`` dict with no ``'grid_search'`` key is accepted. It used to raise
           ``KeyError`` inside ``modeleval`` *after* the fit, so a direct call that omitted
           a key it never needed paid for every circuit and then lost the row -- the reason
@@ -614,12 +641,20 @@ class TestTheEnsembleFitsAndWritesTheStandardRow:
         compute_qensemble(
             X_train, X_test[:2], y_train, y_test[:2], args, n_train=4, n_shots=16, seed=SEED
         )
-        assert args.read == []
+        assert args.read == ["average"]
+        assert "grid_search" not in args.read
 
         empty = RecordingArgs()
         row = compute_qensemble(
             X_train, X_test[:2], y_train, y_test[:2], empty, n_train=4, n_shots=16, seed=SEED
         ).to_dict()["results_QEnsemble"][0]
+        # Empty, not ``["average"]``, and the asymmetry with the assertion above is the
+        # point. ``modeleval`` reads the key as ``(args or {}).get("average", average)``,
+        # and an empty dict is falsy -- so ``or {}`` substitutes a fresh plain dict and the
+        # recorder never sees the call. That guard exists so ``args=None`` cannot raise, and
+        # the short-circuit is harmless because the fallback value is identical either way.
+        # Asserted rather than left implicit because the two halves of this test would
+        # otherwise look inconsistent, and the next reader would 'fix' one of them.
         assert empty.read == []
         assert set(row) == set(DOCUMENTED_KEYS)
         assert row["Model_Parameters"]["seed"] == SEED

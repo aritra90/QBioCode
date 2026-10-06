@@ -241,6 +241,24 @@ CLI_OVERRIDES = [
     "seed=7",
     "q_seed=7",
     "shots=64",
+    # Pinned, not inherited. Both keys are set in the shipped config.yaml, and both were
+    # flipped on there after these tests were written -- which silently changed what six
+    # of them were testing rather than failing them honestly: the fixture began writing a
+    # TUNED row (`qsvc_opt`, parameters in `BestParams_Tuned`), so the assertions on the
+    # untuned label and on `Model_Parameters` compared the right thing against the wrong
+    # run. Worse for CLI_RECORDED_PARAMETERS below, whose whole discriminator is that
+    # `C: 0.01` comes from the config's `qsvc_args` block and not from `compute_qsvc`'s
+    # own default -- under tuning C comes from the search space instead, so the test can
+    # no longer tell whether the args block was plumbed through at all.
+    #
+    # This class tests the untuned quantum row seam and the labels the winner finder has
+    # to match; it is not a test of the tuner. The tuned twin has its own real-dispatch
+    # coverage in test_opt_twins_dispatch.py, and the `_opt` and `qpl_opt_*` spellings are
+    # covered below by relabelling this row, so nothing is lost by holding the fixture
+    # still. It also makes the fixture ~33x cheaper: n_trials_quantum defaults to 32 in
+    # the shipped config, i.e. 32 extra QSVC fits for a fixture that needs one.
+    "grid_search=False",
+    "tune_quantum=False",
 ]
 
 #: What ``qprofiler`` must write for a quantum row. The metric names are the ones

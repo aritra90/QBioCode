@@ -1,3 +1,28 @@
+# ----------------------------------------------------------------------------------
+# Thread oversubscription: why this is the first thing in the file
+# ----------------------------------------------------------------------------------
+#
+# XGBoost sizes its OpenMP pool from `omp_get_max_threads()` when no cap is given, and
+# `qbiocode.learning.compute_xgb` gives none unless a config asks for one. On a 128-core
+# node that is 128 threads to boost a 42-row training set, and the per-round barrier costs
+# orders of magnitude more than the work: measured on this tree, the four fits behind
+# `test_opt_twins_dispatch.py::...::test_the_reported_choice_is_one_the_config_block_offered[xgb]`
+# ran for over 280 s and were killed, and finished in 0.06 s with the cap in place. It
+# reads as a hang, not as a slow test, and it is the machine's core count that decides --
+# so it reproduces on the cluster and not on a laptop.
+#
+# `submit_pilot.sh` exports this for benchmark jobs and the pilot configs pin `n_jobs` in
+# both xgb blocks, but a test builds its own args dict and inherits neither. This is the
+# one place every test module in this directory passes through before importing xgboost,
+# and the variable has to be set before the OpenMP runtime initialises, which happens on
+# that import.
+#
+# `setdefault`, not assignment: a caller who exports a value chose it, and
+# `tests/test_openmp_import_order.py` is about what happens under specific settings.
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import subprocess

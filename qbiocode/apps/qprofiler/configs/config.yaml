@@ -37,7 +37,7 @@ n_jobs: 10
 # select the embedding method for reducing dimensionality (number of features) in your data set
 # this always needs to be a list! even if you only want to use one embedding method, it still needs to be in a list.
 # embeddings: ['none']
-embeddings: ['pca', 'nmf', 'none']
+embeddings: ['pca', 'umap', 'none']
 
 # Embeddings are applied only to a dataset with MORE than this many features. Below that
 # width a feature reduction mostly costs information without buying anything: every
@@ -52,14 +52,34 @@ embeddings: ['pca', 'nmf', 'none']
 #
 # Set 0 to apply every requested embedding whatever the feature count. Omit the key for
 # the default of 18.
-embedding_min_features: 18
+#
+# 19, not the default 18, because the gate is strictly `n_features > embedding_min_features`
+# and this sweep's rule is "a dataset with FEWER THAN 20 features runs unembedded". At 18 a
+# 19-feature dataset would still be embedded, one short of the intended boundary. At 19 the
+# widths that collapse to 'none' are exactly 1..19 and the widths that embed are exactly
+# >= 20, which is also the statevector/MPS-simulable range the 'none' arm exists to cover.
+embedding_min_features: 19
 
 # number of dimensions (features) to embed (reduce) your data down to
 n_components: 3
 
 # ML models to generate
 # parameters to use for each ML method are listed further down in this file
-model: ['svc', 'dt', 'lr', 'nb', 'rf', 'mlp', 'qsvc', 'vqc', 'qnn', 'pqk']
+# 9 classical + 4 quantum. One representative per classical family: linear (lr),
+# margin (svc), kernel-free probabilistic (nb), single tree (dt), bagged trees (rf),
+# boosted trees in two flavours (xgb, catboost), neural (mlp), and a pretrained tabular
+# transformer that does no gradient training at all (tabpfn).
+#
+# 'qpl' is deliberately absent: it is a classical head on a quantum kernel, so it
+# duplicates 'pqk' plus an arm already represented on the classical side. 'qensemble' is
+# absent because it is not in compute_ml_dict at all, and two of its three sampling modes
+# build a circuit with no controlled operations (both pinned as strict xfails).
+#
+# 'vqc' and 'qnn' are BOTH kept on purpose, even though they are the same variational
+# model differing only in primitive (sampler vs estimator). Whether that difference is
+# visible in the scores is an open question this sweep answers rather than assumes; drop
+# one once the pilot shows their rows agree.
+model: ['lr', 'svc', 'nb', 'dt', 'rf', 'xgb', 'catboost', 'mlp', 'tabpfn', 'qsvc', 'pqk', 'qnn', 'vqc']
 
 average: 'weighted'
 multi_class: 'raise'
@@ -72,8 +92,16 @@ shots: 1024
 # this sets the level of error mitigation for the QML methods (ranges from 1-3)
 resil_level: 1
 
-# set the ratio of train:test the data is split into, in this case 70:30
-test_size: 0.3
+# set the ratio of train:test the data is split into, in this case 79:21
+#
+# 0.21, not 0.30. The per-dataset verdict in qbiocode.utils.fair_selection uses the
+# Nadeau & Bengio (2003) corrected resampled t-test, whose standard error floors at
+# s * sqrt(test_size / (1 - test_size)) no matter how many iterations are run. At this
+# protocol's noise level that floor puts the CI half-width at 0.0343 for test_size 0.30
+# and 0.0270 for 0.21, so an epsilon of 0.027 is UNREACHABLE at 0.30 -- every dataset
+# would come back 'inconclusive' by construction. 0.21 is the widest test split at which
+# a per-dataset unequivocal win is attainable at all.
+test_size: 0.21
 
 # Enable stratified sampling to maintain class distribution in train/test splits
 # Set to ['y'] to enable stratification, or [] to disable
@@ -84,7 +112,9 @@ stratify: ['y']
 scaling: ['True']
 
 # this turns on hyperparameter tuning for the CML methods
-grid_search: False
+# On, and paired with tune_quantum below: tuning classical while leaving quantum untuned
+# is the confound this sweep exists to avoid.
+grid_search: True
 
 # Which search to run when grid_search is on.
 #   optuna -- sample n_trials configurations with Optuna's TPE sampler (default)
@@ -95,11 +125,37 @@ tuner: optuna
 # describe fewer distinct combinations than this. Ignored when tuner: grid.
 n_trials: 50
 
-# Also tune the QUANTUM models (qsvc, vqc, qnn, pqk, qpl). Off by default: each trial
-# is a quantum fit, so this multiplies their cost by n_trials_quantum. Needs a
-# gridsearch_<model>_args block for every quantum model in `model` above.
-tune_quantum: False
-n_trials_quantum: 10
+# Also tune the QUANTUM models (qsvc, vqc, qnn, pqk, qpl). ON here, which is a change:
+# leaving it off while grid_search tunes the classical side is the confound the comment
+# above describes, so the benchmark pays for it deliberately. It is not free -- each
+# trial is a quantum fit, so the quantum arms' cost goes up by n_trials_quantum, and the
+# freeze switch below is what makes that affordable. Needs a gridsearch_<model>_args
+# block for every quantum model in `model` above.
+#
+# The KEY's own default, when absent from args entirely, is still off -- that is what the
+# tests and docs mean by "the documented default", and it is why anything that needs an
+# untuned quantum row must set it False explicitly rather than relying on this file.
+tune_quantum: True
+n_trials_quantum: 32
+
+# Search each quantum arm ONCE, on iteration 0, and reuse that configuration for the
+# remaining iterations. Turns the cost of tune_quantum from `iter * n_trials_quantum`
+# fits per arm into `n_trials_quantum + (iter - 1)` -- at iter: 5 and
+# n_trials_quantum: 32, from 160 quantum fits to 36.
+#
+# It is not a free lunch, and the direction of the bias matters. The frozen
+# configuration was chosen on iteration 0's training split, so on later iterations it is
+# a configuration selected elsewhere: never better than a fresh search would have found
+# there. The classical side re-searches every iteration and keeps its full advantage. So
+# quantum is measured at a handicap classical does not carry, and a quantum win observed
+# under this setting is a LOWER BOUND on the win a symmetric budget would show. State
+# that; do not describe the protocol as symmetric.
+#
+# Cached as one JSON file per (dataset, embedding, n_components, model) under
+# quantum_param_dir. Editing a gridsearch_<model>_args block invalidates the cache for
+# that model automatically. Delete the directory to force a fresh search.
+freeze_quantum_params: True
+quantum_param_dir: quantum_tuned_params
 
 # Fraction of the training data held out to score each quantum candidate on. Quantum
 # candidates are scored on one stratified holdout rather than k folds, because a
@@ -204,6 +260,27 @@ gridsearch_mlp_args: {'hidden_layer_sizes': [[20,],[50,],[100,]],
                       'learning_rate': ['constant','adaptive'],
                       }
 
+
+# begin XGBoost arguments
+# The keys are exactly the ones compute_xgb accepts; anything else in this block is
+# ignored with a log line rather than passed through, so a typo here is silent.
+# compute_xgb wraps XGBClassifier in OneVsOneClassifier, which is a no-op on the binary
+# targets this corpus is made of.
+xgb_args: {'n_estimators': 200,
+           'max_depth': 6,
+           'learning_rate': 0.1,
+           'subsample': 0.8,
+           'colsample_bytree': 0.8,
+           'min_child_weight': 1,
+           }
+
+gridsearch_xgb_args: {'n_estimators': [100, 200, 400],
+                      'max_depth': [3, 6, 9],
+                      'learning_rate': {low: 1.0e-2, high: 3.0e-1, log: true},
+                      'subsample': {low: 0.6, high: 1.0},
+                      'colsample_bytree': {low: 0.6, high: 1.0},
+                      'min_child_weight': [1, 3, 5],
+                      }
 
 # begin CatBoost arguments
 # Any parameter left out below is left at CatBoost's own default. That is not the same

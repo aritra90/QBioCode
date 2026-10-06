@@ -636,7 +636,18 @@ class TestTheBugsFoundInReview:
         only an actual fit discovers the checkpoint is gated. If the weights *are*
         available this asserts the head simply ran, which is the same contract from the
         other side.
+
+        Both of those outcomes need the extra present. With it absent, ``compute_qpl``
+        drops the head at the earlier ``tabpfn_is_available`` gate, whose warning names
+        "TabPFN" rather than the ``qpl_tabpfn`` the coherence check below looks for --
+        that string comes from the per-head failure path, which only a real fit reaches.
+        So this defers to the extra like every other TabPFN-fitting test in this module.
         """
+        from qbiocode.learning.compute_tabpfn import tabpfn_is_available
+
+        if not tabpfn_is_available():
+            pytest.skip("the [tabpfn] extra is absent, so no fit can reach the gate")
+
         completed = run_python(
             textwrap.dedent(
                 """

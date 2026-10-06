@@ -709,6 +709,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **QPL's classical heads oversubscribed every core and could be killed by the OOM
+  reaper.** Each of the six heads in `compute_qpl` is a
+  `RandomizedSearchCV(n_iter=40, cv=5, n_jobs=-1)`, so the search fans 200 fits out over
+  as many worker processes as there are cores. sklearn's own estimators are safe inside
+  such a worker because joblib limits their thread pools through `threadpoolctl`;
+  XGBoost and CatBoost drive their own OpenMP pools, which `threadpoolctl` does not see,
+  so *each* of up-to-`ncore` workers claimed *all* cores. On a 128-core host that is
+  ~128x oversubscription: measured on a 30-row, 9-feature projection, the XGBoost head
+  alone did not finish in 385 s, and running it against the CatBoost head in the same
+  process was `SIGKILL`ed by the OOM reaper. `XGBClassifier` now takes `n_jobs=1` and
+  `CatBoostClassifier` `thread_count=1`, keeping the outer parallelism, which is the
+  useful one. The same 30x9 XGBoost search now finishes in 46 s, and
+  `test_every_quantum_learner_tunes_and_reports_what_it_chose[qpl]` -- which previously
+  could not complete inside a 9-minute window -- passes in 113 s. Note this is a
+  scheduling fix only: the fitted models are unchanged, and pinning the thread count
+  makes the tree builders' floating-point summation order deterministic rather than
+  dependent on how many cores happened to be free. `compute_pqk`'s searched head is an
+  `SVC`, which is single-threaded, and `compute_xgb`'s `GridSearchCV` leaves `n_jobs`
+  unset, so neither nests and neither needed changing.
+
+- **The documentation build had been failing on a clean tree since `a01dce5`.** `docs/Makefile`
+  sets `SPHINXOPTS ?= -W --keep-going`, so any warning is an error, but an *incremental*
+  build re-reads only changed files and so reported none of these -- the failure was only
+  visible after `rm -rf docs/build`. Three independent causes, all in files that predate
+  this work:
+
+  - **A Google-style `Args:` block glued to the summary paragraph.** `compute_nb_opt` had no
+    blank line between its description and `Args:`, so napoleon emitted the `:param ...:`
+    field list with no blank line after the paragraph. docutils cannot begin a field list
+    mid-paragraph, so it absorbed the field markers as plain text and the first *wrapped*
+    parameter description became a block quote -- "Unexpected indentation", then "Block
+    quote ends without a blank line". The neighbouring `compute_nb` has that blank line,
+    which is precisely why it never warned. The reported line numbers point at the
+    wrapped parameter, not at the missing blank line that causes it.
+  - **A bullet list glued to its introducing line.** `model_run`'s `args (dict):` entry ends
+    `..., including:` and was followed immediately by `- model: ...`, so the bullets were
+    absorbed into the paragraph and the one wrapped bullet became a block quote the same way.
+  - **Two stale RST fragments**: `compute_qpl` carried two over-indented leftover lines after
+    a paragraph (also documenting a default that no longer matched the code), and
+    `compute_tabpfn`'s licence table had a 43-character cell under a 42-character rule,
+    so the text ran into the column separator.
+
+- **Seven sections of the Optuna tutorial rendered as literal `## 1. Setup` markdown, and its
+  table of contents was dead.** Each of those markdown cells opened with `<a id="setup"></a>`
+  on the line immediately before its heading. nbsphinx passes markdown cells through a
+  Markdown parser that treats the heading as a continuation of that raw HTML block, so the
+  heading never became a section: it got no anchor, never reached the sidebar, and printed
+  its own `##` markers. The seven `[Setup](#setup)`-style links then resolved to nothing
+  (`undefined label`) and degraded to plain text. The anchors are now separated from their
+  headings by a blank line *and* renamed to the slug nbsphinx derives from the heading text
+  (`#1.-setup`), so one href resolves both against the explicit anchor in Jupyter and
+  against the generated section label in the built docs. The section numbering is kept
+  because the prose refers to "section 6".
+
+- **`# Low variance features` silently became `None` for balanced-binary and standardized
+  data.** `get_low_var_features` took the 25th percentile of `df.var()`, which is pandas'
+  `ddof=1`, and compared it against `VarianceThreshold`, which uses `np.nanvar`'s
+  `ddof=0`. The threshold was therefore inflated by `N/(N-1)` relative to the very
+  variances it was screening. Where the feature variances lie within that factor of each
+  other, *every* feature fell below the threshold, sklearn raised
+  `ValueError: No feature in X meets the variance threshold`, and the metric was caught
+  and set to `None` after printing "No feature is strong enough to keep". Two cases hit
+  this. Balanced binary features do when the row count is low enough for the inflation to
+  exceed the spread -- measured on 60 distinct 6-bit inputs, pandas reported 0.2531-0.2542
+  against a 0.25332 threshold while sklearn saw 0.2489-0.2500 -- and any standardized
+  frame does at every row count, because `ddof=1` standardization puts the threshold at
+  exactly 1.0 while sklearn sees `(N-1)/N`. The percentile is now taken over
+  `df.var(ddof=0)`, so both sides measure the same quantity; those two cases now report 2
+  and 7 low-variance features instead of nothing. Where the old code did not raise, the
+  count still shifts (the runsheet's `te` datasets at N=400 go from 5 to 3), because the
+  threshold was being compared against the wrong variances either way. The column is a
+  QSage regression input (`apps/sage/sage.py`), so it was feeding a frequently-missing
+  value into the model. Its name and meaning are unchanged.
+
+  Not fixed, and worth knowing before using the column: the threshold is a percentile of
+  the variances themselves, so the count is close to `n_features / 4` whatever the data.
+  It is a weak signal by construction, and the docstring now says so.
+
 - **A CatBoost config's validity depended on the loss rather than on the config.**
   `subsample` and `bagging_temperature` belong to mutually exclusive CatBoost bootstrap
   schemes, and CatBoost derives the default scheme from the loss: `MVS` for `Logloss`,

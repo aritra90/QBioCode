@@ -1,0 +1,209 @@
+config	dataset	embedding	model	arm	backend	qubits	rows	n_trials_quantum	iter	exp_h	bound_h	yaml
+analcatdata_lawsuit_none_qsvc	analcatdata_lawsuit	none	qsvc	quantum	statevector_simulator	4	264	32	5	3.256	3.896	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_qsvc.yaml
+analcatdata_lawsuit_none_pqk	analcatdata_lawsuit	none	pqk	quantum	statevector_simulator	4	264	32	5	0.209	0.254	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_pqk.yaml
+analcatdata_lawsuit_none_qnn	analcatdata_lawsuit	none	qnn	quantum	statevector_simulator	4	264	32	5	0.076	0.076	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_qnn.yaml
+analcatdata_lawsuit_none_vqc	analcatdata_lawsuit	none	vqc	quantum	statevector_simulator	4	264	32	5	0.104	0.104	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_vqc.yaml
+analcatdata_lawsuit_none_lr	analcatdata_lawsuit	none	lr	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_lr.yaml
+analcatdata_lawsuit_none_svc	analcatdata_lawsuit	none	svc	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_svc.yaml
+analcatdata_lawsuit_none_nb	analcatdata_lawsuit	none	nb	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_nb.yaml
+analcatdata_lawsuit_none_dt	analcatdata_lawsuit	none	dt	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_dt.yaml
+analcatdata_lawsuit_none_rf	analcatdata_lawsuit	none	rf	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_rf.yaml
+analcatdata_lawsuit_none_xgb	analcatdata_lawsuit	none	xgb	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_xgb.yaml
+analcatdata_lawsuit_none_catboost	analcatdata_lawsuit	none	catboost	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_catboost.yaml
+analcatdata_lawsuit_none_mlp	analcatdata_lawsuit	none	mlp	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_mlp.yaml
+analcatdata_lawsuit_none_tabpfn	analcatdata_lawsuit	none	tabpfn	classical	statevector_simulator	4	264	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/analcatdata_lawsuit/analcatdata_lawsuit_none_tabpfn.yaml
+eng_zz_n6_gq1_s0_none_qsvc	eng_zz_n6_gq1_s0	none	qsvc	quantum	statevector_simulator	6	300	32	5	4.409	5.581	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_qsvc.yaml
+eng_zz_n6_gq1_s0_none_pqk	eng_zz_n6_gq1_s0	none	pqk	quantum	statevector_simulator	6	300	32	5	0.248	0.318	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_pqk.yaml
+eng_zz_n6_gq1_s0_none_qnn	eng_zz_n6_gq1_s0	none	qnn	quantum	statevector_simulator	6	300	32	5	0.080	0.080	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_qnn.yaml
+eng_zz_n6_gq1_s0_none_vqc	eng_zz_n6_gq1_s0	none	vqc	quantum	statevector_simulator	6	300	32	5	0.108	0.108	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_vqc.yaml
+eng_zz_n6_gq1_s0_none_lr	eng_zz_n6_gq1_s0	none	lr	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_lr.yaml
+eng_zz_n6_gq1_s0_none_svc	eng_zz_n6_gq1_s0	none	svc	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_svc.yaml
+eng_zz_n6_gq1_s0_none_nb	eng_zz_n6_gq1_s0	none	nb	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_nb.yaml
+eng_zz_n6_gq1_s0_none_dt	eng_zz_n6_gq1_s0	none	dt	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_dt.yaml
+eng_zz_n6_gq1_s0_none_rf	eng_zz_n6_gq1_s0	none	rf	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_rf.yaml
+eng_zz_n6_gq1_s0_none_xgb	eng_zz_n6_gq1_s0	none	xgb	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_xgb.yaml
+eng_zz_n6_gq1_s0_none_catboost	eng_zz_n6_gq1_s0	none	catboost	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_catboost.yaml
+eng_zz_n6_gq1_s0_none_mlp	eng_zz_n6_gq1_s0	none	mlp	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_mlp.yaml
+eng_zz_n6_gq1_s0_none_tabpfn	eng_zz_n6_gq1_s0	none	tabpfn	classical	statevector_simulator	6	300	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/eng_zz_n6_gq1_s0/eng_zz_n6_gq1_s0_none_tabpfn.yaml
+appendicitis_none_qsvc	appendicitis	none	qsvc	quantum	statevector_simulator	7	106	32	5	0.570	0.747	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_qsvc.yaml
+appendicitis_none_pqk	appendicitis	none	pqk	quantum	statevector_simulator	7	106	32	5	0.091	0.121	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_pqk.yaml
+appendicitis_none_qnn	appendicitis	none	qnn	quantum	statevector_simulator	7	106	32	5	0.058	0.058	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_qnn.yaml
+appendicitis_none_vqc	appendicitis	none	vqc	quantum	statevector_simulator	7	106	32	5	0.087	0.087	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_vqc.yaml
+appendicitis_none_lr	appendicitis	none	lr	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_lr.yaml
+appendicitis_none_svc	appendicitis	none	svc	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_svc.yaml
+appendicitis_none_nb	appendicitis	none	nb	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_nb.yaml
+appendicitis_none_dt	appendicitis	none	dt	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_dt.yaml
+appendicitis_none_rf	appendicitis	none	rf	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_rf.yaml
+appendicitis_none_xgb	appendicitis	none	xgb	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_xgb.yaml
+appendicitis_none_catboost	appendicitis	none	catboost	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_catboost.yaml
+appendicitis_none_mlp	appendicitis	none	mlp	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_mlp.yaml
+appendicitis_none_tabpfn	appendicitis	none	tabpfn	classical	statevector_simulator	7	106	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/appendicitis/appendicitis_none_tabpfn.yaml
+glass2_none_qsvc	glass2	none	qsvc	quantum	statevector_simulator	9	163	32	5	1.643	2.250	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_qsvc.yaml
+glass2_none_pqk	glass2	none	pqk	quantum	statevector_simulator	9	163	32	5	0.186	0.258	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_pqk.yaml
+glass2_none_qnn	glass2	none	qnn	quantum	statevector_simulator	9	163	32	5	0.081	0.081	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_qnn.yaml
+glass2_none_vqc	glass2	none	vqc	quantum	statevector_simulator	9	163	32	5	0.124	0.124	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_vqc.yaml
+glass2_none_lr	glass2	none	lr	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_lr.yaml
+glass2_none_svc	glass2	none	svc	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_svc.yaml
+glass2_none_nb	glass2	none	nb	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_nb.yaml
+glass2_none_dt	glass2	none	dt	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_dt.yaml
+glass2_none_rf	glass2	none	rf	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_rf.yaml
+glass2_none_xgb	glass2	none	xgb	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_xgb.yaml
+glass2_none_catboost	glass2	none	catboost	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_catboost.yaml
+glass2_none_mlp	glass2	none	mlp	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_mlp.yaml
+glass2_none_tabpfn	glass2	none	tabpfn	classical	statevector_simulator	9	163	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/glass2/glass2_none_tabpfn.yaml
+te_n10_s4_seed0_tau1_none_qsvc	te_n10_s4_seed0_tau1	none	qsvc	quantum	statevector_simulator	10	400	24	5	10.234	15.480	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_qsvc.yaml
+te_n10_s4_seed0_tau1_none_pqk	te_n10_s4_seed0_tau1	none	pqk	quantum	statevector_simulator	10	400	24	5	0.508	0.779	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_pqk.yaml
+te_n10_s4_seed0_tau1_none_qnn	te_n10_s4_seed0_tau1	none	qnn	quantum	statevector_simulator	10	400	24	5	0.110	0.110	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_qnn.yaml
+te_n10_s4_seed0_tau1_none_vqc	te_n10_s4_seed0_tau1	none	vqc	quantum	statevector_simulator	10	400	24	5	0.160	0.160	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_vqc.yaml
+te_n10_s4_seed0_tau1_none_lr	te_n10_s4_seed0_tau1	none	lr	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_lr.yaml
+te_n10_s4_seed0_tau1_none_svc	te_n10_s4_seed0_tau1	none	svc	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_svc.yaml
+te_n10_s4_seed0_tau1_none_nb	te_n10_s4_seed0_tau1	none	nb	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_nb.yaml
+te_n10_s4_seed0_tau1_none_dt	te_n10_s4_seed0_tau1	none	dt	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_dt.yaml
+te_n10_s4_seed0_tau1_none_rf	te_n10_s4_seed0_tau1	none	rf	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_rf.yaml
+te_n10_s4_seed0_tau1_none_xgb	te_n10_s4_seed0_tau1	none	xgb	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_xgb.yaml
+te_n10_s4_seed0_tau1_none_catboost	te_n10_s4_seed0_tau1	none	catboost	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_catboost.yaml
+te_n10_s4_seed0_tau1_none_mlp	te_n10_s4_seed0_tau1	none	mlp	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_mlp.yaml
+te_n10_s4_seed0_tau1_none_tabpfn	te_n10_s4_seed0_tau1	none	tabpfn	classical	statevector_simulator	10	400	24	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/te_n10_s4_seed0_tau1/te_n10_s4_seed0_tau1_none_tabpfn.yaml
+heart_none_qsvc	heart	none	qsvc	quantum	statevector_simulator	13	270	12	5	12.769	21.860	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_qsvc.yaml
+heart_none_pqk	heart	none	pqk	quantum	statevector_simulator	13	270	12	5	0.208	0.368	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_pqk.yaml
+heart_none_qnn	heart	none	qnn	quantum	statevector_simulator	13	270	12	5	0.125	0.125	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_qnn.yaml
+heart_none_vqc	heart	none	vqc	quantum	statevector_simulator	13	270	12	5	0.154	0.154	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_vqc.yaml
+heart_none_lr	heart	none	lr	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_lr.yaml
+heart_none_svc	heart	none	svc	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_svc.yaml
+heart_none_nb	heart	none	nb	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_nb.yaml
+heart_none_dt	heart	none	dt	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_dt.yaml
+heart_none_rf	heart	none	rf	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_rf.yaml
+heart_none_xgb	heart	none	xgb	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_xgb.yaml
+heart_none_catboost	heart	none	catboost	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_catboost.yaml
+heart_none_mlp	heart	none	mlp	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_mlp.yaml
+heart_none_tabpfn	heart	none	tabpfn	classical	statevector_simulator	13	270	12	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/heart/heart_none_tabpfn.yaml
+labor_none_qsvc	labor	none	qsvc	quantum	mps_simulator	16	57	32	5	1.189	1.347	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_qsvc.yaml
+labor_none_pqk	labor	none	pqk	quantum	mps_simulator	16	57	32	5	0.018	0.021	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_pqk.yaml
+labor_none_qnn	labor	none	qnn	quantum	mps_simulator	16	57	32	5	0.095	0.095	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_qnn.yaml
+labor_none_vqc	labor	none	vqc	quantum	mps_simulator	16	57	32	5	2.299	2.299	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_vqc.yaml
+labor_none_lr	labor	none	lr	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_lr.yaml
+labor_none_svc	labor	none	svc	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_svc.yaml
+labor_none_nb	labor	none	nb	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_nb.yaml
+labor_none_dt	labor	none	dt	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_dt.yaml
+labor_none_rf	labor	none	rf	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_rf.yaml
+labor_none_xgb	labor	none	xgb	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_xgb.yaml
+labor_none_catboost	labor	none	catboost	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_catboost.yaml
+labor_none_mlp	labor	none	mlp	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_mlp.yaml
+labor_none_tabpfn	labor	none	tabpfn	classical	mps_simulator	16	57	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/labor/labor_none_tabpfn.yaml
+hepatitis_none_qsvc	hepatitis	none	qsvc	quantum	mps_simulator	19	155	8	5	10.412	13.965	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_qsvc.yaml
+hepatitis_none_pqk	hepatitis	none	pqk	quantum	mps_simulator	19	155	8	5	0.052	0.075	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_pqk.yaml
+hepatitis_none_qnn	hepatitis	none	qnn	quantum	mps_simulator	19	155	8	5	0.170	0.170	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_qnn.yaml
+hepatitis_none_vqc	hepatitis	none	vqc	quantum	mps_simulator	19	155	8	5	1.281	1.281	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_vqc.yaml
+hepatitis_none_lr	hepatitis	none	lr	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_lr.yaml
+hepatitis_none_svc	hepatitis	none	svc	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_svc.yaml
+hepatitis_none_nb	hepatitis	none	nb	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_nb.yaml
+hepatitis_none_dt	hepatitis	none	dt	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_dt.yaml
+hepatitis_none_rf	hepatitis	none	rf	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_rf.yaml
+hepatitis_none_xgb	hepatitis	none	xgb	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_xgb.yaml
+hepatitis_none_catboost	hepatitis	none	catboost	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_catboost.yaml
+hepatitis_none_mlp	hepatitis	none	mlp	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_mlp.yaml
+hepatitis_none_tabpfn	hepatitis	none	tabpfn	classical	mps_simulator	19	155	8	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/hepatitis/hepatitis_none_tabpfn.yaml
+spect_pca_qsvc	spect	pca	qsvc	quantum	statevector_simulator	8	267	32	5	3.740	5.065	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_qsvc.yaml
+spect_pca_pqk	spect	pca	pqk	quantum	statevector_simulator	8	267	32	5	0.237	0.323	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_pqk.yaml
+spect_pca_qnn	spect	pca	qnn	quantum	statevector_simulator	8	267	32	5	0.076	0.076	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_qnn.yaml
+spect_pca_vqc	spect	pca	vqc	quantum	statevector_simulator	8	267	32	5	0.104	0.104	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_vqc.yaml
+spect_pca_lr	spect	pca	lr	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_lr.yaml
+spect_pca_svc	spect	pca	svc	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_svc.yaml
+spect_pca_nb	spect	pca	nb	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_nb.yaml
+spect_pca_dt	spect	pca	dt	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_dt.yaml
+spect_pca_rf	spect	pca	rf	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_rf.yaml
+spect_pca_xgb	spect	pca	xgb	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_xgb.yaml
+spect_pca_catboost	spect	pca	catboost	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_catboost.yaml
+spect_pca_mlp	spect	pca	mlp	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_mlp.yaml
+spect_pca_tabpfn	spect	pca	tabpfn	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_pca_tabpfn.yaml
+spect_umap_qsvc	spect	umap	qsvc	quantum	statevector_simulator	8	267	32	5	3.740	5.065	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_qsvc.yaml
+spect_umap_pqk	spect	umap	pqk	quantum	statevector_simulator	8	267	32	5	0.237	0.323	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_pqk.yaml
+spect_umap_qnn	spect	umap	qnn	quantum	statevector_simulator	8	267	32	5	0.076	0.076	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_qnn.yaml
+spect_umap_vqc	spect	umap	vqc	quantum	statevector_simulator	8	267	32	5	0.104	0.104	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_vqc.yaml
+spect_umap_lr	spect	umap	lr	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_lr.yaml
+spect_umap_svc	spect	umap	svc	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_svc.yaml
+spect_umap_nb	spect	umap	nb	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_nb.yaml
+spect_umap_dt	spect	umap	dt	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_dt.yaml
+spect_umap_rf	spect	umap	rf	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_rf.yaml
+spect_umap_xgb	spect	umap	xgb	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_xgb.yaml
+spect_umap_catboost	spect	umap	catboost	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_catboost.yaml
+spect_umap_mlp	spect	umap	mlp	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_mlp.yaml
+spect_umap_tabpfn	spect	umap	tabpfn	classical	statevector_simulator	8	267	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/spect/spect_umap_tabpfn.yaml
+wdbc_pca_qsvc	wdbc	pca	qsvc	quantum	statevector_simulator	8	569	6	5	5.941	11.962	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_qsvc.yaml
+wdbc_pca_pqk	wdbc	pca	pqk	quantum	statevector_simulator	8	569	6	5	0.161	0.346	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_pqk.yaml
+wdbc_pca_qnn	wdbc	pca	qnn	quantum	statevector_simulator	8	569	6	5	0.034	0.034	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_qnn.yaml
+wdbc_pca_vqc	wdbc	pca	vqc	quantum	statevector_simulator	8	569	6	5	0.043	0.043	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_vqc.yaml
+wdbc_pca_lr	wdbc	pca	lr	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_lr.yaml
+wdbc_pca_svc	wdbc	pca	svc	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_svc.yaml
+wdbc_pca_nb	wdbc	pca	nb	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_nb.yaml
+wdbc_pca_dt	wdbc	pca	dt	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_dt.yaml
+wdbc_pca_rf	wdbc	pca	rf	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_rf.yaml
+wdbc_pca_xgb	wdbc	pca	xgb	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_xgb.yaml
+wdbc_pca_catboost	wdbc	pca	catboost	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_catboost.yaml
+wdbc_pca_mlp	wdbc	pca	mlp	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_mlp.yaml
+wdbc_pca_tabpfn	wdbc	pca	tabpfn	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_pca_tabpfn.yaml
+wdbc_umap_qsvc	wdbc	umap	qsvc	quantum	statevector_simulator	8	569	6	5	5.941	11.962	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_qsvc.yaml
+wdbc_umap_pqk	wdbc	umap	pqk	quantum	statevector_simulator	8	569	6	5	0.161	0.346	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_pqk.yaml
+wdbc_umap_qnn	wdbc	umap	qnn	quantum	statevector_simulator	8	569	6	5	0.034	0.034	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_qnn.yaml
+wdbc_umap_vqc	wdbc	umap	vqc	quantum	statevector_simulator	8	569	6	5	0.043	0.043	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_vqc.yaml
+wdbc_umap_lr	wdbc	umap	lr	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_lr.yaml
+wdbc_umap_svc	wdbc	umap	svc	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_svc.yaml
+wdbc_umap_nb	wdbc	umap	nb	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_nb.yaml
+wdbc_umap_dt	wdbc	umap	dt	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_dt.yaml
+wdbc_umap_rf	wdbc	umap	rf	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_rf.yaml
+wdbc_umap_xgb	wdbc	umap	xgb	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_xgb.yaml
+wdbc_umap_catboost	wdbc	umap	catboost	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_catboost.yaml
+wdbc_umap_mlp	wdbc	umap	mlp	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_mlp.yaml
+wdbc_umap_tabpfn	wdbc	umap	tabpfn	classical	statevector_simulator	8	569	6	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/wdbc/wdbc_umap_tabpfn.yaml
+sonar_pca_qsvc	sonar	pca	qsvc	quantum	statevector_simulator	8	208	32	5	2.251	3.053	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_qsvc.yaml
+sonar_pca_pqk	sonar	pca	pqk	quantum	statevector_simulator	8	208	32	5	0.184	0.251	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_pqk.yaml
+sonar_pca_qnn	sonar	pca	qnn	quantum	statevector_simulator	8	208	32	5	0.069	0.069	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_qnn.yaml
+sonar_pca_vqc	sonar	pca	vqc	quantum	statevector_simulator	8	208	32	5	0.098	0.098	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_vqc.yaml
+sonar_pca_lr	sonar	pca	lr	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_lr.yaml
+sonar_pca_svc	sonar	pca	svc	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_svc.yaml
+sonar_pca_nb	sonar	pca	nb	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_nb.yaml
+sonar_pca_dt	sonar	pca	dt	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_dt.yaml
+sonar_pca_rf	sonar	pca	rf	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_rf.yaml
+sonar_pca_xgb	sonar	pca	xgb	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_xgb.yaml
+sonar_pca_catboost	sonar	pca	catboost	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_catboost.yaml
+sonar_pca_mlp	sonar	pca	mlp	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_mlp.yaml
+sonar_pca_tabpfn	sonar	pca	tabpfn	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_pca_tabpfn.yaml
+sonar_umap_qsvc	sonar	umap	qsvc	quantum	statevector_simulator	8	208	32	5	2.251	3.053	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_qsvc.yaml
+sonar_umap_pqk	sonar	umap	pqk	quantum	statevector_simulator	8	208	32	5	0.184	0.251	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_pqk.yaml
+sonar_umap_qnn	sonar	umap	qnn	quantum	statevector_simulator	8	208	32	5	0.069	0.069	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_qnn.yaml
+sonar_umap_vqc	sonar	umap	vqc	quantum	statevector_simulator	8	208	32	5	0.098	0.098	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_vqc.yaml
+sonar_umap_lr	sonar	umap	lr	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_lr.yaml
+sonar_umap_svc	sonar	umap	svc	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_svc.yaml
+sonar_umap_nb	sonar	umap	nb	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_nb.yaml
+sonar_umap_dt	sonar	umap	dt	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_dt.yaml
+sonar_umap_rf	sonar	umap	rf	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_rf.yaml
+sonar_umap_xgb	sonar	umap	xgb	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_xgb.yaml
+sonar_umap_catboost	sonar	umap	catboost	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_catboost.yaml
+sonar_umap_mlp	sonar	umap	mlp	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_mlp.yaml
+sonar_umap_tabpfn	sonar	umap	tabpfn	classical	statevector_simulator	8	208	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/sonar/sonar_umap_tabpfn.yaml
+colon_cancer_pca_qsvc	colon_cancer	pca	qsvc	quantum	statevector_simulator	8	62	32	5	0.202	0.273	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_qsvc.yaml
+colon_cancer_pca_pqk	colon_cancer	pca	pqk	quantum	statevector_simulator	8	62	32	5	0.055	0.075	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_pqk.yaml
+colon_cancer_pca_qnn	colon_cancer	pca	qnn	quantum	statevector_simulator	8	62	32	5	0.054	0.054	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_qnn.yaml
+colon_cancer_pca_vqc	colon_cancer	pca	vqc	quantum	statevector_simulator	8	62	32	5	0.082	0.082	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_vqc.yaml
+colon_cancer_pca_lr	colon_cancer	pca	lr	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_lr.yaml
+colon_cancer_pca_svc	colon_cancer	pca	svc	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_svc.yaml
+colon_cancer_pca_nb	colon_cancer	pca	nb	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_nb.yaml
+colon_cancer_pca_dt	colon_cancer	pca	dt	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_dt.yaml
+colon_cancer_pca_rf	colon_cancer	pca	rf	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_rf.yaml
+colon_cancer_pca_xgb	colon_cancer	pca	xgb	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_xgb.yaml
+colon_cancer_pca_catboost	colon_cancer	pca	catboost	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_catboost.yaml
+colon_cancer_pca_mlp	colon_cancer	pca	mlp	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_mlp.yaml
+colon_cancer_pca_tabpfn	colon_cancer	pca	tabpfn	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_pca_tabpfn.yaml
+colon_cancer_umap_qsvc	colon_cancer	umap	qsvc	quantum	statevector_simulator	8	62	32	5	0.202	0.273	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_qsvc.yaml
+colon_cancer_umap_pqk	colon_cancer	umap	pqk	quantum	statevector_simulator	8	62	32	5	0.055	0.075	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_pqk.yaml
+colon_cancer_umap_qnn	colon_cancer	umap	qnn	quantum	statevector_simulator	8	62	32	5	0.054	0.054	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_qnn.yaml
+colon_cancer_umap_vqc	colon_cancer	umap	vqc	quantum	statevector_simulator	8	62	32	5	0.082	0.082	/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_vqc.yaml
+colon_cancer_umap_lr	colon_cancer	umap	lr	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_lr.yaml
+colon_cancer_umap_svc	colon_cancer	umap	svc	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_svc.yaml
+colon_cancer_umap_nb	colon_cancer	umap	nb	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_nb.yaml
+colon_cancer_umap_dt	colon_cancer	umap	dt	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_dt.yaml
+colon_cancer_umap_rf	colon_cancer	umap	rf	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_rf.yaml
+colon_cancer_umap_xgb	colon_cancer	umap	xgb	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_xgb.yaml
+colon_cancer_umap_catboost	colon_cancer	umap	catboost	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_catboost.yaml
+colon_cancer_umap_mlp	colon_cancer	umap	mlp	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_mlp.yaml
+colon_cancer_umap_tabpfn	colon_cancer	umap	tabpfn	classical	statevector_simulator	8	62	32	5			/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/runs/colon_cancer/colon_cancer_umap_tabpfn.yaml

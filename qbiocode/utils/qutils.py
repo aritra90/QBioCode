@@ -1,6 +1,7 @@
 from qiskit_ibm_runtime.qiskit_runtime_service import QiskitRuntimeService
 
 
+import hashlib
 import logging
 import math
 import warnings
@@ -38,6 +39,123 @@ from qiskit_aer.primitives import SamplerV2 as AerSamplerV2
 from qbiocode.utils.ibm_account import instantiate_runtime_service
 
 
+def dataset_fingerprint(*arrays):
+    """A short content digest of the arrays a cached projection was computed from.
+
+    The projection caches in :mod:`qbiocode.learning.compute_pqk` and
+    :mod:`qbiocode.learning.compute_qpl` name the feature map and the dataset's
+    ``data_key``, then validate a loaded file's row count and feature width. None of
+    that separates two datasets -- or two folds of one dataset -- that share a key and
+    a shape, and that is the common case rather than the exotic one: a k-fold manifest
+    gives every fold the same width and train sizes differing by at most one row, while
+    ``data_key`` carries no fold index at all. Hashing the bytes the projection was
+    actually computed from closes the hole: different data, different file name, no
+    silent reuse.
+
+    ``float64`` and a contiguous copy make the digest independent of the caller's dtype
+    and memory layout, so an array and a view of it fingerprint alike. The shape is
+    folded in as well, so two datasets cannot collide by holding the same values in a
+    different arrangement.
+
+    Args:
+        *arrays: the arrays whose contents the projection depends on, in a fixed order
+            (``X_train`` then ``X_test`` at both call sites).
+
+    Returns:
+        str: the first 16 hex characters of the SHA-256 digest -- short enough to keep
+        the cache filename bounded, wide enough that a collision is not a practical
+        concern.
+    """
+    digest = hashlib.sha256()
+    for array in arrays:
+        contiguous = np.ascontiguousarray(np.asarray(array, dtype=np.float64))
+        digest.update(repr(contiguous.shape).encode())
+        digest.update(contiguous.tobytes())
+    return digest.hexdigest()[:16]
+
+
+#: Config-facing ``backend`` spellings, each mapping to (internal name, pinned
+#: ``sim_method``).
+#:
+#: The three names a config should use are ``'statevector_simulator'``,
+#: ``'mps_simulator'`` and an ``'ibm_*'`` device name. The first two exist because
+#: selecting MPS used to need TWO keys agreeing with each other -- ``backend:
+#: 'simulator_aer'`` *and* ``sim_method: 'matrix_product_state'`` -- and
+#: ``sim_method`` is not a key in the shipped config, so it had to be injected on
+#: the command line with hydra's ``+sim_method=...``. A config that asked for
+#: ``simulator_aer`` and omitted it silently got ``method='automatic'``, which for a
+#: feature map resolves to statevector: the opposite of what was asked for, with no
+#: error and no log line. One name that pins both removes that failure mode.
+#:
+#: The legacy spellings stay accepted so existing configs and notebooks keep working;
+#: ``'simulator_aer'`` alone still honours an explicit ``sim_method``.
+BACKEND_ALIASES = {
+    # None, not "statevector": the ``simulator`` branch builds Qiskit's reference
+    # primitives and never reads ``sim_method``, so pinning one here would advertise a
+    # knob that has no effect on this path.
+    "statevector_simulator": ("simulator", None),
+    "mps_simulator": ("simulator_aer", "matrix_product_state"),
+    "simulator": ("simulator", None),
+    "simulator_aer": ("simulator_aer", None),
+}
+
+
+def normalize_backend(args):
+    """Resolve a config's ``backend`` alias to the internal name and ``sim_method``.
+
+    Returns a shallow copy; the caller's mapping is never mutated, because ``args``
+    here is the whole run config and several callers hold it across models.
+
+    An ``'ibm_*'`` name is passed through untouched -- those are device names, not
+    aliases, and ``sim_method`` is meaningful for them only in the ``noisy_*`` branch,
+    which reads it itself.
+
+    Args:
+        args (Mapping): The run config. Only ``backend`` and ``sim_method`` are read.
+
+    Returns:
+        dict: A copy with ``backend`` set to the internal name and, where the alias
+        pins one, ``sim_method`` set to match.
+
+    Raises:
+        ValueError: If ``backend`` is not a known alias and not an ``'ibm_*'`` name, or
+            if an alias that pins ``sim_method`` is contradicted by an explicit one.
+            Contradiction is an error rather than a precedence rule because either
+            silent winner is a run whose simulator is not the one the config names.
+    """
+    out = dict(args)
+    name = out.get("backend")
+    if not isinstance(name, str):
+        raise ValueError(
+            f"backend must be a string naming a simulator or an IBM device; got "
+            f"{name!r}. Accepted: {sorted(BACKEND_ALIASES)} or an 'ibm_*' device."
+        )
+    if "ibm" in name:
+        return out
+    if name not in BACKEND_ALIASES:
+        raise ValueError(
+            f"Unknown backend {name!r}. Accepted simulator names are "
+            f"{sorted(BACKEND_ALIASES)}, or an 'ibm_*' device name. "
+            f"'statevector_simulator' is exact and reproducible; 'mps_simulator' is "
+            f"Aer's matrix-product-state method, which is exact only while the "
+            f"circuit's entanglement stays bounded (see SUPPORTED_SIM_METHODS)."
+        )
+    internal, pinned = BACKEND_ALIASES[name]
+    out["backend"] = internal
+    if pinned is not None:
+        explicit = args.get("sim_method")
+        if explicit is not None and explicit != pinned:
+            raise ValueError(
+                f"backend={name!r} pins sim_method={pinned!r}, but the config also "
+                f"sets sim_method={explicit!r}. Remove one: backend "
+                f"'statevector_simulator'/'mps_simulator' already names the "
+                f"simulation method, and 'simulator_aer' is the spelling that takes "
+                f"an explicit sim_method."
+            )
+        out["sim_method"] = pinned
+    return out
+
+
 def get_backend_session(args: dict, primitive: str, num_qubits: int):
     """
     This function to get the backend and session for the specified primitive.
@@ -52,6 +170,11 @@ def get_backend_session(args: dict, primitive: str, num_qubits: int):
         session: The session instance.
         prim: The instantiated primitive (Sampler or Estimator).
     """
+    # Accepts the config-facing aliases too, so a notebook calling this directly behaves
+    # the same as a qprofiler run. qprofiler normalises once at config load; doing it
+    # again here is idempotent.
+    args = normalize_backend(args)
+
     backend = None
     session = None
     prim = None

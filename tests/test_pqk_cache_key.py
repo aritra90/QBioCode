@@ -188,3 +188,92 @@ class TestAStaleCacheFileIsRefused:
 
         with pytest.raises(ValueError, match=r"4 features per row.*produces 6"):
             _run(directory)
+
+
+class TestTheCacheKeySeparatesTheDataItself:
+    """Two datasets of the same shape under one ``data_key`` must not share a file.
+
+    The tests above cover the feature map, and the validation tests above cover a
+    cached file whose *shape* cannot match. Between them sits the case neither
+    catches: same ``data_key``, same feature map, same shape, **different numbers**.
+    Validation passes -- the row count and the width are right -- and the wrong
+    projections load silently.
+
+    That case is not hypothetical. Two pairs in the curated 84-dataset corpus reached
+    it through ``qprofiler``'s ``data_key``, which truncated a filename at its first
+    dot: ``GAMETES_Epistasis_2_Way_20atts_0.1H_EDM_1_1`` and its ``0.4H`` sibling both
+    keyed as ``..._20atts_0``, and both are (n=1600, p=20). The parameter that differs
+    is the heritability -- the one that sets how hard the dataset is. A fold of a
+    k-fold manifest is the same hazard in a second guise: every fold of one dataset
+    shares a width, train-fold sizes differ by at most one row, and ``data_key``
+    carries no fold index.
+    """
+
+    @staticmethod
+    def _run_on(projection_dir, X_train, X_test, y_train, y_test, data_key="shared"):
+        return compute_pqk(
+            X_train, X_test, y_train, y_test, _args(projection_dir),
+            data_key=data_key, **BASELINE,
+        )
+
+    def test_different_values_under_one_data_key_get_separate_files(self, tmp_path):
+        rng = np.random.default_rng(1)
+        y_train = np.array([0, 1] * (N_TRAIN // 2))
+        y_test = np.array([0, 1] * (N_TEST // 2))
+
+        first = rng.normal(size=(N_TRAIN, N_FEATURES))
+        second = rng.normal(size=(N_TRAIN, N_FEATURES))
+        shared_test = rng.normal(size=(N_TEST, N_FEATURES))
+
+        self._run_on(tmp_path, first, shared_test, y_train, y_test)
+        after_first = _projections(tmp_path)
+        assert len(after_first) == 2, "the first run wrote no projection pair"
+
+        self._run_on(tmp_path, second, shared_test, y_train, y_test)
+        after_second = _projections(tmp_path)
+
+        assert after_first < after_second, (
+            "a second dataset of identical shape reused the first one's cached "
+            "projections under the same data_key: the row-count and width checks "
+            "cannot separate them, so this is silent"
+        )
+        assert len(after_second - after_first) == 2, (
+            f"expected one new train/test pair, got {after_second - after_first}"
+        )
+
+    def test_two_equal_sized_folds_of_one_dataset_get_separate_files(self, tmp_path):
+        """The k-fold case: same width, same row count, overlapping rows."""
+        rng = np.random.default_rng(2)
+        pool = rng.normal(size=(N_TRAIN + 2, N_FEATURES))
+        fold_a, fold_b = pool[:N_TRAIN], pool[2:]
+        assert fold_a.shape == fold_b.shape, "the fixture must hold the shape constant"
+
+        y_train = np.array([0, 1] * (N_TRAIN // 2))
+        y_test = np.array([0, 1] * (N_TEST // 2))
+        shared_test = rng.normal(size=(N_TEST, N_FEATURES))
+
+        self._run_on(tmp_path, fold_a, shared_test, y_train, y_test, data_key="onefold")
+        after_a = _projections(tmp_path)
+        self._run_on(tmp_path, fold_b, shared_test, y_train, y_test, data_key="onefold")
+
+        assert after_a < _projections(tmp_path), (
+            "two equal-sized training folds of one dataset shared a cache entry"
+        )
+
+    def test_the_same_data_still_hits_the_cache(self, tmp_path):
+        """Keying on content must not defeat caching for a genuine repeat."""
+        rng = np.random.default_rng(3)
+        X_train = rng.normal(size=(N_TRAIN, N_FEATURES))
+        X_test = rng.normal(size=(N_TEST, N_FEATURES))
+        y_train = np.array([0, 1] * (N_TRAIN // 2))
+        y_test = np.array([0, 1] * (N_TEST // 2))
+
+        self._run_on(tmp_path, X_train, X_test, y_train, y_test)
+        before = _projections(tmp_path)
+        # A copy, not the same object: the digest must be of the values, not of an id.
+        self._run_on(tmp_path, X_train.copy(), X_test.copy(), y_train, y_test)
+
+        assert _projections(tmp_path) == before, (
+            "an identical rerun wrote new files, so the content digest is not stable "
+            "across equal arrays and every run would recompute its projections"
+        )

@@ -151,11 +151,26 @@ MODEL_RUN_SOURCE = REPO_ROOT / "qbiocode" / "evaluation" / "model_run.py"
 
 #: Inner keys of an untuned metrics row.
 RESULT_KEYS = frozenset(
-    {"model", "accuracy", "f1_score", "time", "auc", "Model_Parameters"}
+    {
+        "model",
+        "accuracy",
+        "f1_score",
+        "balanced_accuracy",
+        "mcc",
+        "time",
+        "auc",
+        "pr_auc",
+        "Model_Parameters",
+    }
 )
 
-#: One column per model label, three labels' worth of prefixes.
-LABEL_PREFIXES = ("results", "y_test", "y_predicted")
+#: One column per model label, four labels' worth of prefixes. ``y_score`` is the
+#: newest and the reason the count moved: ``modeleval`` used to build the ranking
+#: score, spend it on one ``roc_auc_score`` call and drop it, so auc was the only
+#: threshold-free statistic the corpus could ever report. Adding a second one later
+#: would have meant re-running every quantum fit. It is a frame column rather than a
+#: metrics-row key because it is an array, and only ``results_*`` keys reach the CSV.
+LABEL_PREFIXES = ("results", "y_test", "y_predicted", "y_score")
 
 
 def _dispatch_keys():
@@ -672,7 +687,7 @@ class TestADirectComputeCallIsNotCoveredByTheDispatcher:
     """
 
     def test_a_direct_call_returns_the_frame_the_dispatcher_folds_up(self, tiny_split):
-        """One row, three columns, and the metrics row the dispatcher hands on.
+        """One row, four columns, and the metrics row the dispatcher hands on.
 
         This is the shape ``model_run`` concatenates and pivots, so it pins the
         contract at the seam between a compute function and the dispatcher, from the
@@ -683,7 +698,12 @@ class TestADirectComputeCallIsNotCoveredByTheDispatcher:
             X_train, X_test, y_train, y_test, {"grid_search": False},
             model="dt", random_state=7,
         )
-        assert list(frame.columns) == ["y_test_dt", "y_predicted_dt", "results_dt"]
+        assert list(frame.columns) == [
+            "y_test_dt",
+            "y_predicted_dt",
+            "y_score_dt",
+            "results_dt",
+        ]
         assert len(frame) == 1
         assert set(frame["results_dt"].iloc[0]) == RESULT_KEYS
 
