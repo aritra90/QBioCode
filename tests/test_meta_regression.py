@@ -506,6 +506,12 @@ class TestManifestMode:
         assert {"repeat", "fold", "n_val", "embed_seed", "split_k"} <= set(PROTOCOL_COLUMNS)
         assert mr.meta_feature_columns(res) == ["mfe.x"]
 
+    def test_validation_tiebreak_scores_are_not_meta_features(self):
+        # val_auc / val_log_loss are a model's validation performance, never a property
+        # of the dataset; before they were reserved they entered the screen as features.
+        res = self.fold_frame().assign(val_auc=0.8, val_log_loss=0.4)
+        assert mr.meta_feature_columns(res) == ["mfe.x"]
+
     def test_unit_report_forwards_the_selection_mode(self):
         res = self.fold_frame()
         rep = mr.unit_report(res, selection="validation")

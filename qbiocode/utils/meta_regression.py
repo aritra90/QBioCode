@@ -94,7 +94,7 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 
 from qbiocode.evaluation.model_evaluation import TUNING_EVIDENCE_COLUMNS
-from qbiocode.evaluation.protocol import PROTOCOL_COLUMNS
+from qbiocode.evaluation.protocol import PROTOCOL_COLUMNS, TIEBREAK_COLUMNS
 from qbiocode.utils.fair_selection import PARAMETER_COLUMNS, WinnerReport, select_winners
 
 logger = logging.getLogger(__name__)
@@ -127,13 +127,14 @@ def meta_feature_columns(results: pd.DataFrame) -> list[str]:
     """Numeric columns of a ModelResults frame that describe the data, not the model.
 
     The tuning evidence of tuned rows (``tuning_score``, ``tuning_reused``) is numeric
-    but label-dependent -- a validation score of the model -- so it is reserved too. So
+    but label-dependent -- a validation score of the model -- so it is reserved too, as
+    are the validation tie-break scores (``TIEBREAK_COLUMNS``: val_auc, val_log_loss). So
     are the ``split_mode: manifest`` provenance columns (``PROTOCOL_COLUMNS``: repeat,
     fold, split sizes, seeds, host): they describe how a row was produced, and a numeric
     ``fold`` or ``n_val`` would otherwise enter the screen as a dataset property.
     """
     reserved = (set(INSTANCE) | {"model"} | set(METRIC_COLUMNS) | set(PARAMETER_COLUMNS)
-                | set(TUNING_EVIDENCE_COLUMNS) | set(PROTOCOL_COLUMNS))
+                | set(TUNING_EVIDENCE_COLUMNS) | set(PROTOCOL_COLUMNS) | set(TIEBREAK_COLUMNS))
     return [c for c in results.columns
             if c not in reserved and pd.api.types.is_numeric_dtype(results[c])]
 
