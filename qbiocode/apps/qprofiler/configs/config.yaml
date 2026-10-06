@@ -63,6 +63,16 @@ embedding_min_features: 19
 # number of dimensions (features) to embed (reduce) your data down to
 n_components: 3
 
+# null: each run computes its own embeddings. An absolute directory: every embedding but
+# 'none' is read from <dir>/emb_<dataset>_<embedding>_<n_components>_<split>.npz and never
+# computed. The files are written beforehand by
+#   python -m qbiocode.apps.qprofiler.embedding_cache <this config> [more configs]
+# Use it when one experiment runs as several jobs that must score their models on the same
+# features. Seeded UMAP is reproducible on one CPU type but not across CPU types, so jobs
+# that compute it on different cluster hosts disagree. A run whose file is missing, or was
+# written under other split, scaling or embedding settings, stops before fitting anything.
+embedding_cache: null
+
 # ML models to generate
 # parameters to use for each ML method are listed further down in this file
 # 9 classical + 4 quantum. One representative per classical family: linear (lr),
@@ -125,6 +135,12 @@ tuner: optuna
 # describe fewer distinct combinations than this. Ignored when tuner: grid.
 n_trials: 50
 
+# What every tuner (classical and quantum) selects hyperparameters on: accuracy,
+# balanced_accuracy (default), mcc or f1_score. The pilot10 runs tuned on accuracy; set
+# accuracy to reproduce them. Frozen quantum params from before this key count as
+# accuracy-tuned, so under any other metric they are retuned rather than reused.
+tuning_metric: balanced_accuracy
+
 # Also tune the QUANTUM models (qsvc, vqc, qnn, pqk, qpl). ON here, which is a change:
 # leaving it off while grid_search tunes the classical side is the confound the comment
 # above describes, so the benchmark pays for it deliberately. It is not free -- each
@@ -143,13 +159,14 @@ n_trials_quantum: 32
 # fits per arm into `n_trials_quantum + (iter - 1)` -- at iter: 5 and
 # n_trials_quantum: 32, from 160 quantum fits to 36.
 #
-# It is not a free lunch, and the direction of the bias matters. The frozen
-# configuration was chosen on iteration 0's training split, so on later iterations it is
-# a configuration selected elsewhere: never better than a fresh search would have found
-# there. The classical side re-searches every iteration and keeps its full advantage. So
-# quantum is measured at a handicap classical does not carry, and a quantum win observed
-# under this setting is a LOWER BOUND on the win a symmetric budget would show. State
-# that; do not describe the protocol as symmetric.
+# It is not a free lunch, and the bias is OPTIMISTIC for the frozen (quantum) arm, not a
+# handicap. The resamples are overlapping random holdouts: in the pilot, 73-87% of a
+# later iteration's test rows were training rows of iteration 0, the rows the frozen
+# configuration was searched on. The classical side re-searches every iteration, so its
+# test rows never influenced its own selection. The measured effect was small (a
+# difference-in-differences of about -0.02 balanced accuracy, not significant), but a
+# quantum win under this setting is NOT a lower bound. Confirmatory runs should set this
+# to False or use disjoint-fold splits; do not describe the protocol as symmetric.
 #
 # Cached as one JSON file per (dataset, embedding, n_components, model) under
 # quantum_param_dir. Editing a gridsearch_<model>_args block invalidates the cache for

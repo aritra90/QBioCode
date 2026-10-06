@@ -64,14 +64,10 @@ import warnings
 
 import numpy as np
 
-# ====== Scikit-learn imports ======
-
-from sklearn.model_selection import GridSearchCV
-
 # ====== Additional local imports ======
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
-from qbiocode.learning._grid import build_param_grid, to_plain
-from qbiocode.learning._tuning import build_search_space, run_study
+from qbiocode.learning._grid import to_plain
+from qbiocode.learning._tuning import search_hyperparameters, tuning_scorer
 
 # ====== Module constants ======
 
@@ -625,8 +621,9 @@ def compute_tabpfn_opt(
     on the test dataset, including accuracy, AUC, F1 score, and the time taken to train and validate the model across the search.
     This function is designed to be used in a supervised learning context, where the goal is to classify data points.
 
-    Scored by k-fold ``cross_val_score`` through :func:`qbiocode.learning._tuning.run_study`,
-    exactly like every other classical model, so a tuned TabPFN score is comparable to a tuned
+    Scored by k-fold cross-validation on the run's ``tuning_metric`` through
+    :func:`qbiocode.learning._tuning.search_hyperparameters`, exactly like every other
+    classical model, so a tuned TabPFN score is comparable to a tuned
     random forest one on the same split. Be aware of what that costs here: a trial is
     ``cv`` transformer forward passes over the training rows, not ``cv`` cheap tree fits, and
     what is being searched are inference settings rather than model capacity. The shipped
@@ -715,29 +712,24 @@ def compute_tabpfn_opt(
     }
 
     # Optuna by default; the exhaustive grid stays reachable so a number published
-    # against it can still be reproduced. Both engines are handed the same
-    # `candidates`, so switching `tuner` never changes *which* hyperparameters are
-    # searched -- only how the search spends its fits.
+    # against it can still be reproduced. The engine branch is the shared one every
+    # other classical model uses, so both engines get the same `candidates` and the same
+    # `tuning_metric` scorer -- switching `tuner` never changes *which* hyperparameters
+    # are searched or what they are selected on, only how the search spends its fits.
     try:
-        if tuner == "grid":
-            search = GridSearchCV(
-                classifier_cls(**fixed),
-                param_grid=build_param_grid("tabpfn", candidates),
-                cv=cv,
-            )
-            search.fit(X_train, y_train)
-            best_params = search.best_params_
-        else:
-            best_params = run_study(
-                classifier_cls,
-                build_search_space("tabpfn", candidates),
-                X_train,
-                y_train,
-                cv=cv,
-                n_trials=n_trials,
-                seed=random_state,
-                fixed=fixed,
-            )
+        best_params = search_hyperparameters(
+            "tabpfn",
+            classifier_cls,
+            candidates,
+            X_train,
+            y_train,
+            cv=cv,
+            tuner=tuner,
+            n_trials=n_trials,
+            seed=random_state,
+            fixed=fixed,
+            scoring=tuning_scorer(args),
+        )
         best_tabpfn = classifier_cls(**best_params, **fixed)
         best_tabpfn.fit(X_train, y_train)
     except Exception as exc:  # noqa: BLE001 -- narrowed immediately by the translator

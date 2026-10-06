@@ -39,7 +39,45 @@ from qbiocode.learning._tuning import (
     build_search_space,
     record_tuned_params,
     run_function_study,
+    seed_from,
 )
+
+
+#: The accepted spellings of PQK's ``data_map``, as ``qbiocode.data_generation`` spells
+#: them (``quantum_core.DATA_MAPS``): ``'unit'`` is
+#: :func:`qbiocode.utils.qutils.unit_coefficient_data_map`, the map PQK has always
+#: used; ``'qiskit'`` passes no ``data_map_func``, so the feature map uses qiskit's
+#: default -- ``phi(x_i) = x_i`` and ``phi(x_i, x_j) = (pi - x_i)(pi - x_j)``, the map
+#: the ``eng_*`` and ``qlab_zz`` synthetic families are generated with by default.
+PQK_DATA_MAPS = ("unit", "qiskit")
+
+
+def _resolve_data_map(data_map):
+    """Canonicalise PQK's ``data_map`` to ``'unit'`` or ``'qiskit'``.
+
+    Also accepts the boolean convention of :func:`qbiocode.embeddings.embed.pqk`,
+    whose ``data_map=True`` selects the unit-coefficient map and ``False`` qiskit's
+    default, so a value copied from an embedding config means the same thing here.
+
+    Args:
+        data_map (str or bool): ``'unit'``, ``'qiskit'``, ``True`` or ``False``.
+
+    Returns:
+        str: ``'unit'`` or ``'qiskit'``.
+
+    Raises:
+        ValueError: for any other value, naming the accepted options.
+    """
+    # bool (and numpy bool) first: True == 1 would otherwise be indistinguishable
+    # from an int, and neither is a str.
+    if isinstance(data_map, (bool, np.bool_)):
+        return "unit" if data_map else "qiskit"
+    if isinstance(data_map, str) and data_map in PQK_DATA_MAPS:
+        return data_map
+    raise ValueError(
+        f"data_map must be one of {list(PQK_DATA_MAPS)} (or a bool: True for 'unit', "
+        f"False for 'qiskit'); got {data_map!r}."
+    )
 
 
 def _dump_pqk_projections(
@@ -102,6 +140,7 @@ def compute_pqk(
     primitive="estimator",
     entanglement="linear",
     reps=2,
+    data_map="unit",
 ):
     """
     This function generates quantum circuits, computes projections of the data onto these circuits,
@@ -130,6 +169,11 @@ def compute_pqk(
         primitive (str): Primitive type to use, default is 'estimator'.
         entanglement (str): Entanglement strategy, default is 'linear'.
         reps (int): Number of repetitions for the feature map, default is 2.
+        data_map (str or bool): How features become gate angles. ``'unit'`` (the
+            default) is :func:`qbiocode.utils.qutils.unit_coefficient_data_map`;
+            ``'qiskit'`` is qiskit's default map, ``phi(x_i, x_j) = (pi - x_i)(pi - x_j)``.
+            ``True``/``False`` are accepted as ``'unit'``/``'qiskit'``, matching
+            :func:`qbiocode.embeddings.embed.pqk`.
 
     Returns:
         modeleval (pd.DataFrame): A DataFrame containing evaluation metrics and model parameters for all models.
@@ -171,6 +215,7 @@ def compute_pqk(
             f"reps is the number of feature-map repetitions and must be a "
             f"positive integer; got {reps!r}."
         )
+    data_map = _resolve_data_map(data_map)
     if primitive != "estimator":
         # PQK projects onto Pauli expectation values, which is an Estimator
         # measurement; the backend below is requested as "estimator"
@@ -235,6 +280,12 @@ def compute_pqk(
     # that silently orphans the projection caches already on disk (88 .npy files ship in
     # this repo alone) -- a slow surprise, not a wrong answer, but avoidable.
     fingerprint_parts = (encoding, entanglement, reps, primitive, feat_dimension)
+    # `data_map` joins only when it is not the default, for the same reason as
+    # `projection_backend` below: every cache on disk was written with the 'unit' map,
+    # and keying 'unit' explicitly would orphan all of them. 'qiskit' is a different
+    # circuit, so it must never reach a 'unit' file.
+    if data_map != "unit":
+        fingerprint_parts = fingerprint_parts + (f"data_map={data_map}",)
     _projection_backend = args.get("projection_backend")
     if _projection_backend:
         fingerprint_parts = fingerprint_parts + (_projection_backend,)
@@ -333,10 +384,11 @@ def compute_pqk(
         )
         return new_session, new_prim
 
-    # Shared with qbiocode.embeddings.embed.pqk -- see
+    # 'unit' is shared with qbiocode.embeddings.embed.pqk -- see
     # qutils.unit_coefficient_data_map for why the symbolic case must not be
-    # narrowed to a float.
-    data_map_func = qutils.unit_coefficient_data_map
+    # narrowed to a float. 'qiskit' passes None, which get_feature_map and the
+    # projector both hand to qiskit as "use your default map".
+    data_map_func = qutils.unit_coefficient_data_map if data_map == "unit" else None
 
     # choose a method for mapping your features onto the circuit
     feature_map, _ = qutils.get_feature_map(
@@ -582,6 +634,10 @@ def compute_pqk(
         "best_params": estimator.best_params_,
         # Add other hyperparameters as needed
     }
+    # Recorded only off the default, so a 'unit' run's parameter column stays
+    # byte-identical to results written before `data_map` existed.
+    if data_map != "unit":
+        hyperparameters["data_map"] = data_map
     model_params = hyperparameters
 
     _dump_pqk_projections(
@@ -669,6 +725,7 @@ def compute_pqk_opt(
     primitive=None,
     entanglement=None,
     reps=None,
+    data_map=None,
     *,
     n_trials=10,
     validation_split=0.25,
@@ -702,6 +759,8 @@ def compute_pqk_opt(
         primitive (list or dict): Qiskit primitives to search ('sampler', 'estimator'). None leaves it at the default.
         entanglement (list or dict): Entanglement patterns to search ('linear', 'full', ...). None leaves it at the default.
         reps (list or dict): Feature-map repetition counts to search. None leaves it at the default.
+        data_map (list): Data maps to search ('unit', 'qiskit'; see :func:`compute_pqk`).
+            None leaves it at the default, 'unit'.
         n_trials (int): Trial budget, default 10 -- an order of magnitude below the
             classical default because each trial is a quantum fit. Lowered
             automatically when the configured values describe fewer combinations.
@@ -720,6 +779,7 @@ def compute_pqk_opt(
         "primitive": primitive,
         "entanglement": entanglement,
         "reps": reps,
+        "data_map": data_map,
     }
 
     best_params = run_function_study(
@@ -730,7 +790,7 @@ def compute_pqk_opt(
         args,
         model="pqk",
         n_trials=n_trials,
-        seed=args.get("seed") if isinstance(args, dict) else None,
+        seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
     )

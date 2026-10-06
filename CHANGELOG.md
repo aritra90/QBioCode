@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Tuning metric, tuning evidence, and a `data_map` for PQK and QPL
+
+- **New top-level config key `tuning_metric`** sets what every hyperparameter tuner
+  selects on -- classical Optuna, `tuner: grid`, and the quantum studies:
+  `balanced_accuracy` (default), `accuracy`, `mcc` or `f1_score` (averaged per
+  `average`, default weighted). `auc`/`pr_auc` are not offered. An unknown value raises
+  `ValueError` in `model_run` before any fit. The table lives in
+  `qbiocode.learning._tuning._TUNING_METRICS`; `search_hyperparameters` and `run_study`
+  take a `scoring=` argument (None means balanced accuracy).
+- **Tuned rows record their tuning evidence**: new results columns `tuning_metric`,
+  `tuning_score` (best mean CV score, or the inner-holdout score for quantum; for a frozen
+  reuse, the score stored at freeze time) and `tuning_reused` (True when the parameters
+  came from the frozen quantum cache). Untuned rows read NaN. The names are exported as
+  `model_evaluation.TUNING_EVIDENCE_COLUMNS`, and `meta_regression.meta_feature_columns`
+  reserves them: `tuning_score` is a label-dependent model score, not a dataset covariate.
+  Tuners return `TunedParams`, a `dict` subclass carrying `.metric`, `.score`,
+  `.n_trials` and `.reused`; it prints, compares and serialises like a plain dict.
+- **`data_map` hyperparameter for `compute_pqk`/`compute_pqk_opt` and
+  `compute_qpl`/`compute_qpl_opt`**: `'unit'` (the default, unchanged) or `'qiskit'`,
+  qiskit's default map `phi(x_i, x_j) = (pi - x_i)(pi - x_j)` -- the map the `eng_zz` /
+  `qlab_zz` generators use, so an aligned PQK or QPL arm can now be configured. `True` /
+  `False` are accepted as `'unit'` / `'qiskit'`, as in `embed.pqk`. The projection cache
+  key and `Model_Parameters` include the map only for `'qiskit'`, so existing `'unit'`
+  caches and results rows are unchanged. Searchable as a categorical through
+  `gridsearch_pqk_args` / `gridsearch_qpl_args`.
+- **`select_winners` separates the superiority margin from the equivalence bound.** New
+  keyword-only `margin` (default 0.0, the pre-registered practical superiority margin),
+  `fdr` (default 0.10, in (0, 1); the Benjamini-Hochberg level over every discovery
+  dataset with a finite p-value, in both directions) and `controls` (datasets judged as a
+  separate Holm family at `alpha`; unknown or unscorable names raise). `epsilon` is now
+  only the TOST equivalence bound. New per-dataset columns `within_equivalence` and
+  `family`; `WinnerReport` gains `margin`, `fdr` and `controls`; `corpus_inference` takes
+  keyword-only `margin` (None means `epsilon`, the legacy behaviour). The same three
+  keywords pass through `fair_winner`, `delta_metric_table`, `aggregate_benchmark` and
+  `meta_regression.unit_report`, and `analyze_pilot.py` gains `--margin` and `--fdr`.
+  `aggregate_benchmark`'s verdict summary counts discovery datasets only and records
+  `margin`, `fdr` and `n_controls`.
+- **`meta_regression.dataset_family`** returns a dataset's cluster (its unit of
+  independence): an explicit dict or CSV mapping first (a stem it does not list falls back
+  to the rules with a logged warning; a stem with two clusters or a blank cluster raises),
+  then `eng_`/`gs_`/`hl_`/`ql_`/`te_` to `syn_<prefix>`, `GAMETES*` to `GAMETES`,
+  otherwise the stem. New constants `SYNTHETIC_PREFIXES` and `CLUSTER_COLUMN`, and
+  `experiments/cluster_map_draft.csv` (91 datasets; a DRAFT pending the frozen dedup
+  list, and its `stem` column is ambiguous for `breast_cancer`). The pilot notebook
+  replaces `FAMILY_STRIP` with `MARGIN`, `VERDICT_FDR` and `CLUSTER_MAP`.
+- **`qbiocode.utils.TIE_SEPARATOR`** (`'+'`) joins the arm labels of an exact tie in the
+  LOIO selection trace.
+
 #### Simulated quantum datasets as binary-classification benchmarks
 
 - **Five new `generate_data` types built on exact statevector simulation**:
@@ -111,6 +159,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`compute_qnn` predicted with the wrong labels.** With `primitive='estimator'` the
+  predictions were `np.sign` of the network output (`{-1, +1}`), so class 0 was never
+  predicted and balanced accuracy was at most 0.5 by construction; training was a squared
+  loss against `{0, 1}`. The sampler returned column indices, correct only for `{0, 1}`
+  labels. Labels are now encoded (`-1/+1` for the estimator, the parity index for the
+  sampler) and decoded back to the training labels in their own dtype; a `y_train` with
+  other than two classes raises `ValueError` before any backend is opened. Every pilot10
+  qnn BA/accuracy/F1/MCC value, and the qnn params tuned against them, are invalid.
+- **`compute_qnn` on `simulator_aer` was not reproducible.** `EstimatorQNN`'s default
+  precision (0.015625) made Aer's `EstimatorV2` add unseeded Gaussian noise. It is now built
+  with `default_precision=0.0`, and matches `'simulator'` exactly on Aer MPS. The
+  `RuntimeWarning` `get_backend_session` raised for `simulator_aer` + estimator is removed.
+- **`compute_qnn` follows one backend rule for both primitives.** `'simulator'` uses the
+  seeded primitive from `get_backend_session` (so `seed`, and for the sampler `shots`, now
+  apply -- the qnn sampler is now shot-sampled there, not exact); `'simulator_aer'` and IBM
+  backends get the configured primitive plus the level-3 preset pass manager, with the Z
+  observable mapped through the transpiled layout. The sampler branch previously dropped
+  the Aer primitive on `'simulator_aer'`.
+- **`modeleval` scores string labels.** `_positive_label` and `_positive_class_column`
+  called `ndarray.max()`, which has no loop for a `'<U'` array.
+- **`select_winners` requires `test_size`** (no default; None raises) because the
+  Nadeau-Bengio correction depends on the split fraction, which ModelResults.csv does not
+  record (the pilot used 0.2). `fair_winner` and `unit_report` previously defaulted it
+  silently to 0.3 and 0.2. **BREAKING:** `p_margin` is renamed `p_value`, a two-sided test
+  of `|delta| <= margin` (the ordinary t-test at `margin=0`). Exact LOIO ties are averaged
+  instead of broken by `seed`, which is now unused.
+- **`resolution_floor_epsilon` pooled a dataset's PCA and UMAP passes** into one sigma
+  (pilot: 0.0688 pooled vs 0.0633 per pass). It now groups by (Dataset, embeddings, arm,
+  model) when an embeddings column exists.
+- **The frozen quantum cache no longer reuses params tuned on another metric.** Payloads
+  store `tuning_metric`/`tuning_score`; one without them was tuned on accuracy
+  (`_param_cache.LEGACY_TUNING_METRIC`), so a `tuning_metric: accuracy` run reuses it and
+  any other metric retunes.
+- **The `freeze_quantum_params` docstring said a frozen-arm win was a lower bound; it is
+  optimistic.** The resamples overlap -- in the pilot 73-87% of a later iteration's test
+  rows were iteration-0 training rows -- so the frozen configuration is partly scored on
+  data that selected it (measured diff-in-diff about -0.02 BA, not significant). A warning
+  is logged once per process on the first frozen reuse. The shipped configs
+  (`config.yaml`, `config_qdata_encoded.yaml`, `config_qdata_xview.yaml`), the pilot
+  generator comments and `docs/source/apps/config.md` are corrected.
+- **`benchmark/make_splits.py` rejected correctly stratified small folds.** The per-fold
+  class-balance check now allows `max(0.05, 1/fold_size)` (`balance_tolerance`) on both
+  sides; `pmlb__parity5` and `pmlb__analcatdata_fraud` were being dropped.
+- **`benchmark/curate.py` drops known row-identifier columns** (`ID_COLUMNS`: pmlb
+  analcatdata_bankruptcy `Company`, analcatdata_japansolvent `Firm`, backache `id`, clean1
+  `molecule_name` and `conformation_name`) before NaN removal and one-hot encoding,
+  recording them as `dropped_id_columns`; the suspected-ID report is broader and louder.
+  `data/create_splits.ipynb` is marked deprecated.
+
 - **`compute_pqk` no longer assigns a `classical_models` local it never reads.** Dead code
   inherited from `compute_qpl`, which does select heads; `compute_pqk` fits SVC alone and
   offers no such parameter. Nothing behaved differently, but the variable implied a
@@ -143,6 +240,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison they draw is `'none'` against `'pca'`, so they opt out explicitly. The policy
   is `qbiocode.resolve_embeddings`, which is a pure function of the name list and the
   width, so it is testable without running a profile.
+
+#### Every job of one (dataset, embedding, split) scores its models on the same features
+
+- **The embeddings that draw random numbers are seeded with the split's seed.**
+  `get_embeddings` took no `random_state`, so UMAP drew from numpy's global stream and
+  ran numba-parallel SGD, and PCA did the same whenever scikit-learn's `'auto'` solver
+  picked its randomized one (a side over 500, i.e. `colon_cancer`). A split's features
+  depended on whatever had run before it in the process. `get_embeddings(random_state=)`
+  now seeds `umap`, `pca`, `nmf`, `lle` and `spectral`, and QProfiler passes
+  `seed + iteration`, the seed the split itself uses. Seeded UMAP takes its
+  single-threaded path, and repeat runs on one machine agree bit for bit.
+
+- **Seeding is not enough across hosts, because UMAP depends on the CPU type.** numba
+  compiles UMAP's fastmath kernels for the host's instruction set, and the SGD epochs
+  amplify the last-bit differences. The 2026 pilot ran one LSF job per (dataset,
+  embedding, model). Its UMAP jobs fell into two or three groups per dataset, one per
+  host type, and the groups' features differed on every split: condition number by
+  31-57%, Fisher ratio by up to 18%. So the models of one arm were scored on different
+  data, and nothing reported it. PCA agreed across hosts to ~4e-15.
+
+- **`embedding_cache: <absolute directory>` makes every job read one file per
+  (dataset, embedding, split).** `python -m qbiocode.apps.qprofiler.embedding_cache
+  CONFIG.yaml ...` reads each config as the job will, and reproduces its splits and
+  scaling with QProfiler's own functions. It writes `emb_<data_key>.npz` once for every
+  embedding except `'none'`, however many configs share it. A file holds:
+  - the embedded train and test rows, and the dataset rows each came from;
+  - a `spec` of every input the embedding depends on: the dataset's sha256, the split
+    seed, `test_size`, stratification, scaling and the embedding settings;
+  - a `provenance` record, never checked, of where and how it was computed, numba's
+    CPU target included.
+
+  `--check` writes nothing and exits 1 if any file is missing or stale. `--force`
+  replaces stale files instead of reporting them.
+
+- **A job with a cache never embeds.** Before fitting anything, `qprofiler.main` checks
+  every file it will read against its own settings. It raises `EmbeddingCacheError` if
+  a file is missing or was written under other settings. There is no fallback to
+  computing the embedding, because that fallback is the bug. Every pass logs
+  `Features of <data_key>: <k> columns, sha256 <digest>, read from <file>` (or
+  `computed in this run`), so two jobs' features can be compared from their logs.
+  `embedding_cache: null`, the shipped default, keeps each run computing its own.
+
+- **The pilot's generator and submit scripts use it.** `generate_pilot_configs.py`
+  writes the absolute `experiments/pilot10/embeddings/` into every config, in both
+  layouts. `--embedding-cache DIR` moves it, and `''` writes null. `submit_pilot.sh`
+  and `submit_runs.sh` fill the cache on the submitting host before any `bsub`, and
+  abort the submit if that fails. `DRY=1` only runs `--check`.
+  `tests/integration/test_qprofiler_embedding_cache.py` stands in for a host of another
+  type with `NUMBA_CPU_NAME=generic`: under it UMAP changes and PCA does not, and a job
+  on this host scores the files the other target wrote.
 
 #### QProfiler tutorial v2
 
@@ -318,6 +465,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cost.** ~0.2 s at 100x10, ~0.6 s at 500x50, ~5 s at 100x2000, ~53 s at 100x20000.
 
 ### Changed
+
+#### Default tuning objective is balanced accuracy
+
+- **Every tuner selects on `balanced_accuracy` by default (was accuracy).** New runs are
+  therefore not paired with pilot10; set `tuning_metric: accuracy` to reproduce it. A new
+  default run pointed at a pilot10 `quantum_param_dir` retunes instead of reusing.
+  `compute_tabpfn` tuning now goes through `search_hyperparameters`.
 
 #### One search-engine dispatch instead of eight copies
 

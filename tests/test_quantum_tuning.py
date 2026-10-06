@@ -297,7 +297,7 @@ class TestTheSearchItself:
             seen.append((len(Xa), len(Xb)))
             import pandas as pd
 
-            return pd.DataFrame({"results_spy": [{"accuracy": 0.5, "time": 0.0}]})
+            return pd.DataFrame({"results_spy": [{"accuracy": 0.5, "balanced_accuracy": 0.5, "time": 0.0}]})
 
         run_function_study(
             spy,

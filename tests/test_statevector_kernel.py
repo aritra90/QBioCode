@@ -20,14 +20,14 @@ import logging
 import numpy as np
 import pytest
 
-pytest.importorskip("qiskit_machine_learning")
+# Imported directly, not through pytest.importorskip: qiskit-machine-learning is a base
+# requirement, so a missing one is a broken install (test_suite_hygiene.py).
+from qiskit.primitives import StatevectorSampler
+from qiskit_machine_learning.kernels import FidelityQuantumKernel
+from qiskit_machine_learning.state_fidelities import ComputeUncompute
 
-from qiskit.primitives import StatevectorSampler  # noqa: E402
-from qiskit_machine_learning.kernels import FidelityQuantumKernel  # noqa: E402
-from qiskit_machine_learning.state_fidelities import ComputeUncompute  # noqa: E402
-
-import qbiocode.utils.qutils as qutils  # noqa: E402
-from qbiocode.learning.compute_qsvc import (  # noqa: E402
+import qbiocode.utils.qutils as qutils
+from qbiocode.learning.compute_qsvc import (
     StatevectorFidelityKernel,
     _fidelity_kernel,
     compute_qsvc,

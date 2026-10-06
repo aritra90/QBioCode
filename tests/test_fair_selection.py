@@ -29,10 +29,14 @@ from qbiocode.utils.fair_selection import (
     model_side,
     select_winners,
 )
+from qbiocode.utils.fair_selection import TIE_SEPARATOR, _loio_side_scores
 
 CLASSICAL = ["lr", "mlp", "svc", "nb", "rf", "dt", "xgb", "catboost"]
 QUANTUM = ["qsvc", "pqk", "qnn"]
 EMBEDDINGS = ["PCA", "UMAP"]
+#: The split fraction every call passes explicitly. select_winners has no default for it
+#: (the NB correction depends on it); 0.3 is what these fixtures were calibrated at.
+TS = 0.3
 
 
 def synth(
@@ -72,6 +76,24 @@ def synth(
                         "iteration": it, metric: rng.normal(mu + quantum_shift, sd),
                         "Model_Parameters": "default",
                     })
+    return pd.DataFrame(rows)
+
+
+def paired_frame(mus, spread: float = 0.01, iters: int = 5) -> pd.DataFrame:
+    """One classical and one quantum arm per dataset, with the deltas set exactly.
+
+    With a single arm per side LOIO has nothing to choose, so ``delta_i`` is
+    ``mu + spread * z_i`` for a fixed centred ``z`` and every p-value is known in
+    advance. Dataset ``k`` is named ``ds{k}``.
+    """
+    z = np.arange(iters) - (iters - 1) / 2.0
+    rows = []
+    for k, mu in enumerate(mus):
+        for it in range(iters):
+            for model, score in (("lr", 0.7 + mu + spread * z[it]), ("qsvc", 0.7)):
+                rows.append({"Dataset": f"ds{k}", "embeddings": "PCA", "model": model,
+                             "iteration": it, "f1_score": score,
+                             "Model_Parameters": "x"})
     return pd.DataFrame(rows)
 
 
@@ -177,7 +199,7 @@ class TestUnbiasedUnderTheNull:
         (+0.0093) -- and leave-one-iteration-out selection removes both, because the
         iteration that picks an arm is never the iteration that scores it.
         """
-        report = select_winners(synth(seed=7), epsilon=0.027, test_size=0.3, seed=0)
+        report = select_winners(synth(seed=7), epsilon=0.027, test_size=TS, seed=0)
         delta = report.per_dataset["delta"]
 
         assert abs(delta.mean()) < 0.027, (
@@ -193,7 +215,7 @@ class TestUnbiasedUnderTheNull:
         assert claimed <= 0.15 * n, f"{claimed}/{n} datasets claimed a win under a null"
 
     def test_the_corpus_verdict_on_a_null_is_no_difference(self):
-        report = select_winners(synth(seed=7), epsilon=0.027, seed=0)
+        report = select_winners(synth(seed=7), epsilon=0.027, test_size=TS, seed=0)
         assert report.corpus["across_datasets"]["direction"] == "no_detectable_difference"
 
     def test_neither_side_is_favoured_by_having_more_arms(self):
@@ -204,7 +226,8 @@ class TestUnbiasedUnderTheNull:
         method list to be chosen on scientific grounds instead of padded for balance.
         """
         deltas = [
-            select_winners(synth(n_datasets=20, seed=s), seed=s).per_dataset["delta"].mean()
+            select_winners(synth(n_datasets=20, seed=s), test_size=TS, seed=s)
+            .per_dataset["delta"].mean()
             for s in range(6)
         ]
         assert abs(float(np.mean(deltas))) < 0.015, (
@@ -218,7 +241,7 @@ class TestUnbiasedUnderTheNull:
         it must remain measurably more classical-leaning than the LOIO estimate -- that
         residual gap is the arm-count term alone.
         """
-        report = select_winners(synth(seed=7), seed=0)
+        report = select_winners(synth(seed=7), test_size=TS, seed=0)
         assert report.corpus["mean_naive_delta"] > report.per_dataset["delta"].mean()
 
 
@@ -227,7 +250,8 @@ class TestItStillDetectsRealEffects:
 
     def test_a_real_quantum_advantage_is_reported_as_a_quantum_win(self):
         report = select_winners(
-            synth(n_datasets=30, quantum_shift=+0.15, seed=11), epsilon=0.027, seed=0
+            synth(n_datasets=30, quantum_shift=+0.15, seed=11), epsilon=0.027,
+            test_size=TS, seed=0,
         )
         assert report.per_dataset["delta"].mean() < -0.10
         assert len(report.quantum_datasets) >= 15, (
@@ -239,7 +263,8 @@ class TestItStillDetectsRealEffects:
         """Sign convention, per the benchmark's own definition: delta = classical -
         quantum, so delta > 0 is classical ahead and delta < 0 is quantum ahead."""
         report = select_winners(
-            synth(n_datasets=30, quantum_shift=-0.15, seed=12), epsilon=0.027, seed=0
+            synth(n_datasets=30, quantum_shift=-0.15, seed=12), epsilon=0.027,
+            test_size=TS, seed=0,
         )
         assert report.per_dataset["delta"].mean() > +0.10
         assert len(report.classical_datasets) >= 15
@@ -247,7 +272,8 @@ class TestItStillDetectsRealEffects:
 
     def test_the_corpus_test_agrees_with_the_per_dataset_verdicts(self):
         report = select_winners(
-            synth(n_datasets=30, quantum_shift=+0.15, seed=11), epsilon=0.027, seed=0
+            synth(n_datasets=30, quantum_shift=+0.15, seed=11), epsilon=0.027,
+            test_size=TS, seed=0,
         )
         across = report.corpus["across_datasets"]
         assert across["direction"] == "quantum"
@@ -257,29 +283,46 @@ class TestItStillDetectsRealEffects:
 
 
 class TestEpsilonSemantics:
-    """``abs(delta) > epsilon``, applied to the interval rather than the point."""
+    """``margin`` decides wins, ``epsilon`` decides equivalence -- no longer one number.
+
+    Semantics changed: epsilon used to be both the win margin and the equivalence
+    bound, so a real effect had to clear the resolution floor twice. A win is now judged
+    against the pre-registered ``margin`` (default 0), and epsilon is only the TOST bound.
+    """
 
     def test_a_win_needs_the_whole_interval_to_clear_the_margin(self):
         report = select_winners(
-            synth(n_datasets=30, quantum_shift=+0.15, seed=11), epsilon=0.027, seed=0
+            synth(n_datasets=30, quantum_shift=+0.15, seed=11), epsilon=0.027,
+            margin=0.027, test_size=TS, seed=0,
         )
         won = report.per_dataset[report.per_dataset["verdict_raw"] == "quantum_wins"]
         assert not won.empty
         assert (won["ci_hi"] < -0.027).all(), (
             "a dataset was called a quantum win although its interval reached above "
-            "-epsilon; that is a point-estimate claim, not an unequivocal one"
+            "-margin; that is a point-estimate claim, not an unequivocal one"
         )
 
-    def test_raising_epsilon_can_only_remove_wins(self):
+    def test_raising_the_margin_can_only_remove_wins(self):
         """Monotonicity. A larger margin is a strictly stronger demand."""
         df = synth(n_datasets=30, quantum_shift=+0.15, seed=11)
-        strict = select_winners(df, epsilon=0.20, seed=0).quantum_datasets
-        loose = select_winners(df, epsilon=0.027, seed=0).quantum_datasets
-        assert set(strict).issubset(set(loose))
-        assert len(strict) <= len(loose)
+        strict = select_winners(df, margin=0.20, test_size=TS).quantum_datasets
+        loose = select_winners(df, margin=0.027, test_size=TS).quantum_datasets
+        zero = select_winners(df, margin=0.0, test_size=TS).quantum_datasets
+        assert set(strict) <= set(loose) <= set(zero)
+        assert len(strict) < len(zero)
+
+    def test_epsilon_no_longer_moves_the_win_verdicts(self):
+        """Changed semantics: epsilon only relabels non-wins as equivalent or not."""
+        df = synth(n_datasets=30, quantum_shift=+0.15, seed=11)
+        big = select_winners(df, epsilon=0.20, test_size=TS).per_dataset
+        small = select_winners(df, epsilon=0.027, test_size=TS).per_dataset
+        wins = ["quantum_wins", "classical_wins"]
+        pd.testing.assert_series_equal(big["p_value"], small["p_value"])
+        assert (big["verdict_raw"].isin(wins) == small["verdict_raw"].isin(wins)).all()
+        assert big["within_equivalence"].sum() >= small["within_equivalence"].sum()
 
     def test_verdicts_come_from_the_documented_vocabulary(self):
-        report = select_winners(synth(n_datasets=10, seed=13), seed=0)
+        report = select_winners(synth(n_datasets=10, seed=13), test_size=TS, seed=0)
         from qbiocode.utils.fair_selection import VERDICTS
         assert set(report.per_dataset["verdict_raw"]) <= set(VERDICTS)
         assert set(report.per_dataset["verdict_adjusted"]) <= set(VERDICTS)
@@ -292,32 +335,162 @@ class TestEpsilonSemantics:
         and distinct from "inconclusive".
         """
         report = select_winners(
-            synth(n_datasets=20, iters=5, sd=0.001, seed=14), epsilon=0.027, seed=0
+            synth(n_datasets=20, iters=5, sd=0.001, seed=14), epsilon=0.027,
+            test_size=TS, seed=0,
         )
         counts = report.per_dataset["verdict_raw"].value_counts()
         assert counts.get("equivalent", 0) >= 10, dict(counts)
 
 
 class TestMultiplicity:
-    def test_fdr_demotes_but_never_promotes(self):
-        """BH may only weaken a raw claim. It cannot manufacture one."""
+    def test_fdr_at_or_below_alpha_demotes_but_never_promotes(self):
+        """With ``fdr <= alpha`` BH may only weaken a raw claim.
+
+        Semantics changed: the BH family is now every dataset, so with ``fdr > alpha``
+        a raw-inconclusive dataset may legitimately be confirmed (next test).
+        """
         report = select_winners(
-            synth(n_datasets=40, quantum_shift=+0.08, seed=15), epsilon=0.027, seed=0
+            synth(n_datasets=40, quantum_shift=+0.08, seed=15), epsilon=0.027,
+            fdr=0.05, alpha=0.05, test_size=TS,
         )
         per = report.per_dataset
         promoted = per[
-            per["verdict_raw"].eq("inconclusive")
+            ~per["verdict_raw"].isin(["quantum_wins", "classical_wins"])
             & per["verdict_adjusted"].isin(["quantum_wins", "classical_wins"])
         ]
         assert promoted.empty, "FDR adjustment invented a win"
 
+    def test_fdr_above_alpha_may_confirm_a_raw_non_win(self):
+        """BH at 0.25 over many true effects confirms datasets whose raw p is in
+        (alpha, BH threshold] -- the FDR procedure working, not a promotion bug."""
+        report = select_winners(
+            synth(n_datasets=40, quantum_shift=+0.08, seed=15), fdr=0.25, alpha=0.05,
+            test_size=TS,
+        )
+        per = report.per_dataset
+        confirmed = per[~per["verdict_raw"].isin(["quantum_wins", "classical_wins"])
+                        & per["verdict_adjusted"].eq("quantum_wins")]
+        assert not confirmed.empty
+        assert (confirmed["p_value"] > 0.05).all()
+        assert (confirmed["p_adjusted"] <= 0.25).all()
+
     def test_adjusted_p_is_never_below_raw_p(self):
         report = select_winners(
-            synth(n_datasets=40, quantum_shift=+0.08, seed=15), epsilon=0.027, seed=0
+            synth(n_datasets=40, quantum_shift=+0.08, seed=15), epsilon=0.027,
+            test_size=TS,
         )
         per = report.per_dataset.dropna(subset=["p_adjusted"])
         assert not per.empty
-        assert (per["p_adjusted"] >= per["p_margin"] - 1e-12).all()
+        assert (per["p_adjusted"] >= per["p_value"] - 1e-12).all()
+
+    def test_every_dataset_with_a_p_value_enters_the_bh_family(self):
+        """Not only the raw wins: the family is fixed before looking at verdicts."""
+        per = select_winners(synth(n_datasets=12, seed=13), test_size=TS).per_dataset
+        assert per["p_adjusted"].notna().sum() == per["p_value"].notna().sum() == 12
+        assert (per["family"] == "discovery").all()
+
+    def test_all_dataset_bh_demotes_what_claimed_only_bh_kept(self):
+        """The old scope adjusted only raw wins, so with one claim m = 1 and BH was
+        inert. Over all 10 datasets the same claim no longer survives fdr=0.10."""
+        mus = [0.042] + [0.004] * 9
+        df = paired_frame(mus)
+        per = select_winners(df, test_size=0.2, fdr=0.10).per_dataset.set_index("Dataset")
+        assert per.loc["ds0", "verdict_raw"] == "classical_wins"
+        assert (per.drop(index="ds0")["verdict_raw"] != "classical_wins").all()
+        p0 = per.loc["ds0", "p_value"]
+        assert p0 < 0.05
+        # claimed-only scope: m = 1, q = p0 <= 0.10 -> the win would have stood
+        assert p0 <= 0.10
+        # all-dataset scope: q = min_k p_(k) * 10 / k > 0.10 -> demoted
+        assert per.loc["ds0", "p_adjusted"] > 0.10
+        assert per.loc["ds0", "verdict_adjusted"] == "inconclusive"
+
+    def test_bh_q_values_match_a_reference_implementation(self):
+        per = select_winners(synth(n_datasets=15, quantum_shift=0.05, seed=3),
+                             test_size=TS).per_dataset
+        p = per["p_value"].to_numpy()
+        m = p.size
+        ref = np.array([min(1.0, min(np.sort(p)[k:] * m / np.arange(k + 1, m + 1)))
+                        for k in range(m)])
+        np.testing.assert_allclose(np.sort(per["p_adjusted"].to_numpy()), ref)
+
+
+class TestMargin:
+    def test_margin_zero_is_the_ordinary_two_sided_t_test(self):
+        from scipy import stats
+        per = select_winners(paired_frame([0.03, -0.03, 0.0]), test_size=0.2).per_dataset
+        df_ = per["n_iterations"] - 1
+        ref = 2 * stats.t.sf(per["delta"].abs() / per["se"], df_)
+        np.testing.assert_allclose(per["p_value"], np.minimum(ref, 1.0))
+        # p < alpha exactly when the interval excludes zero
+        excludes = (per["ci_lo"] > 0) | (per["ci_hi"] < 0)
+        assert ((per["p_value"] < 0.05) == excludes).all()
+
+    def test_a_positive_margin_raises_p_and_can_remove_a_win(self):
+        df = paired_frame([0.04])
+        zero = select_winners(df, test_size=0.2, margin=0.0).per_dataset.iloc[0]
+        wide = select_winners(df, test_size=0.2, margin=0.03).per_dataset.iloc[0]
+        assert zero["verdict_raw"] == "classical_wins"
+        assert wide["verdict_raw"] != "classical_wins"
+        assert wide["p_value"] > zero["p_value"]
+        assert wide["ci_lo"] == zero["ci_lo"]  # the interval itself does not move
+
+    def test_a_negative_margin_is_refused(self):
+        with pytest.raises(ValueError, match="margin"):
+            select_winners(paired_frame([0.04]), test_size=0.2, margin=-0.01)
+
+    @pytest.mark.parametrize("fdr", [0.0, 1.0, 5.0, -0.1])
+    def test_an_fdr_outside_the_unit_interval_is_refused(self, fdr):
+        # fdr >= 1 would turn every finite p (even 0.7) into a directional win
+        with pytest.raises(ValueError, match="fdr"):
+            select_winners(paired_frame([0.04]), test_size=0.2, fdr=fdr)
+
+    def test_within_equivalence_is_reported_alongside_a_win(self):
+        """A significant but negligible win stays a win, flagged as inside +/-epsilon."""
+        per = select_winners(paired_frame([0.01], spread=0.0005), test_size=0.2,
+                             epsilon=0.027).per_dataset.iloc[0]
+        assert per["verdict_raw"] == "classical_wins"
+        assert bool(per["within_equivalence"]) is True
+        assert per["ci_lo"] > 0 and per["ci_hi"] < 0.027
+
+
+class TestControls:
+    def test_controls_form_a_separate_holm_family(self):
+        mus = [0.042] + [0.004] * 9 + [0.06, 0.0]
+        df = paired_frame(mus)
+        controls = ["ds10", "ds11"]
+        rep_ = select_winners(df, test_size=0.2, controls=controls)
+        per = rep_.per_dataset.set_index("Dataset")
+        assert set(per.index[per["family"] == "control"]) == set(controls)
+        assert (per.drop(index=controls)["family"] == "discovery").all()
+        # Holm over the two controls only
+        pc = per.loc[controls, "p_value"].to_numpy()
+        lo, hi = np.argsort(pc)
+        holm = np.empty(2)
+        holm[lo] = min(1.0, 2 * pc[lo])
+        holm[hi] = min(1.0, max(holm[lo], pc[hi]))
+        np.testing.assert_allclose(per.loc[controls, "p_adjusted"], holm)
+        # the discovery family's BH is untouched by the controls
+        alone = select_winners(paired_frame(mus[:10]), test_size=0.2).per_dataset
+        np.testing.assert_allclose(per.drop(index=controls)["p_adjusted"],
+                                   alone["p_adjusted"])
+        # the planted effect is judged at alpha and kept out of the headline lists
+        assert per.loc["ds10", "verdict_adjusted"] == "classical_wins"
+        assert "ds10" not in rep_.classical_datasets
+        assert rep_.controls == ("ds10", "ds11")
+        assert rep_.corpus["across_datasets"]["n_datasets_used"] == 10
+
+    def test_an_unknown_control_name_is_refused(self):
+        with pytest.raises(ValueError, match="nope"):
+            select_winners(paired_frame([0.01, 0.02]), test_size=0.2,
+                           controls=["ds0", "nope"])
+
+    def test_a_control_with_no_finite_metric_is_not_called_absent(self):
+        df = paired_frame([0.01, 0.02])
+        df.loc[df["Dataset"] == "ds1", "f1_score"] = np.nan
+        with pytest.raises(ValueError, match="no finite 'f1_score'") as err:
+            select_winners(df, test_size=0.2, controls=["ds1"])
+        assert "absent" not in str(err.value)
 
 
 class TestNadeauBengioFloor:
@@ -339,29 +512,45 @@ class TestNadeauBengioFloor:
         assert iteration_floor_half_width(0.0267, 0.15) < \
             iteration_floor_half_width(0.0267, 0.30)
 
-    def test_the_report_says_when_epsilon_is_unreachable(self):
-        report = select_winners(synth(n_datasets=20, seed=16), epsilon=1e-6, seed=0)
+    def test_the_report_says_when_epsilon_is_unreachable(self, caplog):
+        """epsilon is now only the equivalence bound, and the message says so."""
+        with caplog.at_level("WARNING", logger="qbiocode.utils.fair_selection"):
+            report = select_winners(synth(n_datasets=20, seed=16), epsilon=1e-6,
+                                    test_size=TS)
         assert report.corpus["epsilon_is_reachable"] is False
+        assert "equivalence cannot be certified" in caplog.text
 
 
 class TestDegenerateInput:
+    def test_test_size_has_no_default(self):
+        """The NB correction r = test/(1-test) depends on the split, which
+        ModelResults.csv does not record; the old silent 0.3 default mis-corrected the
+        pilot, which used 0.2."""
+        df = synth(n_datasets=2, iters=3, seed=17)
+        with pytest.raises(ValueError, match="split fraction"):
+            select_winners(df)
+        with pytest.raises(ValueError, match="test_size"):
+            select_winners(df, test_size=None)
+        with pytest.raises(ValueError, match="test_size"):
+            select_winners(df, test_size=1.0)
+
     def test_a_missing_iteration_column_is_refused_by_name(self):
         """Without a resample axis there is nothing to hold out and no interval."""
         df = synth(n_datasets=2, seed=17).drop(columns=["iteration"])
         with pytest.raises(ValueError, match="iteration"):
-            select_winners(df)
+            select_winners(df, test_size=TS)
 
     def test_a_single_iteration_is_named_not_silently_inconclusive(self):
         """One iteration cannot give a spread, and saying so keeps such datasets out of
         the corpus counts instead of hiding them among genuinely ambiguous ones."""
-        report = select_winners(synth(n_datasets=3, iters=1, seed=18), seed=0)
+        report = select_winners(synth(n_datasets=3, iters=1, seed=18), test_size=TS, seed=0)
         assert (report.per_dataset["verdict_raw"] == "insufficient_iterations").all()
         assert not report.quantum_datasets and not report.classical_datasets
 
     def test_a_dataset_with_only_one_side_yields_no_win(self):
         df = synth(n_datasets=3, seed=19)
         classical_only = df[df["model"].isin(CLASSICAL)]
-        report = select_winners(classical_only, seed=0)
+        report = select_winners(classical_only, test_size=TS, seed=0)
         assert not report.quantum_datasets and not report.classical_datasets
         assert report.per_dataset["delta"].isna().all()
 
@@ -371,63 +560,96 @@ class TestDegenerateInput:
         # and the point of the test is the selector's tolerance, not pandas' dtype rules
         df["f1_score"] = df["f1_score"].astype(object)
         df.loc[df.index[:20], "f1_score"] = "failed"
-        report = select_winners(df, seed=0)
+        report = select_winners(df, test_size=TS, seed=0)
         assert len(report.per_dataset) == 3
 
     def test_the_report_is_always_truthy(self):
         """``qml_winner`` returned a bare ``None`` when no quantum dataset was found, so
         "no winner" and "the function changed shape" were the same observation and no
         test could distinguish them."""
-        report = select_winners(synth(n_datasets=3, iters=1, seed=21), seed=0)
+        report = select_winners(synth(n_datasets=3, iters=1, seed=21), test_size=TS, seed=0)
         assert bool(report) is True
         assert isinstance(report, WinnerReport)
         assert report.quantum_datasets == []
 
 
+def _all_tied_frame() -> pd.DataFrame:
+    rows = []
+    for d in range(4):
+        for it in range(4):
+            for m in CLASSICAL + QUANTUM:
+                rows.append({
+                    "Dataset": f"ds{d}", "embeddings": "PCA", "model": m,
+                    "iteration": it, "f1_score": 0.8, "Model_Parameters": "x",
+                })
+    return pd.DataFrame(rows)
+
+
 class TestDeterminismAndTieBreaking:
-    def test_the_same_seed_gives_the_same_verdicts(self):
+    def test_results_do_not_depend_on_the_seed(self):
+        """Semantics changed: ties used to be broken by a seeded permutation, so only
+        the *same* seed reproduced a verdict. ``seed`` is now unused and any two seeds
+        must agree exactly."""
         df = synth(n_datasets=10, seed=22)
-        a = select_winners(df, seed=5).per_dataset
-        b = select_winners(df, seed=5).per_dataset
-        pd.testing.assert_frame_equal(a, b)
+        a = select_winners(df, test_size=TS, seed=5)
+        b = select_winners(df, test_size=TS, seed=123)
+        pd.testing.assert_frame_equal(a.per_dataset, b.per_dataset)
+        pd.testing.assert_frame_equal(a.selection, b.selection)
 
     def test_exact_ties_do_not_resolve_alphabetically(self):
         """With every arm identical, ``argmax`` picks the first row -- which after a
         ``groupby`` sort means the alphabetically first model name, so ``catboost``
         beats ``qsvc`` and ``nb`` beats ``qnn`` on every tie. Weighted F1 on ``m`` test
         rows moves in steps of about ``1/m``, so exact ties are common, not exotic.
+
+        Semantics changed: the tie is no longer broken at random. Every tied arm is
+        named in the trace and their held-out scores are averaged.
         """
-        rows = []
-        for d in range(4):
-            for it in range(4):
-                for m in CLASSICAL + QUANTUM:
-                    rows.append({
-                        "Dataset": f"ds{d}", "embeddings": "PCA", "model": m,
-                        "iteration": it, "f1_score": 0.8, "Model_Parameters": "x",
-                    })
-        df = pd.DataFrame(rows)
-        picked = {
-            seed: set(
-                select_winners(df, seed=seed).selection["classical_arm"].unique()
-            )
-            for seed in range(8)
-        }
-        chosen = set().union(*picked.values())
-        assert len(chosen) > 1, (
-            f"every seed chose the same arm on an exact tie: {chosen}"
-        )
+        report = select_winners(_all_tied_frame(), test_size=TS)
+        want_c = TIE_SEPARATOR.join(sorted(f"PCA|{m}" for m in CLASSICAL))
+        want_q = TIE_SEPARATOR.join(sorted(f"PCA|{m}" for m in QUANTUM))
+        assert set(report.selection["classical_arm"]) == {want_c}
+        assert set(report.selection["quantum_arm"]) == {want_q}
 
     def test_a_perfect_tie_is_never_a_win_for_either_side(self):
-        rows = []
-        for d in range(4):
-            for it in range(4):
-                for m in CLASSICAL + QUANTUM:
-                    rows.append({
-                        "Dataset": f"ds{d}", "embeddings": "PCA", "model": m,
-                        "iteration": it, "f1_score": 0.8, "Model_Parameters": "x",
-                    })
-        report = select_winners(pd.DataFrame(rows), seed=0)
+        """Also guards the rounding trap: averaging eight identical 0.8s must not leave
+        a 1e-16 delta with zero spread that reads as a certain win."""
+        report = select_winners(_all_tied_frame(), test_size=TS)
         assert not report.quantum_datasets and not report.classical_datasets
+        assert (report.per_dataset["delta"] == 0.0).all()
+        assert (report.per_dataset["verdict_raw"] != "quantum_wins").all()
+        assert (report.per_dataset["verdict_raw"] != "classical_wins").all()
+
+    def test_tied_arms_score_the_mean_of_their_held_out_scores(self):
+        """Holding out iteration 2, both arms average 0.8 on iterations 0-1, so the
+        held-out score is the expectation over a fair coin: (0.8 + 0.5) / 2."""
+        mat = np.array([[0.9, 0.7, 0.8],
+                        [0.7, 0.9, 0.5]])
+        scores, chosen = _loio_side_scores(mat, ["PCA|a", "PCA|b"])
+        assert scores[2] == pytest.approx(0.65)
+        assert chosen[2] == "PCA|a" + TIE_SEPARATOR + "PCA|b"
+        # untied folds pick the single best arm as before (a: 0.75 vs 0.70, 0.85 vs 0.60)
+        assert chosen[0] == "PCA|a" and scores[0] == pytest.approx(0.9)
+        assert chosen[1] == "PCA|a" and scores[1] == pytest.approx(0.7)
+
+    def test_tie_averaging_is_seed_invariant_end_to_end(self):
+        mat = {"lr": [0.9, 0.7, 0.8], "rf": [0.7, 0.9, 0.5], "qsvc": [0.75, 0.75, 0.75]}
+        df = pd.DataFrame([
+            {"Dataset": "ds0", "embeddings": "PCA", "model": m, "iteration": it,
+             "f1_score": v[it], "Model_Parameters": "x"}
+            for m, v in mat.items() for it in range(3)
+        ])
+        runs = [select_winners(df, test_size=0.2, seed=s) for s in range(4)]
+        for r in runs[1:]:
+            pd.testing.assert_frame_equal(runs[0].selection, r.selection)
+        sel = runs[0].selection.set_index("iteration")
+        assert sel.loc[2, "classical_arm"] == "PCA|lr+PCA|rf"
+        assert sel.loc[2, "classical_score"] == pytest.approx(0.65)
+
+    def test_the_tie_separator_cannot_collide_with_an_arm_label(self):
+        assert TIE_SEPARATOR != "|"
+        table = arm_iteration_table(synth(n_datasets=1, iters=2, seed=1))
+        assert not table["arm"].str.contains(TIE_SEPARATOR, regex=False).any()
 
 
 class TestMetricIsParameterised:
@@ -436,14 +658,14 @@ class TestMetricIsParameterised:
     @pytest.mark.parametrize("metric", ["balanced_accuracy", "mcc", "pr_auc", "accuracy"])
     def test_any_higher_is_better_metric_works(self, metric):
         df = synth(n_datasets=8, quantum_shift=+0.15, seed=23, metric=metric)
-        report = select_winners(df, metric=metric, epsilon=0.027, seed=0)
+        report = select_winners(df, metric=metric, epsilon=0.027, test_size=TS, seed=0)
         assert report.metric == metric
         assert report.per_dataset["delta"].mean() < -0.10
 
     def test_mcc_can_go_negative_without_breaking_the_interval(self):
         """MCC spans [-1, 1] unlike F1, so nothing may assume a non-negative metric."""
         df = synth(n_datasets=6, mu=-0.1, sd=0.05, seed=24, metric="mcc")
-        report = select_winners(df, metric="mcc", seed=0)
+        report = select_winners(df, metric="mcc", test_size=TS, seed=0)
         assert report.per_dataset["ci_lo"].notna().all()
 
 
@@ -459,23 +681,27 @@ class TestDummyFloor:
         baseline = pd.DataFrame({
             "Dataset": sorted(df["Dataset"].unique()), "f1_score": 0.99,
         })
-        report = select_winners(df, baseline=baseline, seed=0)
+        report = select_winners(df, baseline=baseline, test_size=TS, seed=0)
         assert (report.per_dataset["verdict_raw"] == "below_baseline").all()
         assert not report.quantum_datasets and not report.classical_datasets
+        # Changed: every finite p-value now enters the BH family, below_baseline rows
+        # included, but a special verdict is carried through the adjustment unchanged.
+        assert (report.per_dataset["verdict_adjusted"] == "below_baseline").all()
+        assert report.per_dataset["p_adjusted"].notna().all()
 
     def test_an_easily_beaten_baseline_changes_nothing(self):
         df = synth(n_datasets=6, seed=25)
         baseline = pd.DataFrame({
             "Dataset": sorted(df["Dataset"].unique()), "f1_score": 0.1,
         })
-        with_base = select_winners(df, baseline=baseline, seed=0).per_dataset
+        with_base = select_winners(df, baseline=baseline, test_size=TS, seed=0).per_dataset
         assert "below_baseline" not in set(with_base["verdict_raw"])
 
     def test_a_baseline_missing_the_metric_column_is_refused(self):
         df = synth(n_datasets=3, seed=26)
         bad = pd.DataFrame({"Dataset": sorted(df["Dataset"].unique()), "score": 0.5})
         with pytest.raises(ValueError, match="baseline"):
-            select_winners(df, baseline=bad, seed=0)
+            select_winners(df, baseline=bad, test_size=TS, seed=0)
 
     def test_the_baseline_is_joined_on_dataset_not_on_index(self):
         """Index-aligned joins are what caused cross-dataset misattribution in
@@ -484,8 +710,8 @@ class TestDummyFloor:
         names = sorted(df["Dataset"].unique())
         ordered = pd.DataFrame({"Dataset": names, "f1_score": np.linspace(0.1, 0.99, 6)})
         shuffled = ordered.sample(frac=1.0, random_state=3).reset_index(drop=True)
-        a = select_winners(df, baseline=ordered, seed=0).per_dataset
-        b = select_winners(df, baseline=shuffled, seed=0).per_dataset
+        a = select_winners(df, baseline=ordered, test_size=TS, seed=0).per_dataset
+        b = select_winners(df, baseline=shuffled, test_size=TS, seed=0).per_dataset
         pd.testing.assert_series_equal(
             a.set_index("Dataset")["verdict_raw"].sort_index(),
             b.set_index("Dataset")["verdict_raw"].sort_index(),
@@ -494,7 +720,7 @@ class TestDummyFloor:
 
 class TestCorpusInference:
     def test_all_three_tests_are_reported(self):
-        report = select_winners(synth(n_datasets=30, seed=28), seed=0)
+        report = select_winners(synth(n_datasets=30, seed=28), test_size=TS, seed=0)
         across = report.corpus["across_datasets"]
         for key in ("t", "wilcoxon", "sign"):
             assert key in across, f"{key} missing from corpus inference"
@@ -520,6 +746,30 @@ class TestCorpusInference:
         out = corpus_inference(per, epsilon=0.027)
         assert out["direction"] == "quantum"
 
+    def test_the_margin_splits_from_epsilon(self):
+        """margin=None keeps the legacy rule (epsilon is also the margin); an explicit
+        margin drives the sign counts and the direction, epsilon stays descriptive."""
+        per = pd.DataFrame({"delta": [0.005] * 60})
+        out = corpus_inference(per, epsilon=0.027, margin=0.0)
+        assert out["direction"] == "classical"
+        assert out["margin"] == 0.0
+        assert out["sign"]["datasets_favoring_classical"] == 60
+        assert out["sign"]["datasets_within_epsilon_0.027"] == 60
+        assert corpus_inference(per, epsilon=0.027)["margin"] == 0.027
+
+    def test_select_winners_records_margin_and_fdr(self):
+        report = select_winners(synth(n_datasets=4, seed=28), test_size=TS, margin=0.01,
+                                fdr=0.2)
+        assert report.corpus["margin"] == 0.01 and report.corpus["fdr"] == 0.2
+        assert report.margin == 0.01 and report.fdr == 0.2 and report.controls == ()
+        assert report.corpus["across_datasets"]["margin"] == 0.01
+
+    def test_winner_report_still_constructs_without_the_new_fields(self):
+        r = WinnerReport(per_dataset=pd.DataFrame(), per_arm=pd.DataFrame(),
+                         selection=pd.DataFrame(), metric="f1_score", epsilon=0.027,
+                         alpha=0.05, test_size=0.2)
+        assert (r.margin, r.fdr, r.controls) == (0.0, 0.10, ())
+
     def test_too_few_datasets_yields_no_inference_rather_than_a_fake_one(self):
         assert corpus_inference(pd.DataFrame({"delta": [0.1]}))["n_datasets_used"] == 1
         assert "ci" not in corpus_inference(pd.DataFrame({"delta": [0.1]}))
@@ -530,7 +780,7 @@ class TestOutputTables:
     def test_the_selection_trace_names_the_arm_used_for_each_held_out_iteration(self):
         """Auditability: the reader must be able to see *which* arm produced each score,
         because "the best arm" under nested selection is not one arm."""
-        report = select_winners(synth(n_datasets=4, iters=5, seed=29), seed=0)
+        report = select_winners(synth(n_datasets=4, iters=5, seed=29), test_size=TS, seed=0)
         sel = report.selection
         assert len(sel) == 4 * 5
         assert {"Dataset", "iteration", "classical_arm", "quantum_arm"} <= set(sel.columns)
@@ -540,7 +790,7 @@ class TestOutputTables:
         """The fragmentation diagnostic: >1 means that arm was re-tuned per resample,
         which is exactly the condition under which the old rule broke."""
         report = select_winners(synth(n_datasets=3, iters=5, classical_tuned=True, seed=30),
-                                seed=0)
+                                test_size=TS, seed=0)
         per_arm = report.per_arm
         tuned = per_arm[per_arm["side"] == "classical"]["n_distinct_parameters"]
         untuned = per_arm[per_arm["side"] == "quantum"]["n_distinct_parameters"]
@@ -549,6 +799,6 @@ class TestOutputTables:
 
     def test_every_dataset_appears_exactly_once_in_the_verdict_table(self):
         df = synth(n_datasets=12, seed=31)
-        report = select_winners(df, seed=0)
+        report = select_winners(df, test_size=TS, seed=0)
         assert report.per_dataset["Dataset"].is_unique
         assert set(report.per_dataset["Dataset"]) == set(df["Dataset"])

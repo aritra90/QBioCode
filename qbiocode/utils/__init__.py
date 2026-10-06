@@ -70,6 +70,7 @@ from .qc_winner_finder import (
 )
 from .kernel_diagnostics import kernel_report
 from .fair_selection import (
+    TIE_SEPARATOR,
     WinnerReport,
     arm_iteration_table,
     corpus_inference,
@@ -115,6 +116,7 @@ __all__ = [
     "iteration_floor_half_width",
     "model_side",
     "WinnerReport",
+    "TIE_SEPARATOR",
     "checkpoint_restart",
     # Results management
     "track_progress",

@@ -6,10 +6,12 @@
 #   ./status.py --todo | ./submit_runs.sh -  read the list from stdin
 #   DATASET=heart MODEL=qsvc ./submit_runs.sh     filters: anchored regexes on the manifest
 #   EMB=umap ./submit_runs.sh                     columns dataset / embedding / model
+#   HOSTS='cccxc4[0-9]+' ./submit_runs.sh ...    only these candidate hosts (anchored regex)
 #   DRY=1 ./submit_runs.sh                   print the bsub lines, submit nothing
 #   FORCE=1 ./submit_runs.sh ...             submit even configs that are done or live
 #
 # Generate the configs first: ./generate_pilot_configs.py --budget-hours 10.9 --layout split
+# Before submitting, this writes the embedded features the jobs read (step 4 below).
 # Watch: ./status.py      Merge: ./collate_results.py
 #
 # Why one job per model: submit_pilot.sh ran a dataset as one 16-slot job whose wall was
@@ -63,8 +65,15 @@ JOB_PREFIX=p10_
 #
 # Candidates: bhosts ok with >= MIN_FREE free slots, maxmem >= MEM, lsload ok, not a GPU or
 # management host. SPREAD=0 drops -m and lets LSF place everything.
+#
+# HOSTS keeps only the candidates it matches, to put jobs on one host type on purpose --
+# e.g. rerunning a job on the CPU type where it went wrong, to show the fix holds there.
+# The ranking above prefers the fastest type, so without it the rerun would land on
+# whichever type is fastest this cycle. No match is an error rather than a fallback to
+# LSF's placement, which would quietly run the jobs somewhere else.
 # ---------------------------------------------------------------------------
 SPREAD=${SPREAD:-1}
+HOSTS=${HOSTS:-}
 SPREAD_GROUP=${SPREAD_GROUP:-6}
 MIN_FREE=${MIN_FREE:-$SLOTS}
 
@@ -89,10 +98,11 @@ candidate_hosts() {
   awk -v mine="$mine" 'BEGIN {n = split(mine, m, /[[:space:]]+/)
                               for (i = 1; i <= n; i++) {split(m[i], kv, "="); c[kv[1]] = kv[2]}}
                        {print $1, ($1 in c) ? c[$1] : 0, $2, $3}' |
-  sort -k2,2n -k3,3gr -k4,4g | awk '{print $1}'
+  sort -k2,2n -k3,3gr -k4,4g | awk -v re="$HOSTS" 're == "" || $1 ~ ("^(" re ")$") {print $1}'
 }
 
 [ -f "$MANIFEST" ] || { echo "no $MANIFEST -- run generate_pilot_configs.py --layout split first"; exit 1; }
+[ -n "$HOSTS" ] && [ "$SPREAD" != "1" ] && { echo "HOSTS needs SPREAD=1 (it filters SPREAD's candidates)"; exit 1; }
 
 # 1. Candidates: the arguments, stdin ("-"), or every config.
 shopt -s nullglob
@@ -136,10 +146,28 @@ mapfile -t selected < <(
   ' - "$MANIFEST" | LC_ALL=C sort -t$'\t' -k1,1 -k3,3 | cut -f2-)
 [ ${#selected[@]} -eq 0 ] && { echo "no config matched the selection (DATASET='${DATASET:-}' EMB='${EMB:-}' MODEL='${MODEL:-}')"; exit 1; }
 
+# 4. The embedded features, before any job goes out. A job reads them from its config's
+#    embedding_cache and never computes them, so every job of one (dataset, embedding) sees
+#    the same features, whichever host it lands on. Computed in the jobs, seeded UMAP
+#    differed between CPU types. Written here, once, on this host, for exactly the jobs
+#    selected. Files already current are kept, so a resubmit only reads them. A job whose
+#    files are missing stops before fitting anything, so this is not optional. DRY=1 only
+#    checks.
+cfgs=()
+for s in "${selected[@]}"; do cfgs+=("${s%%$'\t'*}"); done
+if [ "${DRY:-0}" = "1" ]; then
+  env $ENVV NUMBA_NUM_THREADS=$THREADS "$PY" -m qbiocode.apps.qprofiler.embedding_cache --check "${cfgs[@]}" >&2 ||
+    echo "WARNING: the embedding cache cannot serve these jobs yet; a real submit writes it first" >&2
+elif ! env $ENVV NUMBA_NUM_THREADS=$THREADS "$PY" -m qbiocode.apps.qprofiler.embedding_cache "${cfgs[@]}" >&2; then
+  echo "!! the embedding cache could not be written (above), so nothing was submitted" >&2
+  exit 1
+fi
+
 N=${#selected[@]}
 hosts=()
 if [ "$SPREAD" = "1" ]; then
   mapfile -t hosts < <(candidate_hosts)
+  [ ${#hosts[@]} -eq 0 ] && [ -n "$HOSTS" ] && { echo "no candidate host matches HOSTS='$HOSTS'; nothing submitted" >&2; exit 1; }
   [ ${#hosts[@]} -eq 0 ] && echo "WARNING: SPREAD found no candidate host; submitting without -m" >&2
 fi
 H=${#hosts[@]}

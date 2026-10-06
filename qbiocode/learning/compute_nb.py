@@ -6,7 +6,7 @@ from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 from sklearn.naive_bayes import GaussianNB
 
 # ====== Additional local imports ======
-from qbiocode.learning._tuning import search_hyperparameters
+from qbiocode.learning._tuning import search_hyperparameters, seed_from, tuning_scorer
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Scikit-learn imports ======
@@ -133,12 +133,13 @@ def compute_nb_opt(
         y_train,
         cv=cv,
         tuner=tuner,
+        scoring=tuning_scorer(args),
         n_trials=n_trials,
         # GaussianNB has no `random_state`, so `model_run._seeded_kwargs` does not give
         # this function one to pass on, and there is nothing to fix on the estimator.
         # The sampler still needs a seed or a range over `var_smoothing` would search
         # differently on every run, so read the run's seed straight off the config.
-        seed=args.get("seed") if isinstance(args, dict) else None,
+        seed=seed_from(args),
     )
     best_nb = GaussianNB(**best_params)
     best_nb.fit(X_train, y_train)

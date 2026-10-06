@@ -40,6 +40,7 @@ tuned" so switching ``tuner`` cannot change *which* hyperparameters are searched
 
 import contextlib
 import io
+import logging
 import math
 import tempfile
 import time
@@ -47,6 +48,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 
 import optuna
+from sklearn.metrics import f1_score, get_scorer, make_scorer
 from sklearn.model_selection import GridSearchCV, cross_val_score
 
 from qbiocode.learning._grid import build_param_grid, to_plain
@@ -55,6 +57,163 @@ from qbiocode.learning._grid import build_param_grid, to_plain
 # each running inside a joblib worker that interleaves its stdout with the others,
 # that is a few hundred lines of noise around the one number anybody wanted.
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
+#: Config key naming the metric every tuner selects hyperparameters on.
+TUNING_METRIC_KEY = "tuning_metric"
+#: What an absent ``tuning_metric`` means. Balanced accuracy, because that is what the
+#: study reports on a corpus where several datasets are 90/10 or worse: tuning on plain
+#: accuracy there rewards a configuration for predicting the majority class, and then
+#: the headline column scores it on something else. ``'accuracy'`` reproduces the pilot.
+DEFAULT_TUNING_METRIC = "balanced_accuracy"
+
+#: The one place a tuning metric is defined. Each name is BOTH a key of the metrics
+#: dict ``modeleval`` writes (which is what the quantum tuner reads back) AND something
+#: the classical tuners can hand to ``cross_val_score``/``GridSearchCV`` as ``scoring``,
+#: and the two compute the same number from the same predictions. The value takes the
+#: run's ``average`` (only ``f1_score`` reads it) and returns the sklearn ``scoring``.
+#:
+#: Deliberately left out: ``auc`` and ``pr_auc``. ``modeleval`` records NaN for them on
+#: a multiclass target and for an estimator that publishes no ranking, where sklearn's
+#: ``roc_auc``/``average_precision`` scorers raise or switch to a one-vs-rest average --
+#: so the classical and quantum sides would not be selecting on the same statistic.
+_TUNING_METRICS = {
+    "accuracy": lambda average: "accuracy",
+    # adjusted=False on both sides: modeleval calls balanced_accuracy_score bare.
+    "balanced_accuracy": lambda average: "balanced_accuracy",
+    "mcc": lambda average: "matthews_corrcoef",
+    # modeleval's F1 is averaged by args['average'] with zero_division=0; the stock
+    # 'f1_weighted' scorer would agree only at one averaging and warn where this does not.
+    "f1_score": lambda average: make_scorer(f1_score, average=average, zero_division=0),
+}
+
+
+def tuning_metric(args):
+    """The validated ``tuning_metric`` of a run, defaulting to balanced accuracy.
+
+    Args:
+        args (Mapping or None): The run's config; a Hydra ``DictConfig`` works too.
+
+    Returns:
+        str: One of the keys of ``_TUNING_METRICS``, which is also the ``modeleval``
+        metrics-dict key the quantum tuner scores on.
+
+    Raises:
+        ValueError: If the config names a metric that has no exact equivalent on both
+            the classical and the quantum side. ``model_run`` calls this before any
+            model is fitted.
+    """
+    metric = args.get(TUNING_METRIC_KEY) if isinstance(args, Mapping) else None
+    if metric is None:
+        return DEFAULT_TUNING_METRIC
+    if metric not in _TUNING_METRICS:
+        raise ValueError(
+            f"Unknown tuning_metric {metric!r}. Choose one of {sorted(_TUNING_METRICS)}: "
+            f"each is computed identically by the classical cross-validation scorer and "
+            f"by modeleval, which scores the quantum candidates. 'accuracy' reproduces "
+            f"runs made before this key existed; {DEFAULT_TUNING_METRIC!r} is the default."
+        )
+    return str(metric)
+
+
+class TuningScorer:
+    """A sklearn ``scoring`` callable that also knows which tuning metric it is.
+
+    Built by :func:`tuning_scorer` from a run's config and handed to
+    :func:`search_hyperparameters`, so the classical tuners score exactly what
+    ``tuning_metric`` names and :class:`TunedParams` can report it by that name. The
+    underlying sklearn scorer is resolved on each call rather than stored, which keeps
+    the object trivially picklable into a joblib worker.
+
+    Args:
+        metric (str): A key of ``_TUNING_METRICS``.
+        average (str): ``f1_score``'s averaging, as ``modeleval`` reads it from
+            ``args['average']``. Ignored by the other metrics.
+    """
+
+    def __init__(self, metric=DEFAULT_TUNING_METRIC, average="weighted"):
+        self.metric = tuning_metric({TUNING_METRIC_KEY: metric})
+        self.average = average
+
+    def sklearn_scoring(self):
+        """The scorer sklearn would build for this metric."""
+        scoring = _TUNING_METRICS[self.metric](self.average)
+        return get_scorer(scoring) if isinstance(scoring, str) else scoring
+
+    def __call__(self, estimator, X, y):
+        return self.sklearn_scoring()(estimator, X, y)
+
+    def __repr__(self):
+        return f"TuningScorer(metric={self.metric!r}, average={self.average!r})"
+
+
+def tuning_scorer(args):
+    """The :class:`TuningScorer` a run's config asks for.
+
+    Reads ``tuning_metric`` and, for ``f1_score``, ``average`` -- the same key and the
+    same fallback (``'weighted'``) ``modeleval`` uses, so a tuned F1 and a reported F1
+    are one statistic.
+    """
+    average = (args.get("average") if isinstance(args, Mapping) else None) or "weighted"
+    return TuningScorer(tuning_metric(args), average=average)
+
+
+def _scoring_parts(scoring):
+    """``(metric name, sklearn scoring)`` for whatever a caller passed as ``scoring``.
+
+    ``None`` means the default metric; a :class:`TuningScorer` or a tuning-metric name
+    is resolved through the table; anything else (a sklearn scorer name such as
+    ``'roc_auc'``, or a callable) is passed to sklearn untouched and reported under its
+    own name.
+    """
+    if scoring is None:
+        scoring = TuningScorer()
+    elif isinstance(scoring, str) and scoring in _TUNING_METRICS:
+        scoring = TuningScorer(scoring)
+    if isinstance(scoring, TuningScorer):
+        return scoring.metric, scoring
+    return (scoring if isinstance(scoring, str) else repr(scoring)), scoring
+
+
+class TunedParams(dict):
+    """The best hyperparameters of a search, plus how well they scored.
+
+    A plain ``dict`` of the chosen hyperparameters in every respect a caller relies on
+    -- ``Estimator(**params)``, ``==``, ``str`` and ``repr`` (so the ``BestParams_Tuned``
+    CSV text is unchanged), JSON -- with the selection evidence carried as attributes
+    rather than keys. Keys would reach the estimator as keyword arguments.
+
+    Defined at module level so it pickles by reference through joblib's loky workers,
+    and ``dict`` subclasses pickle their instance ``__dict__`` along with the items, so
+    the attributes survive the trip.
+
+    Attributes:
+        metric (str or None): The tuning metric the search maximised.
+        score (float): Mean cross-validated score (classical) or inner-holdout score
+            (quantum) of the chosen configuration; NaN when unknown -- a frozen payload
+            written before scores were recorded.
+        n_trials (int or None): Configurations evaluated, where cheaply known.
+        reused (bool): True when the parameters came from the frozen cache of an
+            earlier resample rather than a search on this one.
+    """
+
+    def __init__(self, params=(), *, metric=None, score=float("nan"), n_trials=None,
+                 reused=False):
+        super().__init__(params)
+        self.metric = metric
+        self.score = float(score) if score is not None else float("nan")
+        self.n_trials = n_trials
+        self.reused = bool(reused)
+
+    def evidence(self):
+        """The three results-row fields this search reports alongside its parameters."""
+        return {
+            "tuning_metric": self.metric,
+            "tuning_score": self.score,
+            "tuning_reused": self.reused,
+        }
+
 
 #: Keys a range mapping may carry. Anything else is a typo worth reporting: Optuna
 #: would otherwise raise about a distribution the user never named.
@@ -274,12 +433,17 @@ def _finite_size(space):
     return total
 
 
-def run_study(estimator_cls, space, X, y, *, cv, n_trials, model=None, seed=None, fixed=None):
+def run_study(
+    estimator_cls, space, X, y, *, cv, n_trials, model=None, seed=None, fixed=None,
+    scoring=None,
+):
     """Search ``space`` with Optuna and return the best hyperparameters found.
 
-    Scored by ``cross_val_score(...).mean()`` with the estimator's own ``score``,
-    which for a classifier is accuracy -- the same objective ``GridSearchCV`` used
-    by default, so a tuned score stays comparable to one from before this change.
+    Scored by ``cross_val_score(..., scoring=scoring).mean()``. The scorer defaults to
+    balanced accuracy, the statistic the study reports; it used to be the estimator's
+    own ``score`` -- accuracy for a classifier -- which on an imbalanced dataset selects
+    for majority-class prediction. Pass ``scoring='accuracy'`` (or set
+    ``tuning_metric: accuracy``) to reproduce a search made before that change.
 
     Args:
         estimator_cls (type): Estimator to construct for each trial.
@@ -297,12 +461,18 @@ def run_study(estimator_cls, space, X, y, *, cv, n_trials, model=None, seed=None
             ``args['seed']``. ``None`` leaves Optuna drawing from the global RNG.
         fixed (dict or None): Passed to every trial's estimator but not searched --
             ``random_state`` in practice.
+        scoring (TuningScorer, str, callable or None): What each trial maximises. A
+            :class:`TuningScorer` (see :func:`tuning_scorer`) or a tuning-metric name;
+            any other sklearn ``scoring`` is passed through. ``None`` means balanced
+            accuracy.
 
     Returns:
-        dict: The best trial's hyperparameters, in the same shape
-        ``GridSearchCV.best_params_`` returned, so callers refit unchanged.
+        TunedParams: The best trial's hyperparameters, in the same shape
+        ``GridSearchCV.best_params_`` returned, so callers refit unchanged -- with the
+        metric, its best mean CV score and the number of trials run as attributes.
     """
     fixed = dict(fixed or {})
+    metric, scoring = _scoring_parts(scoring)
     # The config key where the caller supplied one, not `estimator_cls.__name__`: every
     # other message in this module names the model as the config spells it ('rf'), which
     # is what makes "gridsearch_rf_args" findable. 'RandomForestClassifier' appears in no
@@ -321,7 +491,7 @@ def run_study(estimator_cls, space, X, y, *, cv, n_trials, model=None, seed=None
             # is information, not a problem to report: the score it earns is what
             # steers the sampler away. GridSearchCV was equally quiet about it.
             warnings.simplefilter("ignore")
-            scores = cross_val_score(estimator, X, y, cv=cv)
+            scores = cross_val_score(estimator, X, y, cv=cv, scoring=scoring)
         score = float(scores.mean())
         return score if math.isfinite(score) else float("-inf")
 
@@ -336,7 +506,9 @@ def run_study(estimator_cls, space, X, y, *, cv, n_trials, model=None, seed=None
     # without a traceback. Parallelism belongs at the model level, where it already is.
     with _suppress_unstorable_choice_warning():
         study.optimize(objective, n_trials=n_trials, n_jobs=1)
-    return dict(study.best_params)
+    return TunedParams(
+        study.best_params, metric=metric, score=study.best_value, n_trials=len(study.trials)
+    )
 
 
 def search_hyperparameters(
@@ -351,6 +523,7 @@ def search_hyperparameters(
     n_trials=50,
     seed=None,
     fixed=None,
+    scoring=None,
 ):
     """Run whichever search ``tuner`` names, and return the best hyperparameters.
 
@@ -383,12 +556,18 @@ def search_hyperparameters(
             are not searched -- ``random_state``, and CatBoost's quiet flags and resolved
             ``bootstrap_type``. The grid engine gets them by constructing its estimator
             with them, which is what the per-model code was already doing by hand.
+        scoring (TuningScorer, str, callable or None): What both engines maximise --
+            ``cross_val_score(scoring=...)`` for Optuna, ``GridSearchCV(scoring=...)``
+            for the grid. Each ``compute_*_opt`` passes ``tuning_scorer(args)``. ``None``
+            means balanced accuracy; ``'accuracy'`` restores the old default.
 
     Returns:
-        dict: The best hyperparameters found, in the shape ``GridSearchCV.best_params_``
-        returned, so callers refit unchanged.
+        TunedParams: The best hyperparameters found, in the shape
+        ``GridSearchCV.best_params_`` returned, so callers refit unchanged, carrying
+        the metric and the best mean cross-validated score as attributes.
     """
     fixed = dict(fixed or {})
+    metric, scoring = _scoring_parts(scoring)
     # Optuna by default; the exhaustive grid stays reachable so a number published
     # against it can still be reproduced. Both engines are handed the same `candidates`,
     # so switching `tuner` never changes *which* hyperparameters are searched -- only how
@@ -398,9 +577,15 @@ def search_hyperparameters(
             estimator_cls(**fixed),
             param_grid=build_param_grid(model, candidates),
             cv=cv,
+            scoring=scoring,
         )
         search.fit(X_train, y_train)
-        return dict(search.best_params_)
+        return TunedParams(
+            search.best_params_,
+            metric=metric,
+            score=search.best_score_,
+            n_trials=len(search.cv_results_["params"]),
+        )
     return run_study(
         estimator_cls,
         build_search_space(model, candidates),
@@ -411,6 +596,7 @@ def search_hyperparameters(
         model=model,
         seed=seed,
         fixed=fixed,
+        scoring=scoring,
     )
 
 
@@ -425,8 +611,8 @@ def search_hyperparameters(
 # go straight from raw arrays to a `modeleval` frame. Exposing an sklearn-compatible
 # estimator from each would mean restructuring five functions that already work.
 #
-# So the objective calls the compute function itself and reads the accuracy back out of
-# the frame. Two consequences worth knowing:
+# So the objective calls the compute function itself and reads the configured
+# `tuning_metric` back out of the frame's metrics dict. Two consequences worth knowing:
 #
 #   * Scoring is a single stratified holdout carved from the training data, not k-fold.
 #     A quantum fit computes an n-by-n fidelity kernel by circuit simulation -- seconds,
@@ -471,16 +657,23 @@ def _metric_dicts(frame, model):
     return dicts
 
 
-def _accuracy_of(frame, model):
-    """Score one trial: the mean accuracy across whatever models the frame reports.
+def _metric_of(frame, model, metric=DEFAULT_TUNING_METRIC):
+    """Score one trial: the mean of ``metric`` across whatever models the frame reports.
 
-    For everything but QPL that is a single accuracy. For QPL it averages over the
+    ``metric`` is a ``modeleval`` metrics-dict key -- every name in ``_TUNING_METRICS``
+    is one. For everything but QPL that is a single value. For QPL it averages over the
     classical heads fitted on the quantum projection, which is the point being tuned --
     a projection that is broadly informative. Taking the *best* head instead would let
     one lucky head choose the projection, and the frame reports every head either way.
     """
-    accuracies = [float(metrics["accuracy"]) for metrics in _metric_dicts(frame, model)]
-    return sum(accuracies) / len(accuracies)
+    values = [float(metrics[metric]) for metrics in _metric_dicts(frame, model)]
+    return sum(values) / len(values)
+
+
+def _accuracy_of(frame, model):
+    """:func:`_metric_of` at ``'accuracy'`` -- the objective every run used before
+    ``tuning_metric`` existed."""
+    return _metric_of(frame, model, "accuracy")
 
 
 def ensure_tuning_is_affordable(args, model):
@@ -500,6 +693,19 @@ def ensure_tuning_is_affordable(args, model):
         f"backend: simulator for the tuning run, drop tune_quantum, or -- if you really "
         f"mean to spend device time -- set allow_hardware_tuning: True."
     )
+
+
+def seed_from(args):
+    """The run's ``seed`` for a tuner, from a plain dict or a Hydra ``DictConfig``.
+
+    Not ``isinstance(args, dict)``: ``DictConfig`` is a ``MutableMapping`` and not a
+    ``dict``, so under the CLI -- the only way the pilot runs -- that test failed and
+    the qsvc, pqk, qnn, vqc, qpl and nb tuners were given ``seed=None``. TPE then drew
+    its trials from OS entropy: four tunings of one sonar split, on features with one
+    sha256, picked four different ``C``. The unit tests pass plain dicts, so they never
+    saw it.
+    """
+    return args.get("seed") if isinstance(args, Mapping) else None
 
 
 def run_function_study(
@@ -527,7 +733,9 @@ def run_function_study(
             test set is never touched, so the reported score stays honest.
         y_train (array-like): Training labels.
         args (dict): The run's config. Passed through to ``compute_fn`` because the
-            quantum functions read ``backend``, ``shots`` and ``seed`` from it.
+            quantum functions read ``backend``, ``shots`` and ``seed`` from it. Its
+            ``tuning_metric`` (default ``'balanced_accuracy'``) names the ``modeleval``
+            metric each trial is scored on.
         model (str): Model name, for error messages.
         n_trials (int): Trial budget, lowered to the size of a finite space.
         seed (int or None): Seeds both the sampler and the inner split.
@@ -539,13 +747,15 @@ def run_function_study(
             caller that does not pass it behaves exactly as before.
 
     Returns:
-        dict: The best trial's hyperparameters -- from a fresh search, or from the
-        frozen file written by the first resample when freezing is on.
+        TunedParams: The best trial's hyperparameters -- from a fresh search, or from
+        the frozen file written by the first resample when freezing is on
+        (``.reused`` is then True and ``.score`` is the score recorded when the file
+        was written, NaN for a file from before scores were recorded).
 
     Raises:
-        ValueError: If tuning would run against real hardware without
-            ``allow_hardware_tuning``, if the data cannot be split so that both sides
-            carry every class, or if every trial failed.
+        ValueError: If ``tuning_metric`` is unknown, if tuning would run against real
+            hardware without ``allow_hardware_tuning``, if the data cannot be split so
+            that both sides carry every class, or if every trial failed.
     """
     import numpy as np
     from sklearn.model_selection import train_test_split
@@ -559,8 +769,9 @@ def run_function_study(
     # done with a freshly searched set, and the row keeps its '_opt' label, which matters:
     # a frozen resample labelled '<model>' instead would split one arm across the
     # iteration axis and break the pairing that fair_selection depends on.
+    metric = tuning_metric(args)
     if data_key is not None:
-        frozen = load_frozen_params(args, data_key, model, space)
+        frozen = load_frozen_params(args, data_key, model, space, metric=metric)
         if frozen is not None:
             return frozen
 
@@ -589,7 +800,7 @@ def run_function_study(
     )
 
     # modeleval branches on this key, and reads it with [] rather than .get. The inner
-    # score only needs the accuracy, so take the cheaper branch.
+    # score only needs the metrics row, so take the cheaper branch.
     scoring_args = {**args, "grid_search": False}
 
     size = _finite_size(space)
@@ -610,10 +821,13 @@ def run_function_study(
                         X_inner, X_val, y_inner, y_val, scoring_args,
                         **params, **fixed,
                     )
-            return _accuracy_of(frame, model)
+            score = _metric_of(frame, model, metric)
         except Exception as error:  # noqa: BLE001 -- an unbuildable corner costs a trial
             failures.append(f"{params}: {type(error).__name__}: {error}")
             raise optuna.TrialPruned() from error
+        # Outside the try: a NaN metric is a scored trial, not a failed one. Same
+        # reading as run_study -- the worst possible score, so the sampler moves away.
+        return score if math.isfinite(score) else float("-inf")
 
     study = optuna.create_study(
         direction="maximize",
@@ -653,11 +867,13 @@ def run_function_study(
             UserWarning,
             stacklevel=2,
         )
-    best = dict(study.best_params)
+    best = TunedParams(
+        study.best_params, metric=metric, score=study.best_value, n_trials=len(study.trials)
+    )
     if data_key is not None:
         # Best-effort: a failed write is logged and ignored, costing later resamples a
         # redundant search rather than aborting a sweep hours in over a cache file.
-        save_frozen_params(args, data_key, model, best)
+        save_frozen_params(args, data_key, model, best, metric=metric, score=best.score)
     return best
 
 
@@ -674,8 +890,14 @@ def record_tuned_params(frame, best_params, beg_time):
     values laid over it, which is strictly more informative than either alone: the
     tuned block names ``encoding`` and ``reps``, the base block names the
     ``ZZFeatureMap`` they produced.
+
+    When ``best_params`` is a :class:`TunedParams` -- what :func:`run_function_study`
+    returns -- its ``tuning_metric``, ``tuning_score`` and ``tuning_reused`` are written
+    into each metrics row as well, so the validation score of the chosen configuration
+    reaches ModelResults.csv. The parameter entry itself stays a plain dict.
     """
     elapsed = time.time() - beg_time
+    evidence = best_params.evidence() if isinstance(best_params, TunedParams) else {}
     # QPL reports one row per classical head; each carries its own parameter dict and
     # each understates the time by the whole search, so every one is corrected.
     for metrics in _metric_dicts(frame, "tuned model"):
@@ -685,4 +907,5 @@ def record_tuned_params(frame, best_params, beg_time):
             {**existing, **best_params} if isinstance(existing, dict) else dict(best_params)
         )
         metrics["time"] = elapsed
+        metrics.update(evidence)
     return frame

@@ -26,6 +26,7 @@ from qbiocode.learning._tuning import (
     build_search_space,
     record_tuned_params,
     run_function_study,
+    seed_from,
 )
 from qbiocode.learning._grid import warn_ignored_hyperparameter
 
@@ -475,7 +476,7 @@ def compute_qsvc_opt(
         args,
         model="qsvc",
         n_trials=n_trials,
-        seed=args.get("seed") if isinstance(args, dict) else None,
+        seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
     )

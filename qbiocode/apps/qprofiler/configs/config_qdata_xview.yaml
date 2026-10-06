@@ -133,13 +133,14 @@ n_trials_quantum: 10
 # fits per arm into `n_trials_quantum + (iter - 1)` -- at iter: 5 and
 # n_trials_quantum: 32, from 160 quantum fits to 36.
 #
-# It is not a free lunch, and the direction of the bias matters. The frozen
-# configuration was chosen on iteration 0's training split, so on later iterations it is
-# a configuration selected elsewhere: never better than a fresh search would have found
-# there. The classical side re-searches every iteration and keeps its full advantage. So
-# quantum is measured at a handicap classical does not carry, and a quantum win observed
-# under this setting is a LOWER BOUND on the win a symmetric budget would show. State
-# that; do not describe the protocol as symmetric.
+# It is not a free lunch, and the bias is OPTIMISTIC for the frozen (quantum) arm, not a
+# handicap. The resamples are overlapping random holdouts: in the pilot, 73-87% of a
+# later iteration's test rows were training rows of iteration 0, the rows the frozen
+# configuration was searched on. The classical side re-searches every iteration, so its
+# test rows never influenced its own selection. The measured effect was small (a
+# difference-in-differences of about -0.02 balanced accuracy, not significant), but a
+# quantum win under this setting is NOT a lower bound. Confirmatory runs should set this
+# to False or use disjoint-fold splits; do not describe the protocol as symmetric.
 #
 # Cached as one JSON file per (dataset, embedding, n_components, model) under
 # quantum_param_dir. Editing a gridsearch_<model>_args block invalidates the cache for

@@ -16,6 +16,7 @@ from qbiocode.learning._tuning import (
     build_search_space,
     record_tuned_params,
     run_function_study,
+    seed_from,
 )
 
 
@@ -163,8 +164,8 @@ def compute_vqc_opt(
     The quantum counterpart of the classical ``compute_*_opt`` functions, and driven by
     the same ``gridsearch_vqc_args`` config block -- a list is a choice, a
     ``{low, high}`` mapping is a range. It differs in how a candidate is scored: a
-    quantum fit builds an n-by-n fidelity kernel by circuit simulation, so scoring by
-    k-fold cross-validation would multiply an already expensive search by k. Each trial
+    quantum fit simulates the variational circuit at every optimizer step, so scoring
+    by k-fold cross-validation would multiply an already expensive search by k. Each trial
     is scored once, on a stratified holdout carved out of ``X_train``; the caller's test
     set is never touched by the search.
 
@@ -221,7 +222,7 @@ def compute_vqc_opt(
         args,
         model="vqc",
         n_trials=n_trials,
-        seed=args.get("seed") if isinstance(args, dict) else None,
+        seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
     )

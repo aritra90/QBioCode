@@ -586,10 +586,16 @@ def get_embeddings(
             ``'nmf'``, ``'lle'`` and ``'spectral'``. None keeps each estimator's own
             default, which for UMAP means numpy's global stream AND numba-parallel SGD --
             not reproducible even from a fixed ``np.random.seed``, because the parallel
-            updates race. An int makes the result a function of the data and the seed
-            alone: UMAP then runs its deterministic single-threaded path. That matters
-            whenever two processes must see the same features, e.g. one LSF job per model
-            on the same split.
+            updates race. With an int, UMAP runs its deterministic single-threaded path,
+            and repeat calls on the same CPU type agree bit for bit. Calls on *different*
+            CPU types do not. numba compiles UMAP's fastmath kernels for the host's
+            instruction set, and the SGD epochs amplify the last-bit differences: on
+            the 2026 pilot, jobs on three host types computed three different UMAP
+            embeddings of every split. PCA varies with BLAS and LAPACK in the same way,
+            though only in the last bits. When processes on different machines must see
+            the same features, e.g.
+            one LSF job per model on the same split, compute the embedding once and
+            share it. QProfiler's ``embedding_cache`` does that.
 
     Returns:
         tuple: ``(X_train_embedded, X_test_embedded)``.

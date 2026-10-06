@@ -217,9 +217,13 @@ def fair_winner(
     metric="f1_score",
     epsilon=0.027,
     alpha=0.05,
-    test_size=0.3,
+    test_size=None,
     seed=0,
     baseline=None,
+    *,
+    margin=0.0,
+    fdr=0.10,
+    controls=None,
 ):
     """Unbiased counterpart to :func:`qml_winner`; writes the tables a paper can cite.
 
@@ -241,12 +245,23 @@ def fair_winner(
         output_dir (str): directory for the output CSVs.
         tag (str): filename prefix.
         metric (str): column to compare; higher must be better. Not just ``f1_score``.
-        epsilon (float): margin for an unequivocal win, applied as ``abs(delta) >
-            epsilon`` to the whole confidence interval rather than to the point estimate.
-        alpha (float): two-sided level, also the Benjamini-Hochberg FDR level.
+        epsilon (float): the TOST equivalence bound only: a dataset is ``equivalent``
+            when its whole confidence interval lies inside ``(-epsilon, +epsilon)``. It
+            plays no part in deciding a win; that is ``margin``.
+        alpha (float): two-sided level of the per-dataset intervals, and of the Holm
+            family of ``controls``.
         test_size (float): the split fraction the run used, for the Nadeau-Bengio term.
-        seed (int): seeds tie-breaking so exact ties do not resolve alphabetically.
+            Required: ModelResults.csv does not record it, so ``None`` raises
+            ``ValueError`` (from ``select_winners``). The pilot used 0.2.
+        seed (int): unused; kept so existing calls still work. Ties are averaged, so
+            the result does not depend on any seed.
         baseline (pandas.DataFrame): optional ``['Dataset', metric]`` dummy floor.
+        margin (float): pre-registered superiority margin. A raw win needs the whole
+            interval beyond ``-margin`` (quantum) or ``+margin`` (classical). Default 0.
+        fdr (float): Benjamini-Hochberg level of the discovery family, in ``(0, 1)``.
+        controls (str | Iterable[str] | None): datasets forming a separate
+            Holm-adjusted family (e.g. synthetic controls), left out of the BH family and
+            of ``report.quantum_datasets`` / ``classical_datasets``.
 
     Returns:
         qbiocode.utils.fair_selection.WinnerReport: verdicts, per-arm means, the arm
@@ -260,6 +275,9 @@ def fair_winner(
         test_size=test_size,
         seed=seed,
         baseline=baseline,
+        margin=margin,
+        fdr=fdr,
+        controls=controls,
     )
     os.makedirs(output_dir, exist_ok=True)
     report.per_dataset.to_csv(os.path.join(output_dir, tag + "_fair_verdicts.csv"), index=False)
@@ -363,9 +381,23 @@ def resolution_floor_epsilon(results_df, metric, test_size, alpha=0.05):
     the metrics are not on one scale -- MCC spans [-1, 1] where accuracy spans [0, 1], so a
     single shared epsilon is twice as strict on one as on the other.
 
-    ``s`` is pooled *within* (dataset, arm) across iterations, never across datasets:
-    between-dataset spread is the signal being studied, and folding it in would inflate the
-    floor until nothing could ever be called.
+    ``s`` is pooled *within* (dataset, embedding pass, arm, model) across iterations, never
+    across datasets: between-dataset spread is the signal being studied, and folding it in
+    would inflate the floor until nothing could ever be called. The same goes for the
+    embedding: a dataset's PCA and UMAP passes differ in mean, and pooling them into one
+    group adds that difference to ``s`` (pilot: 0.0688 pooled vs 0.0633 per pass). The
+    ``embeddings`` column joins the key whenever the frame has one.
+
+    Args:
+        results_df (pandas.DataFrame): ModelResults-shaped frame with ``Dataset``,
+            ``model``, ``iteration`` and ``metric``; ``embeddings`` if present.
+        metric (str): the metric column.
+        test_size (float): the run's split fraction, for the Nadeau-Bengio term.
+        alpha (float): two-sided level of the interval.
+
+    Returns:
+        tuple[float, float]: ``(epsilon, sigma)``; ``epsilon`` is NaN when ``sigma`` is
+        not a positive finite number.
     """
     from qbiocode.utils.fair_selection import (
         iteration_floor_half_width,
@@ -374,7 +406,10 @@ def resolution_floor_epsilon(results_df, metric, test_size, alpha=0.05):
 
     df = results_df.dropna(subset=[metric]).copy()
     df["arm"] = df["model"].map(model_side)
-    per_group = df.groupby(["Dataset", "arm", "model"])[metric].std(ddof=1)
+    key = ["Dataset", "embeddings", "arm", "model"] if "embeddings" in df else [
+        "Dataset", "arm", "model"]
+    # dropna=False: a missing embedding label is its own pass, not a reason to lose rows.
+    per_group = df.groupby(key, dropna=False)[metric].std(ddof=1)
     sigma = float(np.nanmean(per_group.to_numpy())) if len(per_group) else np.nan
     if not np.isfinite(sigma) or sigma <= 0:
         return np.nan, sigma
@@ -389,6 +424,10 @@ def delta_metric_table(
     test_size=None,
     seed=0,
     baseline=None,
+    *,
+    margin=0.0,
+    fdr=0.10,
+    controls=None,
 ):
     """One row per dataset, one column block per metric: delta, interval, verdict.
 
@@ -408,10 +447,14 @@ def delta_metric_table(
     Args:
         results_df (pandas.DataFrame): pooled ModelResults-shaped frame.
         metrics (Sequence[str]): metric columns to compare. Higher must be better.
-        epsilon (float | Mapping[str, float] | None): the margin. A float applies to every
-            metric; a mapping gives one per metric; ``None`` derives each from
-            :func:`resolution_floor_epsilon`, which is the recommended default.
-        alpha, test_size, seed, baseline: forwarded to ``select_winners``.
+        epsilon (float | Mapping[str, float] | None): the TOST equivalence bound (it no
+            longer decides wins; ``margin`` does). A float applies to every metric; a
+            mapping gives one per metric; ``None`` derives each from
+            :func:`resolution_floor_epsilon`, the smallest bound this design can certify.
+        test_size (float): the run's split fraction. Required; ``None`` raises
+            ``ValueError``.
+        alpha, seed, baseline, margin, fdr, controls: forwarded to ``select_winners``
+            (``seed`` is unused there).
 
     Returns:
         tuple[pandas.DataFrame, dict]: the wide per-dataset table, and
@@ -420,7 +463,12 @@ def delta_metric_table(
     from qbiocode.utils.fair_selection import select_winners
 
     if test_size is None:
-        raise TypeError("test_size is required; see aggregate_benchmark's note on why.")
+        # Checked here, not left to select_winners, because resolution_floor_epsilon needs
+        # it first.
+        raise ValueError(
+            "test_size is required: the Nadeau-Bengio correction depends on the run's "
+            "split fraction, which ModelResults.csv does not record (the pilot used 0.2)."
+        )
     present = [m for m in metrics if m in results_df.columns]
     missing = [m for m in metrics if m not in results_df.columns]
     if not present:
@@ -458,6 +506,9 @@ def delta_metric_table(
             test_size=test_size,
             seed=seed,
             baseline=baseline,
+            margin=margin,
+            fdr=fdr,
+            controls=controls,
         )
         reports[metric] = report
         if report.per_dataset.empty:
@@ -473,14 +524,18 @@ def delta_metric_table(
                 "se",
                 "ci_lo",
                 "ci_hi",
-                "p_margin",
+                "p_value",
+                "within_equivalence",
                 "verdict_raw",
+                "family",
                 "verdict_adjusted",
+                "p_adjusted",
             )
             if c in report.per_dataset.columns
         ]
         block = report.per_dataset[keep].copy()
         block["epsilon"] = eps
+        block["margin"] = float(margin)
         # Suffix rather than prefix so the frame sorts by dataset-level column then metric,
         # which keeps every column for one metric adjacent when the table is printed wide.
         block = block.rename(
@@ -513,6 +568,10 @@ def aggregate_benchmark(
     seed=0,
     baseline=None,
     kernels_root=None,
+    *,
+    margin=0.0,
+    fdr=0.10,
+    controls=None,
 ):
     """Walk per-dataset run directories and write the corpus-level tables.
 
@@ -536,7 +595,14 @@ def aggregate_benchmark(
     ``<tag>_verdict_summary.csv``
         Verdict counts per metric -- the agreement check. If balanced accuracy and MCC
         disagree about a dataset, that disagreement is a finding about the dataset's class
-        balance, not a number to average away.
+        balance, not a number to average away. Counts cover the discovery family only;
+        ``n_controls`` counts the control datasets, and ``margin``/``fdr`` record the
+        rule the verdicts were judged under.
+
+    ``epsilon`` is the equivalence bound only (``None`` derives it per metric from
+    :func:`resolution_floor_epsilon`); wins are judged against ``margin`` and the
+    Benjamini-Hochberg level ``fdr``. ``margin``, ``fdr`` and ``controls`` are forwarded to
+    :func:`delta_metric_table`.
 
     Returns:
         dict: ``{'results', 'inventory', 'delta_metrics', 'reports', 'summary',
@@ -546,8 +612,8 @@ def aggregate_benchmark(
         raise TypeError(
             "test_size is required: it is the 'test_size' of the run that produced these "
             "results, and the Nadeau-Bengio standard error s*sqrt(1/I + r) with "
-            "r = test_size/(1-test_size) is a function of it. The pilot configs set 0.21, "
-            "so aggregate_benchmark(..., test_size=0.21). There is deliberately no default "
+            "r = test_size/(1-test_size) is a function of it. The pilot configs set 0.2, "
+            "so aggregate_benchmark(..., test_size=0.2). There is deliberately no default "
             "-- a wrong one does not fail, it just reports intervals and verdicts for an "
             "experiment nobody ran."
         )
@@ -577,20 +643,33 @@ def aggregate_benchmark(
         test_size=test_size,
         seed=seed,
         baseline=baseline,
+        margin=margin,
+        fdr=fdr,
+        controls=controls,
     )
 
     summary_rows = []
     for metric, report in reports.items():
+        # Counted over the discovery family only, like report.quantum_datasets: control
+        # datasets are judged in their own Holm family and reported as n_controls.
+        pdr = report.per_dataset
+        is_control = (
+            pdr["family"] == "control" if "family" in pdr else pd.Series(False, index=pdr.index)
+        )
+        discovery = pdr[~is_control]
         counts = (
-            report.per_dataset["verdict_adjusted"].value_counts().to_dict()
-            if "verdict_adjusted" in report.per_dataset
+            discovery["verdict_adjusted"].value_counts().to_dict()
+            if "verdict_adjusted" in discovery
             else {}
         )
         summary_rows.append(
             {
                 "metric": metric,
                 "epsilon": report.epsilon,
-                "n_datasets": len(report.per_dataset),
+                "margin": report.margin,
+                "fdr": report.fdr,
+                "n_datasets": len(discovery),
+                "n_controls": int(is_control.sum()),
                 "quantum_wins": counts.get("quantum_wins", 0),
                 "classical_wins": counts.get("classical_wins", 0),
                 "equivalent": counts.get("equivalent", 0),

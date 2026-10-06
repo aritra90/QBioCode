@@ -182,15 +182,40 @@ class TestTheSeedPlusIterationContract:
             "two iterations drew the same test set: seed + iter is colliding"
         )
 
-    def test_the_source_derives_the_split_seed_from_the_configured_seed(self):
-        """Guards the derivation itself, which no unit test can reach directly."""
-        source = (PACKAGE_ROOT / "apps" / "qprofiler" / "qprofiler.py").read_text(
-            encoding="utf-8"
+    @pytest.mark.parametrize("stratify", [[], ["y"]], ids=["unstratified", "stratified"])
+    def test_qprofilers_split_is_train_test_split_at_seed_plus_iter(self, stratify):
+        """The derivation itself, through the function main and the embedding cache share."""
+        from qbiocode.apps.qprofiler import qprofiler as qp
+
+        X = np.random.default_rng(0).normal(size=(50, 3))
+        y = np.array([0, 1] * 25)
+        args = {"seed": 42, "test_size": 0.3, "stratify": stratify}
+        for it in (1, 2, 5):
+            assert qp._split_seed(args, it) == 42 + it
+            got = qp._split_and_scale(X, y, args, it, "None")
+            want = train_test_split(X, y, test_size=0.3, random_state=42 + it,
+                                    stratify=y if stratify else None)
+            for g, w in zip(got[:4], want):
+                np.testing.assert_array_equal(g, w)
+            # The row indices it returns are the rows on each side, which is what a cached
+            # embedding is checked against.
+            train_idx, test_idx = got[4:]
+            np.testing.assert_array_equal(X[train_idx], got[0])
+            np.testing.assert_array_equal(X[test_idx], got[1])
+
+    def test_main_splits_only_through_the_shared_function(self):
+        """A second split written into main could be seeded differently from the cache's."""
+        tree = ast.parse(
+            (PACKAGE_ROOT / "apps" / "qprofiler" / "qprofiler.py").read_text(encoding="utf-8")
         )
-        assert "split_seed = args['seed'] + iter" in source
-        assert source.count("random_state=split_seed") == 2, (
-            "both the stratified and unstratified train_test_split calls must be seeded"
-        )
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        called = {
+            node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call)
+        }
+        assert "_split_and_scale" in called
+        assert not called & SEEDED_SPLITTERS, "main calls a splitter directly"
 
 
 class TestLinkPredictionSplitsLeaveGlobalStateAlone:

@@ -356,6 +356,46 @@ embeddings, whose output width does not depend on the feature count. If you want
 embedding on a narrow table, set `embedding_min_features: 0`.
 ```
 
+#### Sharing one embedding across jobs: `embedding_cache`
+
+By default each run computes its own embeddings, seeded by the split. That is
+reproducible on one machine type, which is all a single run needs. It is **not
+reproducible across CPU types**: UMAP's numba kernels are compiled for the host's
+instruction set, and its SGD epochs amplify the last-bit differences that leaves.
+Randomized PCA, which wide datasets use, depends on BLAS the same way, though only in the
+last bits. An experiment split into one cluster job per model therefore scores its models
+on different features whenever the jobs land on different host types. The 2026 pilot did
+exactly that, with UMAP condition numbers up to 57% apart between jobs of one
+(dataset, embedding).
+
+`embedding_cache` removes the per-job computation. Every embedding except `'none'` is
+computed once, before any job starts, and read by every job:
+
+```yaml
+embedding_cache: /abs/path/to/embeddings   # null (the default): compute in each run
+```
+
+```bash
+# Write the files for every config that will run: one per (dataset, embedding, split),
+# however many configs share it. Files that are already current are kept.
+python -m qbiocode.apps.qprofiler.embedding_cache runs/*/*.yaml
+python -m qbiocode.apps.qprofiler.embedding_cache --check runs/*/*.yaml   # write nothing
+```
+
+- **The path must be absolute.** Hydra runs each job from its own output directory.
+- **A job never falls back to computing.** Before fitting anything it checks that every
+  file it will read exists and carries its own settings, and otherwise it stops with a
+  list of the missing or stale files. The settings compared are the dataset's
+  sha256, `index_col`, the split (`seed` plus the split number, `test_size`, `stratify`),
+  `scaling`, the embedding name, `n_components`, `n_neighbors` and `quvine_args`. Each
+  file also stores the dataset rows it was embedded from, and the job checks those
+  against its own split.
+- **A stale file is reported, not replaced**, because other jobs may still read it.
+  Replace it with `--force`, or point the config at a new directory.
+- Each file also records where, when and with which library versions it was computed.
+  The job logs a sha256 of the features it used for every pass, so the logs of two jobs
+  show whether they saw the same features.
+
 ### Train/Test Split
 
 Configure data splitting and preprocessing.
@@ -446,6 +486,25 @@ region that has been scoring well. `tuner: grid` restores the exhaustive
 block below is 576 combinations, or 2,880 fits at `cross_validation: 5`. Ranges
 require `tuner: optuna`; under `tuner: grid` every entry must be a list.
 
+**What the search optimises.** `tuning_metric` names the statistic every tuner selects
+on, classical and quantum alike:
+
+```yaml
+tuning_metric: balanced_accuracy   # default; or accuracy, mcc, f1_score
+```
+
+Each choice is computed identically by the classical cross-validation scorer and by
+`modeleval`, which scores the quantum candidates, so both sides select on the same number.
+`auc` and `pr_auc` are not offered, because the two sides would not agree on them for a
+multiclass target. `f1_score` uses the run's `average`. An unknown name is refused before
+any model is fitted. The default was plain accuracy before this key existed; set
+`tuning_metric: accuracy` to reproduce such a run (the pilot10 runs among them).
+
+A tuned row also records the evidence behind its parameters in three columns,
+`tuning_metric`, `tuning_score` (the winning cross-validated score) and `tuning_reused`
+(True when the parameters came from the frozen cache, see below). They are bookkeeping,
+not meta-features, and the meta-regression excludes them.
+
 #### Tuning the quantum models
 
 The quantum classifiers (`qsvc`, `vqc`, `qnn`, `pqk`, `qpl`) tune through the same
@@ -503,6 +562,18 @@ gridsearch_qpl_args:    # same keys as pqk
   entanglement: ['linear', 'full']
 ```
 
+`pqk` and `qpl` also take a `data_map`, the rule that turns features into gate angles, in
+their `pqk_args`/`qpl_args` or as a searched key:
+
+| `data_map` | angle for a feature pair | |
+|---|---|---|
+| `'unit'` (default) | `x_i * x_j` | the historical map; keeps existing cache files and rows |
+| `'qiskit'` | `(pi - x_i)(pi - x_j)` | qiskit's default, the map the `eng_zz` datasets are generated with |
+
+The booleans of the `pqk` embedding are accepted too (`True` is `'unit'`, `False` is
+`'qiskit'`), and any other value is refused before anything is written. The two maps never
+share a projection file, and only a non-default map is recorded in the results row.
+
 What is tunable per model:
 
 | Model | Tunable |
@@ -541,6 +612,9 @@ QPL is scored on the **mean** accuracy across the classical heads it fits on the
 projection, which is what tuning the projection is meant to improve. Taking the best head
 instead would let one lucky head choose the projection, and every head is reported anyway.
 
+(The statistic averaged is the run's `tuning_metric`, which defaults to balanced accuracy;
+it is accuracy only under `tuning_metric: accuracy`.)
+
 #### Freezing the quantum search across iterations
 
 Leaving `tune_quantum: False` while `grid_search: True` is the cheap configuration and it
@@ -576,6 +650,21 @@ classical does not carry, so a quantum win observed under this setting is a **lo
 on the win a symmetric budget would show. That asymmetry is acceptable precisely because it
 points away from the interesting claim, but it has to be reported as what it is, and the
 protocol must not be described as symmetric.
+
+**Correction: the handicap above does not hold, and the lower-bound claim is withdrawn.**
+Iterations resample the same data, so iteration 0's training split overlaps each later
+iteration's test rows heavily (73-87% in the pilot). A configuration frozen on iteration 0
+has therefore been selected partly on rows it is later scored on, which is *optimistic*
+for quantum, not a handicap, while the classical side's test rows never influence its own
+selection. The measured effect in the pilot was small (a difference-in-differences of about
+-0.02 balanced accuracy, not significant); the direction is what matters. A quantum win under
+`freeze_quantum_params: True` is not a lower bound on anything. For a claim about a
+quantum win, set it to `False`, or tune the frozen search on folds disjoint from every
+later test split.
+
+Frozen files also record the `tuning_metric` they were searched on. A file written before
+that key existed counts as accuracy-tuned, so under any other metric it is searched again
+rather than reused.
 
 The cache key is `(dataset, embedding, n_components, model)` -- deliberately everything
 except the iteration, since reuse across iterations is the point. Editing a

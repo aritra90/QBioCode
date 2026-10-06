@@ -30,8 +30,8 @@ _TUNERS = frozenset({"optuna", "grid"})
 #: The tuned branch below used to build its kwargs from the gridsearch block alone, so
 #: ``qpl_args: {classical_models: ['lr']}`` was honoured with tuning off and silently
 #: dropped with it on -- a tuned run searched and reported all six default heads. That is
-#: worse than a slow run: ``_tuning._accuracy_of`` scores a QPL candidate by the MEAN
-#: accuracy across heads, so the projection was chosen to suit heads the config had
+#: worse than a slow run: ``_tuning._metric_of`` scores a QPL candidate by the MEAN
+#: tuning metric across heads, so the projection was chosen to suit heads the config had
 #: excluded. Naming the key in the gridsearch block instead was not a workaround either;
 #: it reached ``compute_qpl_opt`` as an unexpected keyword argument.
 _QUANTUM_PASSTHROUGH = {"qpl": ("classical_models",)}
@@ -129,6 +129,10 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
             - tuner: 'optuna' (default) or 'grid' -- which search to run when
               grid_search is on.
             - n_trials: Trial budget for the Optuna tuner, default 50.
+            - tuning_metric: What every tuner selects on, classical and quantum --
+              'balanced_accuracy' (default), 'accuracy' (the objective before this key
+              existed), 'mcc' or 'f1_score' (averaged by args['average']). See
+              qbiocode.learning._tuning.tuning_metric.
             - cross_validation: Number of cross-validation folds, default 5.
             - gridsearch_<model>_args: Values or ranges to search for each model.
               'catboost' and 'tabpfn' use the same blocks as the other classical
@@ -178,8 +182,8 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
             dispatch table, or names one twice; if grid_search is on for a model with
             no '_opt' twin; if tune_quantum is on without grid_search, or without a
             gridsearch_<model>_args block per quantum model; or if args['tuner'] is
-            not one of 'optuna' or 'grid'. All of these are raised before any model is
-            fitted.
+            not one of 'optuna' or 'grid', or args['tuning_metric'] is not a known
+            metric. All of these are raised before any model is fitted.
 
     """
 
@@ -328,6 +332,11 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
                 f"{sorted(_TUNERS)}: 'optuna' samples args['n_trials'] "
                 f"configurations with Optuna, 'grid' fits every combination."
             )
+        # Same reasoning as the tuner check: a misspelt metric would otherwise surface
+        # inside every `_opt` call in a joblib worker, after the untuned models had run.
+        from qbiocode.learning._tuning import tuning_metric
+
+        tuning_metric(args)
     elif tune_quantum:
         raise ValueError(
             "tune_quantum is enabled but grid_search is not, so no tuning would run. "

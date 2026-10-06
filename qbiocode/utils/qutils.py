@@ -4,7 +4,6 @@ from qiskit_ibm_runtime.qiskit_runtime_service import QiskitRuntimeService
 import hashlib
 import logging
 import math
-import warnings
 import os
 import re
 from functools import reduce
@@ -232,30 +231,18 @@ def get_backend_session(args: dict, primitive: str, num_qubits: int):
         # backend. Aer's own primitives run the circuits in-process instead.
         backend_options = {"backend_options": {"method": method}}
         if primitive == "estimator":
-            # MEASURED CAVEAT, not a theoretical one. Aer's EstimatorV2 is exact and
-            # deterministic when driven directly -- five repeats of one pub agree to
-            # 0.0e+00 and match StatevectorEstimator to 2e-17, with
-            # options.default_precision == 0.0 so no sampling noise is added. But
-            # qiskit-machine-learning's EstimatorQNN driving it is NOT reproducible:
-            # three forward() calls on identical inputs and fixed weights spread by
-            # ~3e-2, where the same QNN on StatevectorEstimator spreads by exactly
-            # 0.0. The cause is in how EstimatorQNN drives the primitive, not in the
-            # primitive; it has not been root-caused, so a `qnn` run on this backend
-            # cannot be reproduced and its metrics should not be compared against a
-            # 'simulator' run. `qsvc` is unaffected (12/12 identical predictions
-            # across simulator / Aer statevector / Aer MPS).
-            warnings.warn(
-                "backend='simulator_aer' with the estimator primitive is not "
-                "reproducible: qiskit-machine-learning's EstimatorQNN driving Aer's "
-                "EstimatorV2 returns different values for identical inputs "
-                "(measured spread ~3e-2, versus exactly 0 on backend='simulator'). "
-                "Aer's estimator is exact when called directly, so this is an "
-                "integration problem that has not been root-caused. Use "
-                "backend='simulator' for 'qnn' unless you have verified this on your "
-                "own configuration; for wide feature maps in 'pqk'/'qpl', prefer "
-                "projection_backend, which is verified exact.",
-                RuntimeWarning,
-            )
+            # Aer's EstimatorV2 is exact and deterministic when driven directly -- five
+            # repeats of one pub agree to 0.0e+00 and match StatevectorEstimator to
+            # 2e-17, with options.default_precision == 0.0 so no sampling noise is
+            # added. This branch used to warn that `qnn` on it was nonetheless not
+            # reproducible (forward() on identical inputs spread by ~3e-2). That was
+            # root-caused to EstimatorQNN's own default_precision=0.015625, which it
+            # passes as the precision of every run: a V2 estimator honours a non-zero
+            # precision by adding Gaussian noise of that standard deviation, and Aer's
+            # draws it unseeded. compute_qnn now builds its EstimatorQNN with
+            # default_precision=0.0, and two seeded runs on Aer MPS then give identical
+            # scores -- equal to the 'simulator' ones. Any other caller that drives this
+            # primitive through EstimatorQNN must do the same.
             prim = AerEstimatorV2(options=backend_options)
         else:
             prim = AerSamplerV2(

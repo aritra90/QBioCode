@@ -51,9 +51,9 @@ def _positive_class_column(scores, estimator):
     classes = np.asarray(classes)
     if classes.shape[0] != scores.shape[1]:
         return None
-    # np.argmax would do for integer labels and break on string ones; comparing
-    # against .max() works for both.
-    return int(np.flatnonzero(classes == classes.max())[0])
+    # The largest label. ndarray.max() has no ufunc loop for a '<U' string array
+    # (UFuncTypeError), while np.argmax compares any sortable dtype, strings included.
+    return int(np.argmax(classes))
 
 
 def _score_vector(raw, estimator):
@@ -170,6 +170,14 @@ SCORE_COLUMNS = (
 #: Every numeric column of the metrics row: the scores above plus wall-clock cost.
 METRIC_COLUMNS = SCORE_COLUMNS + ("time",)
 
+#: The hyperparameter-search evidence a TUNED row carries (``BestParams_Tuned``;
+#: untuned rows lack them, so they read NaN in ModelResults.csv): the metric searched
+#: on, the chosen configuration's validation score, and whether the parameters were
+#: reused from the frozen quantum cache. ``tuning_score`` is numeric but it is a score
+#: OF THE MODEL, label-dependent like the metrics above, so any consumer that treats
+#: numeric columns as dataset covariates (``utils.meta_regression``) must exclude these.
+TUNING_EVIDENCE_COLUMNS = ("tuning_metric", "tuning_score", "tuning_reused")
+
 
 def available_metric_columns(columns, candidates=METRIC_COLUMNS):
     """Those of ``candidates`` that ``columns`` actually holds, in ``candidates`` order.
@@ -199,7 +207,7 @@ def _positive_label(y_true):
 
     ``roc_auc_score`` infers the positive class as the *larger* of the two labels in
     ``y_true``, and :func:`_positive_class_column` orients ``y_score`` to match that --
-    it selects ``classes.max()``. ``average_precision_score`` does not infer anything:
+    it selects the largest class. ``average_precision_score`` does not infer anything:
     it defaults to ``pos_label=1``. Those coincide for a ``{0, 1}`` target and diverge
     for every other encoding, and PMLB/OpenML/libsvm targets are not all ``{0, 1}`` --
     ``{1, 2}`` and ``{-1, 1}`` both occur. On a ``{1, 2}`` target the default would
@@ -207,7 +215,7 @@ def _positive_label(y_true):
     ``1 - AP`` rather than ``AP``: a silently *inverted* precision-recall curve, worst
     on exactly the imbalanced datasets PR-AUC was added to describe.
 
-    Returning ``classes.max()`` keeps PR-AUC on the same orientation as ``auc`` and as
+    Returning the largest class keeps PR-AUC on the same orientation as ``auc`` and as
     ``y_score`` itself, so the three are comparable.
 
     Args:
@@ -221,7 +229,9 @@ def _positive_label(y_true):
     classes = np.unique(np.asarray(y_true))
     if classes.size != 2:
         return None
-    return classes.max()
+    # np.unique sorts, so the last entry is the larger label -- without classes.max(),
+    # which raises on a string array.
+    return classes[-1]
 
 
 def _was_tuned(model, tuned):
@@ -322,6 +332,13 @@ def modeleval(
             ``<name>_opt``, so the label already carries the answer for 13 of the 14
             learners. ``compute_qpl`` passes it explicitly, because its label is
             ``qpl_opt_<head>`` and the marker is not a suffix.
+
+            When ``params`` is a :class:`~qbiocode.learning._tuning.TunedParams` -- what
+            every classical tuner returns -- a tuned row also carries its selection
+            evidence as ``tuning_metric``, ``tuning_score`` (the chosen configuration's
+            best mean cross-validated score) and ``tuning_reused``, and the parameter
+            column holds a plain ``dict`` copy. The quantum wrappers add the same three
+            keys through ``record_tuned_params``. Untuned rows carry none of them.
 
     Returns:
         pd.DataFrame: A ONE-ROW frame with three columns per model, named for it:
@@ -431,6 +448,17 @@ def modeleval(
     # name of the parameter key, so every other column was written out twice and a change
     # to any of them had to be made in both places to take effect.
     parameter_column = "BestParams_Tuned" if _was_tuned(model, tuned) else "Model_Parameters"
+    # The validation score of the chosen configuration, which is otherwise lost once the
+    # search returns. Read off the attributes rather than imported by type: this module
+    # sits below qbiocode.learning, and importing _tuning here would pull optuna into
+    # every evaluation. Only tuned rows get the keys, so an untuned row reads NaN in
+    # the CSV exactly as it did before they existed.
+    tuning_evidence = {}
+    if parameter_column == "BestParams_Tuned" and callable(getattr(params, "evidence", None)):
+        tuning_evidence = params.evidence()
+        # Stored as a plain dict so results.pkl stays readable without the tuning
+        # module's class; str() -- the BestParams_Tuned CSV text -- is the same either way.
+        params = dict(params)
     return pd.DataFrame(
         {
             "y_test_" + model: [y_test],
@@ -460,6 +488,7 @@ def modeleval(
                     "auc": auc,
                     "pr_auc": pr_auc,
                     parameter_column: params,
+                    **tuning_evidence,
                 }
             ],
         }

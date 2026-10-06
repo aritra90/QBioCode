@@ -60,8 +60,9 @@ def granularity_report(configs, test_size, epsilon):
     """Flag datasets where ``epsilon`` is finer than one step of balanced accuracy.
 
     Balanced accuracy on a test set holding ``m`` minority rows can only take values on a
-    grid of spacing ``0.5/m``. Where that spacing exceeds ``epsilon``, a "certified"
-    margin is an artefact of the grid, not a measured effect, and no ``iter`` or
+    grid of spacing ``0.5/m``. Where that spacing exceeds ``epsilon`` (the equivalence
+    bound), an "equivalent" verdict is an artefact of the grid, not a measured effect,
+    and no ``iter`` or
     ``test_size`` repairs it -- only more data does. Reported so those rows are read as
     granularity-limited rather than as null results.
     """
@@ -141,7 +142,12 @@ def main():
     p.add_argument("--test-size", type=float, default=None,
                    help="override; by default read from the configs")
     p.add_argument("--epsilon", type=float, default=None,
-                   help="omit to let the corpus calibrate it from the null spread")
+                   help="TOST equivalence bound; omit to derive it per metric from the "
+                        "resolution floor")
+    p.add_argument("--margin", type=float, default=0.0,
+                   help="pre-registered superiority margin a win must clear (default 0)")
+    p.add_argument("--fdr", type=float, default=0.10,
+                   help="Benjamini-Hochberg level of the adjusted verdicts (default 0.10)")
     p.add_argument("--no-kernels", action="store_true")
     args = p.parse_args()
 
@@ -164,6 +170,8 @@ def main():
         primary_metric=args.primary_metric,
         epsilon=args.epsilon,
         test_size=test_size,
+        margin=args.margin,
+        fdr=args.fdr,
         kernels_root=None if args.no_kernels else args.kernels_root,
     )
 

@@ -53,6 +53,15 @@ embeddings: ['none']
 embedding_min_features: 20
 # Output width of every embedding. 8 keeps wide datasets inside the statevector band.
 n_components: 8
+# Every embedding but 'none' is read from here, one file per (dataset, embedding, split),
+# and none is computed in the job: seeded UMAP differs between CPU types, so jobs that
+# embed for themselves score one arm's models on different features depending on the
+# host they land on. submit_runs.sh writes the files before it submits, with
+#     python -m qbiocode.apps.qprofiler.embedding_cache <these configs>
+# and a job whose files are missing or were written under other settings stops before
+# fitting anything. null embeds in each job instead. A dataset that is not embedded
+# reads nothing from here.
+embedding_cache: '/dccstor/boseukb/Q/QBC/QBC_v2/QBioCode/experiments/pilot10/embeddings'
 
 # ---------------------------------------------------------------------------
 # Models

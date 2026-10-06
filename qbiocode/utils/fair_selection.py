@@ -16,7 +16,15 @@ cannot report a quantum win *whatever the data says*. Decomposing that +0.0741:
     arm-count asymmetry alone (16 vs 6 arms, both averaged)   +0.0093
     + fragmentation applied to BOTH sides symmetrically       +0.0158
     + fragmentation on the classical side only (live config)  +0.0741
-    leave-one-iteration-out nested selection (this module)    +0.0014
+    leave-one-iteration-out nested selection (this module)    +0.0014 (see caveat)
+
+That last figure holds for *independent* iterations. The real protocol draws repeated
+random holdouts, whose test sets share rows -- 73-87% of a later iteration's test rows
+were training rows of an earlier one -- so iterations are positively correlated and the
+held-out iteration is not fully independent of the ones that chose the arm. In
+simulation LOIO then keeps a small asymmetry toward the side with more arms: about
++0.009 for 9 against 4 arms. It is far smaller than the bias it replaces, but it is not
+zero, and it leans the way the arm counts lean.
 
 Two separate, one-directional biases stack, and the larger is not the obvious one:
 
@@ -33,8 +41,9 @@ Two separate, one-directional biases stack, and the larger is not the obvious on
 
 2. **Arm-count asymmetry (+0.009).** ``E[max of 16] > E[max of 6]`` under the null.
    Real, but eight times smaller -- so balancing the *method lists* to equalise arm
-   counts is treating the lesser problem. Nested selection removes this term too, which
-   is what frees the method list to be chosen on scientific grounds.
+   counts is treating the lesser problem. Nested selection largely removes this term
+   too (up to the overlapping-holdout caveat above), which is what frees the method
+   list to be chosen on scientific grounds.
 
 The fix is not a better argmax. It is to stop letting the same data both choose an arm
 and score it.
@@ -60,11 +69,17 @@ paired analysis is valid.
    iterations, then score that arm on ``i`` alone. Selection and scoring never share an
    iteration, so the score is unbiased for the selected arm's true performance. Arm
    count enters only through how stable selection is, not as an inflated maximum -- this
-   is what kills biases (1) and (2) together. Ties are broken by a seeded permutation of
-   the arm order rather than ``argmax``'s first-wins, which would otherwise resolve ties
-   alphabetically by model name (``catboost`` over ``qsvc``, ``nb`` over ``qnn``) -- and
-   ties are common, since a weighted F1 on ``m`` test rows moves in steps of about
-   ``1/m``.
+   is what kills biases (1) and (2) together (up to the overlap caveat above).
+
+   Ties are common, since a weighted F1 on ``m`` test rows moves in steps of about
+   ``1/m``. ``argmax``'s first-wins would resolve them alphabetically by model name
+   (``catboost`` over ``qsvc``, ``nb`` over ``qnn``), and a seeded random tie-break
+   would make the verdict depend on the seed. Instead, when several arms tie for best on
+   the selection mean (to ``1e-12``), the held-out score is the *mean* of the tied arms'
+   held-out scores -- the expectation over a uniform random tie-break, computed exactly
+   -- and the selection trace records the tied arms joined by ``TIE_SEPARATOR``
+   (``"+"``, which cannot be confused with the ``"|"`` inside an
+   ``"embedding|model"`` arm label).
 
 3. **Paired difference per iteration.** ``delta_i = classical_i - quantum_i``, keeping
    the user's sign convention: ``delta > 0`` classical ahead, ``delta < 0`` quantum
@@ -80,30 +95,47 @@ paired analysis is valid.
    ``s * sqrt(n_test/n_train)`` *no matter how large ``I`` grows*. At
    ``test_size=0.3`` that floor is ``0.655 * s``, giving an asymptotic 95% half-width of
    ``1.28 * s``; at the measured ``s = 0.0267`` that is **0.034 > epsilon = 0.027**. So a
-   per-dataset interval can never certify a margin as small as 0.027 at this
-   ``test_size``, at any ``iter``. Buying more resamples does not help. Either accept
-   ``epsilon ~ 0.04`` per dataset, or lower ``test_size`` to <= 0.21 -- a protocol
+   per-dataset interval can never certify equivalence within +/-0.027 at this
+   ``test_size``, at any ``iter`` (nor a win whose true size is below the half-width).
+   Buying more resamples does not help. Either accept ``epsilon ~ 0.04`` per dataset,
+   or lower ``test_size`` to <= 0.21 -- a protocol
    change, not an analysis change. ``iteration_floor_half_width`` reports this bound so
-   a run cannot silently chase an unreachable threshold.
+   a run cannot silently chase an unreachable threshold. The correction depends on the
+   split fraction, which ModelResults.csv does not record, so ``test_size`` has no
+   default and must be passed (the pilot used 0.2).
 
-5. **Four-bucket verdict.** The user's rule is ``abs(delta) > epsilon``; "unequivocal"
-   requires the whole interval to clear the margin, not just the point estimate:
+5. **Two thresholds, two questions.** ``margin`` is the pre-registered *practical
+   superiority* margin (default 0: "is there a difference at all"); ``epsilon`` is only
+   the TOST *equivalence* bound. They used to be one number, set to the resolution
+   floor, so a real effect had to clear noise twice: once as the margin and again as
+   the interval's own width. The raw verdict, with the interval at level ``alpha``:
 
-       ci_hi < -epsilon                      quantum_wins
-       ci_lo > +epsilon                      classical_wins
+       ci_hi < -margin                       quantum_wins
+       ci_lo > +margin                       classical_wins
        -epsilon < ci_lo and ci_hi < +epsilon equivalent      (both-sided, TOST-shaped)
        otherwise                             inconclusive
 
+   Wins take precedence over equivalence; ``within_equivalence`` is reported separately
+   so a significant but practically negligible win stays visible as such.
    ``inconclusive`` is not a failure. It is the honest label for a dataset where the
-   data cannot separate a real margin from noise, and collapsing it into either win is
-   how a benchmark overstates its result.
+   data cannot separate an effect from noise, and collapsing it into either win is how
+   a benchmark overstates its result.
 
 6. **Multiplicity.** The paper's claim is "these S of N datasets", a set-selection
-   claim, so the per-dataset margin p-values are Benjamini-Hochberg adjusted. The
-   p-value tests against the margin itself, matching the epsilon semantics: for a
-   classical claim ``H0: delta <= +epsilon``, for a quantum claim
-   ``H0: delta >= -epsilon``. Both raw and adjusted verdicts are returned; the adjusted
-   one is what a paper should quote.
+   claim. Per dataset ``p_value = min(1, 2 * t.sf((|delta| - margin) / se, I-1))``, the
+   ordinary two-sided t-test when ``margin = 0``, for which ``p_value < alpha`` exactly
+   when the interval excludes zero. Benjamini-Hochberg at level ``fdr`` is applied over
+   *every* discovery dataset with a finite p-value, in both directions -- not only over
+   the datasets already called a win, which picks the family after looking and never
+   demotes a lone claim. ``verdict_adjusted`` is the direction of ``delta`` when
+   ``p_adjusted <= fdr``, else ``equivalent`` or ``inconclusive`` from
+   ``within_equivalence``. With ``fdr <= alpha`` the adjustment can only demote; with
+   ``fdr > alpha`` BH may also confirm a dataset whose raw p lies in
+   ``(alpha, BH threshold]``, which is the intended behaviour of an FDR procedure, not
+   a promotion bug. Datasets named in ``controls`` (synthetic positive/negative
+   controls) form a separate family with Holm-adjusted p-values judged at ``alpha``, so
+   that planted effects neither dilute nor inflate the discovery family. Both raw and
+   adjusted verdicts are returned; the adjusted one is what a paper should quote.
 
 7. **Dummy floor (optional).** An arm that cannot beat a majority-class baseline is not
    evidence of anything, and on an imbalanced dataset weighted F1 hides it -- a
@@ -115,7 +147,8 @@ paired analysis is valid.
 References
 ----------
 Nadeau & Bengio (2003), *Inference for the Generalization Error*, Machine Learning 52.
-Benjamini & Hochberg (1995), JRSS-B 57. Demsar (2006), JMLR 7. Schuirmann (1987).
+Benjamini & Hochberg (1995), JRSS-B 57. Holm (1979), Scand. J. Statist. 6.
+Demsar (2006), JMLR 7. Schuirmann (1987).
 """
 
 from __future__ import annotations
@@ -153,6 +186,16 @@ PARAMETER_COLUMNS = ("Model_Parameters", "BestParams_Tuned", "BestParams_GridSea
 VERDICTS = ("quantum_wins", "classical_wins", "equivalent", "inconclusive",
             "below_baseline", "insufficient_iterations")
 
+#: Joins the names of arms that tie for best in one LOIO selection step, sorted, in the
+#: ``classical_arm`` / ``quantum_arm`` columns of the selection trace. Arm labels are
+#: ``"embedding|model"`` and no embedding or model name contains ``"+"``, so a tied
+#: label splits back into its arms unambiguously.
+TIE_SEPARATOR = "+"
+
+#: Verdicts that are not the outcome of a test and are carried through the multiplicity
+#: adjustment unchanged.
+_SPECIAL_VERDICTS = ("below_baseline", "insufficient_iterations")
+
 
 def model_side(model: str) -> str:
     """``'quantum'`` or ``'classical'`` for a ModelResults.csv ``model`` label.
@@ -186,26 +229,37 @@ class WinnerReport:
     alpha: float
     test_size: float
     corpus: dict = field(default_factory=dict)
+    margin: float = 0.0
+    fdr: float = 0.10
+    controls: tuple = ()
 
     def __bool__(self) -> bool:
         return True
 
-    @property
-    def quantum_datasets(self) -> list[str]:
-        """Datasets with an unequivocal quantum win after FDR adjustment."""
+    def _hits(self, verdict: str) -> list[str]:
         col = "verdict_adjusted"
         if self.per_dataset.empty or col not in self.per_dataset:
             return []
-        hit = self.per_dataset[self.per_dataset[col] == "quantum_wins"]
+        hit = self.per_dataset[self.per_dataset[col] == verdict]
+        if "family" in hit:
+            hit = hit[hit["family"] != "control"]
         return sorted(hit["Dataset"].tolist())
 
     @property
+    def quantum_datasets(self) -> list[str]:
+        """Discovery datasets with a quantum win after FDR adjustment.
+
+        Rows in the ``control`` family are excluded.
+        """
+        return self._hits("quantum_wins")
+
+    @property
     def classical_datasets(self) -> list[str]:
-        col = "verdict_adjusted"
-        if self.per_dataset.empty or col not in self.per_dataset:
-            return []
-        hit = self.per_dataset[self.per_dataset[col] == "classical_wins"]
-        return sorted(hit["Dataset"].tolist())
+        """Discovery datasets with a classical win after FDR adjustment.
+
+        Rows in the ``control`` family are excluded.
+        """
+        return self._hits("classical_wins")
 
 
 def iteration_floor_half_width(sigma: float, test_size: float, alpha: float = 0.05) -> float:
@@ -214,7 +268,7 @@ def iteration_floor_half_width(sigma: float, test_size: float, alpha: float = 0.
     The Nadeau-Bengio standard error ``s * sqrt(1/I + r)`` with ``r = test_size /
     (1 - test_size)`` tends to ``s * sqrt(r)`` as ``I`` grows, so the interval has a
     floor that more resamples cannot cross. Compare it against ``epsilon`` before a
-    sweep: if the floor exceeds ``epsilon``, no amount of compute will certify a margin
+    sweep: if the floor exceeds ``epsilon``, no amount of compute will certify equivalence
     that small and ``test_size`` has to come down instead.
     """
     r = test_size / (1.0 - test_size)
@@ -222,7 +276,7 @@ def iteration_floor_half_width(sigma: float, test_size: float, alpha: float = 0.
 
 
 def corpus_inference(per_dataset: pd.DataFrame, epsilon: float = 0.027,
-                     alpha: float = 0.05) -> dict:
+                     alpha: float = 0.05, *, margin: float | None = None) -> dict:
     """Corpus-level inference over the per-dataset LOIO deltas.
 
     This is the level at which the benchmark's claim is actually testable, and the
@@ -250,20 +304,39 @@ def corpus_inference(per_dataset: pd.DataFrame, epsilon: float = 0.027,
         many-class problems does not have.
     ``sign``
         an exact binomial test on the *count* of datasets each side leads by more than
-        ``epsilon``. Assumes almost nothing and maps directly onto the sentence a
+        ``margin``. Assumes almost nothing and maps directly onto the sentence a
         benchmark paper wants to write ("quantum led on S of N datasets"), so it is the
         headline number even though it is the least efficient.
 
     Reporting all three, and reporting them together with the per-dataset counts, is the
     honest presentation: agreement among them is the evidence, and disagreement is
     itself a finding about the corpus.
+
+    Args:
+        per_dataset: Frame with a ``delta`` column, one row per independent dataset.
+        epsilon: Equivalence bound. Only descriptive here: the ``sign`` block reports
+            how many deltas lie within ``+/-epsilon``.
+        alpha: Level of the interval and of the direction rule.
+        margin: Practical superiority margin. The sign test counts a dataset for a
+            side only when its delta clears ``margin``, and a direction is stated only
+            when ``|mean_delta| > margin``. ``None`` (the default) keeps the historical
+            behaviour of using ``epsilon`` as that margin as well;
+            :func:`select_winners` always passes its own ``margin`` explicitly.
+
+    Returns:
+        dict: ``n_datasets_used``, ``margin``, ``mean_delta``, ``sd_delta``, ``ci``,
+        ``t``, ``wilcoxon``, ``sign`` and ``direction`` (empty when ``per_dataset`` has
+        no ``delta``; only ``n_datasets_used`` and ``margin`` below two datasets).
     """
     out: dict = {}
     if per_dataset.empty or "delta" not in per_dataset:
         return out
+    if margin is None:
+        margin = epsilon
     d = pd.to_numeric(per_dataset["delta"], errors="coerce")
     d = d[np.isfinite(d)]
     out["n_datasets_used"] = int(d.size)
+    out["margin"] = float(margin)
     if d.size < 2:
         return out
 
@@ -293,15 +366,16 @@ def corpus_inference(per_dataset: pd.DataFrame, epsilon: float = 0.027,
         # every delta identically zero -- perfect tie, no rank information
         out["wilcoxon"] = {"statistic": np.nan, "p_two_sided": 1.0}
 
-    n_cls = int((d > epsilon).sum())
-    n_qnt = int((d < -epsilon).sum())
+    n_cls = int((d > margin).sum())
+    n_qnt = int((d < -margin).sum())
     n_tied = int(d.size - n_cls - n_qnt)
     binom_p = (float(stats.binomtest(n_qnt, n_qnt + n_cls, 0.5).pvalue)
                if (n_qnt + n_cls) else 1.0)
     out["sign"] = {
         "datasets_favoring_classical": n_cls,
         "datasets_favoring_quantum": n_qnt,
-        f"datasets_within_epsilon_{epsilon:g}": n_tied,
+        f"datasets_within_margin_{margin:g}": n_tied,
+        f"datasets_within_epsilon_{epsilon:g}": int((d.abs() <= epsilon).sum()),
         "p_two_sided": binom_p,
     }
     # Direction is stated only when at least one test clears alpha; otherwise the
@@ -314,7 +388,7 @@ def corpus_inference(per_dataset: pd.DataFrame, epsilon: float = 0.027,
         if p is not None and np.isfinite(p)
     ]
     signif = min(candidates) if candidates else 1.0
-    if signif > alpha or abs(out["mean_delta"]) <= epsilon:
+    if signif > alpha or abs(out["mean_delta"]) <= margin:
         out["direction"] = "no_detectable_difference"
     else:
         out["direction"] = "classical" if out["mean_delta"] > 0 else "quantum"
@@ -376,16 +450,21 @@ def arm_iteration_table(df: pd.DataFrame, metric: str = "f1_score") -> pd.DataFr
 
 
 def _loio_side_scores(
-    mat: np.ndarray, arms: Sequence[str], rng: np.random.Generator
+    mat: np.ndarray, arms: Sequence[str]
 ) -> tuple[np.ndarray, list[str]]:
     """Leave-one-iteration-out nested selection over one side's ``[arm, iteration]``.
 
     Returns the held-out score per iteration and the arm chosen for each. ``mat`` may
     contain NaN where an arm was not run on an iteration; selection uses ``nanmean`` and
     an arm with no usable training iteration is skipped.
+
+    Ties are resolved deterministically. When several arms share the best selection mean
+    (``np.isclose`` with ``rtol=0, atol=1e-12``), the held-out score is the mean of their
+    held-out scores -- the expected score under a uniform random tie-break, without the
+    randomness -- and the chosen arm is the sorted tied labels joined by
+    :data:`TIE_SEPARATOR`.
     """
     n_arms, n_iter = mat.shape
-    order = rng.permutation(n_arms)  # seeded tie-break; argmax alone is alphabetical
     scores = np.full(n_iter, np.nan)
     chosen: list[str] = []
     for i in range(n_iter):
@@ -402,14 +481,45 @@ def _loio_side_scores(
             means = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
         else:
             means = np.full(n_arms, np.nan)
-        cand = [a for a in order if np.isfinite(means[a]) and np.isfinite(mat[a, i])]
+        cand = [a for a in range(n_arms) if np.isfinite(means[a]) and np.isfinite(mat[a, i])]
         if not cand:
             chosen.append("")
             continue
-        best = max(cand, key=lambda a: means[a])
-        scores[i] = mat[best, i]
-        chosen.append(arms[best])
+        top = max(means[a] for a in cand)
+        tied = [a for a in cand if np.isclose(means[a], top, rtol=0.0, atol=1e-12)]
+        held = mat[tied, i]
+        # Identical held-out scores are returned as they are, not re-averaged: the
+        # rounding in a mean of eight copies of 0.8 is enough to turn a perfect tie
+        # between the sides into a 1e-16 "win" with zero standard error.
+        scores[i] = float(held[0]) if np.all(held == held[0]) else float(held.mean())
+        chosen.append(TIE_SEPARATOR.join(sorted(arms[a] for a in tied)))
     return scores, chosen
+
+
+def _bh_adjust(p: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg q-values, returned in the input order."""
+    m = p.size
+    if m == 0:
+        return p.astype(float)
+    order = np.argsort(p, kind="stable")
+    ranked = p[order] * m / np.arange(1, m + 1)
+    adj = np.clip(np.minimum.accumulate(ranked[::-1])[::-1], 0.0, 1.0)
+    out = np.empty(m)
+    out[order] = adj
+    return out
+
+
+def _holm_adjust(p: np.ndarray) -> np.ndarray:
+    """Holm step-down adjusted p-values (family-wise error), in the input order."""
+    m = p.size
+    if m == 0:
+        return p.astype(float)
+    order = np.argsort(p, kind="stable")
+    ranked = p[order] * (m - np.arange(m))
+    adj = np.clip(np.maximum.accumulate(ranked), 0.0, 1.0)
+    out = np.empty(m)
+    out[order] = adj
+    return out
 
 
 def select_winners(
@@ -417,11 +527,15 @@ def select_winners(
     metric: str = "f1_score",
     epsilon: float = 0.027,
     alpha: float = 0.05,
-    test_size: float = 0.3,
+    test_size: float | None = None,
     seed: int = 0,
     baseline: pd.DataFrame | None = None,
+    *,
+    margin: float = 0.0,
+    fdr: float = 0.10,
+    controls: Iterable[str] | None = None,
 ) -> WinnerReport:
-    """Decide, per dataset, whether either side wins by more than ``epsilon``.
+    """Decide, per dataset, whether either side wins, and by how much.
 
     Parameters
     ----------
@@ -433,15 +547,79 @@ def select_winners(
         ``balanced_accuracy``, ``mcc``, ``auc`` and ``pr_auc``, which is what the
         comparison assumes; do not pass ``time``.
     epsilon
-        The margin. A win is declared only when the whole interval clears it. Check it
-        against :func:`iteration_floor_half_width` first.
+        The TOST equivalence bound, and nothing else: a dataset is ``equivalent`` when
+        the whole interval lies inside ``(-epsilon, +epsilon)``. Equivalence cannot be
+        certified when ``epsilon`` is below the interval half-width, so check it against
+        :func:`iteration_floor_half_width` first.
+    alpha
+        Level of the per-dataset intervals (``1 - alpha`` coverage), and of the Holm
+        family of ``controls``.
+    test_size
+        Test fraction of the ``train_test_split`` that produced every iteration.
+        Required: the Nadeau-Bengio correction ``r = test_size / (1 - test_size)``
+        depends on it and ModelResults.csv does not record it. The pilot used 0.2.
+    seed
+        Unused. Kept so existing calls still work; ties are now resolved by averaging
+        (see :func:`_loio_side_scores`), so results do not depend on any seed.
     baseline
         Optional ``Dataset`` -> baseline-metric frame (columns ``Dataset`` and
         ``metric``). Datasets where neither side beats it are marked
         ``below_baseline``.
+    margin
+        Pre-registered practical superiority margin. A raw win needs the whole interval
+        beyond ``-margin`` (quantum) or ``+margin`` (classical), and ``p_value`` tests
+        ``|delta| <= margin``. The default 0 tests against zero.
+    fdr
+        Benjamini-Hochberg level for the discovery family, in ``(0, 1)``. With ``fdr <= alpha`` the
+        adjusted verdict can only demote a raw win; with ``fdr > alpha`` BH may also
+        confirm a dataset whose raw ``p_value`` lies in ``(alpha, BH threshold]``.
+    controls
+        Dataset names forming a separate family, e.g. synthetic positive and negative
+        controls. They are left out of the BH family, get Holm-adjusted p-values among
+        themselves with ``verdict_adjusted`` judged at ``alpha``, and are excluded from
+        :attr:`WinnerReport.quantum_datasets` / ``classical_datasets`` and from the
+        across-dataset inference. A name absent from ``results``, or with no finite
+        ``metric`` values, raises ``ValueError``.
+
+    Returns
+    -------
+    WinnerReport
+        ``per_dataset`` has one row per dataset with ``delta``, ``se``, ``ci_lo``,
+        ``ci_hi``, ``p_value``, ``within_equivalence``, ``verdict_raw``, ``family``
+        (``'discovery'`` or ``'control'``), ``p_adjusted`` (BH q-value, or Holm for
+        controls) and ``verdict_adjusted``.
     """
+    if test_size is None:
+        raise ValueError(
+            "test_size is required: the Nadeau-Bengio correction r = test_size / "
+            "(1 - test_size) depends on the train/test split fraction, which "
+            "ModelResults.csv does not record, so it cannot be inferred. Pass the value "
+            "the sweep used (the pilot used test_size=0.2)."
+        )
+    if not 0.0 < float(test_size) < 1.0:
+        raise ValueError(f"test_size must lie in (0, 1); got {test_size!r}")
+    if margin < 0:
+        raise ValueError(f"margin must be >= 0; got {margin!r}")
+    if not 0.0 < float(fdr) < 1.0:
+        raise ValueError(f"fdr must lie in (0, 1); got {fdr!r}")
+    if isinstance(controls, str):
+        controls = [controls]
+    control_set = frozenset(controls) if controls is not None else frozenset()
+    del seed  # accepted for backward compatibility only; nothing below is random
+
+    unknown = sorted(control_set - set(results["Dataset"].unique()))
+    if unknown:
+        raise ValueError(
+            f"controls name datasets absent from results: {unknown}. Control names must "
+            f"match the Dataset column exactly."
+        )
     table = arm_iteration_table(results, metric=metric)
-    rng = np.random.default_rng(seed)
+    unscorable = sorted(control_set - set(table["Dataset"].unique()))
+    if unscorable:
+        raise ValueError(
+            f"controls name datasets with no finite {metric!r} values: {unscorable}. "
+            f"A control that cannot be scored cannot serve as a control."
+        )
 
     per_arm = (
         table.groupby(["Dataset", "side", "arm", "embeddings", "model"], dropna=False)
@@ -455,6 +633,7 @@ def select_winners(
         .rename(columns={"parameters": "n_distinct_parameters"})
     )
 
+    r = test_size / (1.0 - test_size)
     rows, sel_rows = [], []
     for dataset, block in table.groupby("Dataset", sort=True):
         iters = sorted(block["iteration"].unique())
@@ -467,7 +646,7 @@ def select_winners(
                 continue
             wide = sub.pivot_table(index="arm", columns="iteration", values=metric,
                                    aggfunc="mean").reindex(columns=iters)
-            s, chosen = _loio_side_scores(wide.to_numpy(float), list(wide.index), rng)
+            s, chosen = _loio_side_scores(wide.to_numpy(float), list(wide.index))
             side_scores[side], side_arms[side] = s, chosen
 
         for k, it in enumerate(iters):
@@ -507,40 +686,37 @@ def select_winners(
         # ambiguous ones.
         if usable.size < 2:
             row.update(delta=float(usable[0]) if usable.size else np.nan,
-                       se=np.nan, ci_lo=np.nan, ci_hi=np.nan, p_margin=np.nan,
-                       verdict_raw="insufficient_iterations")
+                       se=np.nan, ci_lo=np.nan, ci_hi=np.nan, p_value=np.nan,
+                       within_equivalence=False, verdict_raw="insufficient_iterations")
             rows.append(row)
             continue
 
         n = usable.size
         mean_d = float(usable.mean())
         s = float(usable.std(ddof=1))
-        r = test_size / (1.0 - test_size)
         se = s * np.sqrt(1.0 / n + r)          # Nadeau & Bengio (2003)
         tcrit = stats.t.ppf(1.0 - alpha / 2.0, df=n - 1)
         ci_lo, ci_hi = mean_d - tcrit * se, mean_d + tcrit * se
 
-        # One-sided test against the MARGIN, in whichever direction the data points.
-        # Testing against zero would answer a different question than epsilon asks.
+        # Two-sided test of H0: |delta| <= margin. With margin = 0 this is the ordinary
+        # paired t-test, and p < alpha exactly when the interval excludes zero.
         if se > 0:
-            if mean_d >= 0:
-                p = float(stats.t.sf((mean_d - epsilon) / se, df=n - 1))
-            else:
-                p = float(stats.t.cdf((mean_d + epsilon) / se, df=n - 1))
+            p = float(min(1.0, 2.0 * stats.t.sf((abs(mean_d) - margin) / se, df=n - 1)))
         else:
-            p = 0.0 if abs(mean_d) > epsilon else 1.0
+            p = 0.0 if abs(mean_d) > margin else 1.0
 
-        if ci_hi < -epsilon:
+        within = bool(ci_lo > -epsilon and ci_hi < epsilon)
+        if ci_hi < -margin:
             verdict = "quantum_wins"
-        elif ci_lo > epsilon:
+        elif ci_lo > margin:
             verdict = "classical_wins"
-        elif ci_lo > -epsilon and ci_hi < epsilon:
+        elif within:
             verdict = "equivalent"
         else:
             verdict = "inconclusive"
 
         row.update(delta=mean_d, se=float(se), ci_lo=float(ci_lo), ci_hi=float(ci_hi),
-                   p_margin=p, verdict_raw=verdict)
+                   p_value=p, within_equivalence=within, verdict_raw=verdict)
         rows.append(row)
 
     per_dataset = pd.DataFrame(rows)
@@ -561,29 +737,43 @@ def select_winners(
         )
         per_dataset.loc[per_dataset["baseline"].notna() & ~beaten, "verdict_raw"] = "below_baseline"
 
-    # ---- Benjamini-Hochberg across datasets ---------------------------------------
+    # ---- multiplicity: BH over the discovery family, Holm over the controls --------
+    # The family is every dataset with a finite p-value, in both directions, fixed
+    # before any verdict is looked at. Adjusting only the raw wins chose the family
+    # post hoc and, with m = number of claims, could never demote a lone claim.
+    # below_baseline rows keep their verdict but their p-values stay in the family,
+    # which only makes the adjustment more conservative.
+    per_dataset["family"] = pd.Series(dtype=object)
     per_dataset["verdict_adjusted"] = per_dataset.get("verdict_raw", pd.Series(dtype=object))
     per_dataset["p_adjusted"] = np.nan
     if not per_dataset.empty:
-        claimed = per_dataset["verdict_raw"].isin(["quantum_wins", "classical_wins"])
-        pv = per_dataset.loc[claimed, "p_margin"]
-        if len(pv):
-            order = np.argsort(pv.to_numpy())
-            m = len(pv)
-            ranked = pv.to_numpy()[order]
-            adj = np.minimum.accumulate((ranked * m / np.arange(1, m + 1))[::-1])[::-1]
-            adj = np.clip(adj, 0.0, 1.0)
-            out = np.empty(m)
-            out[order] = adj
-            per_dataset.loc[claimed, "p_adjusted"] = out
-            demoted = claimed & (per_dataset["p_adjusted"] > alpha)
-            per_dataset.loc[demoted, "verdict_adjusted"] = "inconclusive"
+        is_control = per_dataset["Dataset"].isin(control_set)
+        per_dataset["family"] = np.where(is_control, "control", "discovery")
+        finite = np.isfinite(pd.to_numeric(per_dataset["p_value"], errors="coerce"))
+        special = per_dataset["verdict_raw"].isin(_SPECIAL_VERDICTS)
+        direction = np.where(per_dataset["delta"] < 0, "quantum_wins", "classical_wins")
+        fallback = np.where(per_dataset["within_equivalence"].astype(bool),
+                            "equivalent", "inconclusive")
+        for mask, adjust, level in ((~is_control & finite, _bh_adjust, fdr),
+                                    (is_control & finite, _holm_adjust, alpha)):
+            if not mask.any():
+                continue
+            per_dataset.loc[mask, "p_adjusted"] = adjust(
+                per_dataset.loc[mask, "p_value"].to_numpy(float))
+            judged = mask & ~special
+            hit = judged & (per_dataset["p_adjusted"] <= level)
+            per_dataset.loc[hit, "verdict_adjusted"] = direction[hit.to_numpy()]
+            miss = judged & ~hit
+            per_dataset.loc[miss, "verdict_adjusted"] = fallback[miss.to_numpy()]
 
     sigma = float(per_dataset["se"].dropna().median()) if "se" in per_dataset else np.nan
     corpus = {
         "n_datasets": int(per_dataset["Dataset"].nunique()) if not per_dataset.empty else 0,
+        "n_controls": len(control_set),
         "epsilon": epsilon,
+        "margin": margin,
         "alpha": alpha,
+        "fdr": fdr,
         "metric": metric,
         "counts_raw": per_dataset.get("verdict_raw", pd.Series(dtype=object))
         .value_counts().to_dict(),
@@ -597,7 +787,11 @@ def select_winners(
         if "naive_delta" in per_dataset and per_dataset["naive_delta"].notna().any()
         else np.nan,
     }
-    corpus["across_datasets"] = corpus_inference(per_dataset, epsilon=epsilon, alpha=alpha)
+    # Controls are planted effects, not part of the corpus the claim is about.
+    discovery = (per_dataset[per_dataset["family"] == "discovery"]
+                 if "family" in per_dataset else per_dataset)
+    corpus["across_datasets"] = corpus_inference(discovery, epsilon=epsilon, alpha=alpha,
+                                                 margin=margin)
     if np.isfinite(sigma):
         # se already carries the NB inflation, so compare epsilon against the half-width
         # the corpus actually achieved rather than against a nominal s/sqrt(I).
@@ -606,23 +800,26 @@ def select_winners(
         )
         if corpus["epsilon_is_reachable"] is False:
             logger.warning(
-                "epsilon=%.4f is below the median achieved interval half-width %.4f, so "
-                "most datasets cannot certify a margin that small at test_size=%.2f. "
-                "Raising 'iter' will not close this -- the Nadeau-Bengio standard error "
-                "floors at s*sqrt(test_size/(1-test_size)). Lower test_size or widen "
-                "epsilon.",
+                "epsilon=%.4f (the equivalence bound) is below the median achieved "
+                "interval half-width %.4f, so equivalence cannot be certified on most "
+                "datasets at test_size=%.2f: an interval wider than +/-epsilon can never "
+                "fit inside it. Raising 'iter' will not close this -- the Nadeau-Bengio "
+                "standard error floors at s*sqrt(test_size/(1-test_size)). Lower "
+                "test_size or widen epsilon.",
                 epsilon, corpus["median_interval_half_width"], test_size,
             )
 
     return WinnerReport(
         per_dataset=per_dataset, per_arm=per_arm, selection=selection,
         metric=metric, epsilon=epsilon, alpha=alpha, test_size=test_size, corpus=corpus,
+        margin=margin, fdr=fdr, controls=tuple(sorted(control_set)),
     )
 
 
 __all__ = [
     "QUANTUM_STEMS",
     "PARAMETER_COLUMNS",
+    "TIE_SEPARATOR",
     "VERDICTS",
     "WinnerReport",
     "arm_iteration_table",

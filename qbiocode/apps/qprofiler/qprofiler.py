@@ -93,6 +93,7 @@ from qbiocode.embeddings import check_embedding_name
 #from qmlbench.evaluation.dataset_evaluation_no_var_threshold import evaluate2 # use this for moons/circles data, otherwise you'll run into an error with finding no features with minimum variance threshold
 from qbiocode import evaluate
 from qbiocode import model_run
+from qbiocode.apps.qprofiler import embedding_cache as emb_cache
 
 #: Config keys ``main`` reads unconditionally. Reported together rather than one
 #: KeyError at a time, so a hand-written config can be fixed in a single pass.
@@ -388,9 +389,210 @@ def _validate_config(args, log):
             "qbiocode.evaluation.model_run for the available model names."
         )
 
+    # Checked here, not when the first cached embedding is read: that is after the first
+    # dataset has been loaded and evaluated.
+    _embedding_cache_dir(args)
+
     scaler_name = _resolve_scaling(args["scaling"])
     log.info(f"Feature scaling resolved to: {scaler_name}")
     return scaler_name
+
+
+# ---------------------------------------------------------------------------
+# The steps from input folder to embedded split. Each is a function because two
+# programs run them: main, and the embedding-cache precompute
+# (qbiocode.apps.qprofiler.embedding_cache), which must reproduce main's splits and
+# scaling exactly for the features it writes to be the ones a job would have computed.
+# ---------------------------------------------------------------------------
+def _embedding_cache_dir(args):
+    """The directory ``embedding_cache`` names, or None when the run embeds in-process.
+
+    It must be absolute: hydra runs each job from its own output directory, so a relative
+    path would name a different directory in every job, and a cache is only useful when
+    all the jobs share it.
+
+    Raises:
+        ValueError: if the value is not a string, or not an absolute path.
+    """
+    value = args.get("embedding_cache")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"embedding_cache is the directory the embedded features are read from, or "
+            f"null to compute them in this run; got {value!r}."
+        )
+    path = os.path.expanduser(value.strip())
+    if not os.path.isabs(path):
+        raise ValueError(
+            f"embedding_cache must be an absolute path; got {value!r}. Hydra runs every "
+            f"job from its own output directory, so a relative path would name a "
+            f"different directory in each job."
+        )
+    return path
+
+
+def _input_folder(args):
+    """The directory ``folder_path`` resolves to.
+
+    Raises:
+        ValueError: if it resolves to no directory, naming where it was looked for.
+    """
+    # Normalize path separators for cross-platform compatibility
+    folder_path = args['folder_path'].replace('/', os.sep).replace('\\', os.sep)
+    path_to_input = _resolve_input_folder(folder_path)
+    if path_to_input is None:
+        raise ValueError(
+            f"folder_path {args['folder_path']!r} is not a directory. It was looked "
+            f"for relative to the current directory ({os.getcwd()!r}), relative to "
+            f"the derived checkout root ({dir_home!r}), and under every parent of "
+            f"the current directory. Give an absolute path, or run from a directory "
+            f"from which the relative path resolves."
+        )
+    return path_to_input
+
+
+def _input_files(args, path_to_input):
+    """The CSVs in ``path_to_input`` that ``file_dataset`` selects, in the order they run.
+
+    Raises:
+        ValueError: if it selects none.
+    """
+    if args['file_dataset'] == 'ALL':
+        input_files = [file for file in os.listdir(path_to_input) if file.endswith('csv')]
+    else:
+        input_files = [file for file in os.listdir(path_to_input) if file in args['file_dataset'] and file.endswith('csv')]
+    if not input_files:
+        # Previously this produced a successful run with no output whatsoever,
+        # which reads exactly like a run whose models all silently failed.
+        selector = (
+            "every .csv file" if args['file_dataset'] == 'ALL'
+            else f"file_dataset={args['file_dataset']!r}"
+        )
+        raise ValueError(
+            f"No input datasets matched {selector} in {path_to_input!r}. "
+            f"Directory contents: {sorted(os.listdir(path_to_input))[:10]}"
+        )
+    return sorted(input_files)
+
+
+def _read_dataset(path, args, log=None):
+    """``(X, y, y_encoded)`` from one input CSV: the features, the label column as read,
+    and the labels ordinal-encoded to ``0 .. k-1``. The label is the last column."""
+    # Load data with optional index column support
+    if args.get('index_col', False):
+        # First column contains row names/IDs
+        rawdata = pd.read_csv(path, sep=r'\t|,', index_col=0)
+        if log is not None:
+            log.info(f"Loaded dataset with row names from first column")
+    else:
+        # Standard loading without index column
+        rawdata = pd.read_csv(path, sep=r'\t|,')
+
+    X = rawdata.iloc[:, :-1].to_numpy()
+    y = rawdata.iloc[:,-1:].to_numpy()
+    y_encoded = feature_encoding(y, feature_encoding='OrdinalEncoder')
+    y_encoded = y_encoded.reshape(-1)
+    y_encoded = y_encoded.astype(int)
+    return X, y, y_encoded
+
+
+def _is_stratified(args):
+    """Whether the splits are stratified on the label.
+
+    ``stratify`` can be ``['y']``, ``['Y']``, or an empty list / None for no
+    stratification.
+    """
+    use_stratify = args.get('stratify', [])
+    return bool(use_stratify and len(use_stratify) > 0)
+
+
+def _split_seed(args, iter):
+    """The ``random_state`` of split ``iter`` (1-based) -- of its train/test split and of
+    its embedding alike.
+
+    Distinct-but-reproducible split per iteration: random_state = seed + iter makes every
+    split different from the others, yet deterministic across reruns and independent of
+    any other RNG consumers (embeddings etc.) that run before it.
+    """
+    split_seed = args['seed'] + iter
+    return split_seed
+
+
+def _split_and_scale(X, y_encoded, args, iter, scaler_name):
+    """Split ``iter`` of one dataset, scaled.
+
+    Returns ``(X_train, X_test, y_train, y_test, train_idx, test_idx)``. The last two are
+    the rows of ``X`` on each side, which is how a cached embedding is checked to belong
+    to this split. They are passed through ``train_test_split`` as a third array, and that
+    does not move any row: its permutation depends only on the row count, the labels
+    (when stratified) and the seed, and each array is then indexed with it.
+    """
+    X_train, X_test, y_train, y_test, train_idx, test_idx = train_test_split(
+        X, y_encoded, np.arange(len(y_encoded)),
+        stratify=y_encoded if _is_stratified(args) else None,
+        test_size=args['test_size'],
+        random_state=_split_seed(args, iter),
+    )
+    # Scale the features: fit one scaler on TRAIN and apply it to TEST (never fit a
+    # separate scaler on the test set -- that would use test-set statistics).
+    if scaler_name != 'None':
+        X_train, X_test = scale_train_test(X_train, X_test, scaling=scaler_name)
+    return X_train, X_test, y_train, y_test, train_idx, test_idx
+
+
+def _data_key(file, embed, n_components, iter):
+    """The name of one (dataset, embedding, split) pass, which every cache it feeds uses
+    as its key: projections, kernel dumps, tuned parameters and the embedding cache."""
+    # os.path.splitext, not re.sub(r'\..*'): that regex truncated at the
+    # FIRST dot, so any dataset whose name carries a decimal parameter lost
+    # everything after it and collapsed onto a shared key. Two pairs in the
+    # curated 84-dataset corpus collide that way --
+    # GAMETES_Epistasis_2_Way_20atts_0.1H vs _0.4H, and
+    # GAMETES_Heterogeneity_20atts_1600_Het_0.4_0.2_50 vs _75 -- and since the
+    # colliding members share (n=1600, p=20), the row-count and width checks in
+    # compute_pqk/compute_qpl cannot tell them apart. The second dataset of each
+    # pair was scored on the first one's cached projections, without a warning,
+    # and the parameter that differs between them is the one that sets the
+    # difficulty the comparison is meant to measure.
+    return '_'.join( [os.path.splitext( file )[0], embed, str(n_components), str(iter)])
+
+
+def _embedding_settings(args):
+    """Everything an embedding is given apart from the data and the seed.
+
+    One function for both consumers: :func:`_embed` passes these to the embedding, and
+    the embedding cache records them in each file's spec. So a setting added here is
+    passed to the embedding and checked by the cache, with no other change needed.
+    """
+    return {
+        "n_neighbors": args.get("n_neighbors", 30),
+        "n_components": args["n_components"],
+        "method": None,
+        "quvine_args": args.get("quvine_args", {}),
+    }
+
+
+def _embed(embed, X_train, X_test, args, split_seed):
+    """Embed one split in this process: ``(X_train_emb, X_test_emb)``."""
+    return get_embeddings(
+        embed, X_train, X_test,
+        **_embedding_settings(args),
+        # Seeded by the split, like train_test_split. Unseeded, UMAP read numpy's
+        # global stream -- which a model run in this process (n_jobs: 1, one model per
+        # config) re-seeds and advances -- and ran numba-parallel SGD, which is not
+        # reproducible even from a fixed stream. Two jobs of one (dataset, embedding)
+        # but different models therefore scored those models on DIFFERENT features
+        # from the second split on, and nothing failed to say so.
+        #
+        # The seed makes repeat runs on the same CPU type identical. It does not make
+        # runs on different CPU types agree: numba compiles UMAP for the host's
+        # instruction set, and SGD amplifies the last-bit differences. On the 2026
+        # pilot the UMAP jobs fell into three groups by host type, and the groups
+        # computed different features on every split. Jobs that must see the same
+        # features read them from embedding_cache instead.
+        random_state=split_seed,
+    )
 
 
 # Begin the main function and instatiate Hydra class
@@ -527,33 +729,26 @@ def main(args):
 
     log.info(f"The number of ML methods being parallelized is {min(args['n_jobs'], len(args['model']))}")
     log.info(f"Chosen backend for quantum algorithms is: {args['backend']}")
-    # Normalize path separators for cross-platform compatibility
-    folder_path = args['folder_path'].replace('/', os.sep).replace('\\', os.sep)
-    path_to_input = _resolve_input_folder(folder_path)
-    if path_to_input is None:
-        raise ValueError(
-            f"folder_path {args['folder_path']!r} is not a directory. It was looked "
-            f"for relative to the current directory ({os.getcwd()!r}), relative to "
-            f"the derived checkout root ({dir_home!r}), and under every parent of "
-            f"the current directory. Give an absolute path, or run from a directory "
-            f"from which the relative path resolves."
-        )
+    path_to_input = _input_folder(args)
     log.info(f"Reading datasets from {path_to_input}")
-    if args['file_dataset'] == 'ALL':
-        input_files = [file for file in os.listdir(path_to_input) if file.endswith('csv')]
-    else:
-        input_files = [file for file in os.listdir(path_to_input) if file in args['file_dataset'] and file.endswith('csv')]
-    if not input_files:
-        # Previously this produced a successful run with no output whatsoever,
-        # which reads exactly like a run whose models all silently failed.
-        selector = (
-            "every .csv file" if args['file_dataset'] == 'ALL'
-            else f"file_dataset={args['file_dataset']!r}"
-        )
-        raise ValueError(
-            f"No input datasets matched {selector} in {path_to_input!r}. "
-            f"Directory contents: {sorted(os.listdir(path_to_input))[:10]}"
-        )
+    input_files = _input_files(args, path_to_input)
+    # Set: every embedding but 'none' is read from here, and none is computed in this
+    # run. See embedding_cache.py for why, and for how the files are written.
+    cache_dir = _embedding_cache_dir(args)
+    if cache_dir:
+        log.info(f"Embedded features are read from embedding_cache {cache_dir}")
+        # Every cached embedding the run reads, for every dataset, is checked before
+        # anything is fitted. A run whose cache is missing a file, or holds one written
+        # under other settings, stops here, not hours in at the dataset or split that
+        # first needs it.
+        entries = []
+        for name in input_files:
+            path = os.path.join(path_to_input, name)
+            X_raw, _, _ = _read_dataset(path, args)
+            entries += emb_cache.plan(
+                name, emb_cache.file_sha256(path), X_raw.shape[1], args, scaler_name
+            )
+        emb_cache.require(cache_dir, entries)
 
     # need to populate raw data evaluation for each file, so start an empty list
     appended_raw_data_eval = []
@@ -561,10 +756,10 @@ def main(args):
     # start looping over datasets
     # start count
     file_count = 0 
-    for file in sorted(input_files):
+    for file in input_files:
         print(f"Processing file: {file}")
         # this is where the seed needs to be set so the splits are consistent
-        np.random.seed(args['seed']) 
+        np.random.seed(args['seed'])
         algorithm_globals.random_seed = args['q_seed']
 
         dataset_start_time = time.time()
@@ -572,21 +767,9 @@ def main(args):
         model_results = {}
         summary.update({'Dataset':file})
         model_results.update({'Dataset':file})
-        
-        # Load data with optional index column support
-        if args.get('index_col', False):
-            # First column contains row names/IDs
-            rawdata = pd.read_csv(os.path.join(path_to_input, file), sep=r'\t|,', index_col=0)
-            log.info(f"Loaded dataset with row names from first column")
-        else:
-            # Standard loading without index column
-            rawdata = pd.read_csv(os.path.join(path_to_input, file), sep=r'\t|,')
-        
-        X = rawdata.iloc[:, :-1].to_numpy()
-        y = rawdata.iloc[:,-1:].to_numpy()
-        y_encoded = feature_encoding(y, feature_encoding='OrdinalEncoder')
-        y_encoded = y_encoded.reshape(-1)
-        y_encoded = y_encoded.astype(int)
+
+        dataset_path = os.path.join(path_to_input, file)
+        X, y, y_encoded = _read_dataset(dataset_path, args, log)
         y_map = dict(zip(y_encoded.astype(str), y.tolist()))
         summary.update({'label_mapping': y_map})
         
@@ -618,6 +801,11 @@ def main(args):
                 f"one-vs-one split of the labels above), or drop it from 'file_dataset'."
             )
 
+        # Hashed again rather than kept from the check above: a file edited since then
+        # no longer matches the specs it was checked against, and emb_cache.load refuses it.
+        if cache_dir:
+            dataset_sha256 = emb_cache.file_sha256(dataset_path)
+
         # call and run evaluation functions
         df_dataset = pd.DataFrame(X)
         raw_data_eval = evaluate(df_dataset, y_encoded, file)
@@ -631,8 +819,6 @@ def main(args):
         log.info(f"Started processing data set {file}")
         log.info(f"Dataset has {n_classes} classes: {np.unique(y_encoded).tolist()}")
         
-        use_stratify = args.get('stratify', [])
-        test_size = args['test_size']
         iter = 0
         # makes number of iterations an argument from config
         for iter in range(args['iter']):
@@ -640,28 +826,16 @@ def main(args):
             iter=iter+1
             # track iteration time
             iter_start_time = time.time()
-            
-            # Apply stratification based on config
-            # stratify can be: ['y'], ['Y'], or empty list/None for no stratification
-            # Distinct-but-reproducible split per iteration: random_state = seed + iter makes
-            # every split different from the others, yet deterministic across reruns and
-            # independent of any other RNG consumers (embeddings etc.) that run before it.
-            split_seed = args['seed'] + iter
-            if use_stratify and len(use_stratify) > 0:
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y_encoded, stratify=y_encoded, test_size=test_size, random_state=split_seed
-                )
-                log.info(f"Begin processing iteration (split) {iter} of {args['iter']} with stratified sampling")
-            else:
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y_encoded, test_size=test_size, random_state=split_seed
-                )
-                log.info(f"Begin processing iteration (split) {iter} of {args['iter']} without stratification")
-            # Scale the features: fit one scaler on TRAIN and apply it to TEST (never fit a
-            # separate scaler on the test set -- that would use test-set statistics).
-            if scaler_name != 'None':
-                X_train, X_test = scale_train_test(X_train, X_test, scaling=scaler_name)
-        
+
+            split_seed = _split_seed(args, iter)
+            X_train, X_test, y_train, y_test, train_idx, test_idx = _split_and_scale(
+                X, y_encoded, args, iter, scaler_name
+            )
+            log.info(
+                f"Begin processing iteration (split) {iter} of {args['iter']} "
+                + ("with stratified sampling" if _is_stratified(args) else "without stratification")
+            )
+
             # Skip feature reduction on a dataset too narrow to justify it.
             #
             # Resolved per split rather than once per dataset because it reads
@@ -695,21 +869,27 @@ def main(args):
                 if embed == 'none':
                     log.info(f"No feature reduction (embedding) applied in this iteration")
                 else:
-                    log.info(f"Feature reduction (embedding) applied with {embed}")    
-                X_train_emb, X_test_emb = get_embeddings(
-                    embed, X_train, X_test,
-                    n_neighbors=args.get("n_neighbors", 30),
-                    n_components=args["n_components"],
-                    method=None,
-                    quvine_args=args.get("quvine_args", {}),
-                    # Seeded by the split, like train_test_split above. Unseeded, UMAP
-                    # read numpy's global stream -- which a model run in this process
-                    # (n_jobs: 1, one model per config) re-seeds and advances -- and ran
-                    # numba-parallel SGD, which is not reproducible even from a fixed
-                    # stream. Two jobs of one (dataset, embedding) but different models
-                    # therefore scored those models on DIFFERENT features from the second
-                    # split on, and nothing failed to say so.
-                    random_state=split_seed,
+                    log.info(f"Feature reduction (embedding) applied with {embed}")
+                data_key = _data_key(file, embed, args["n_components"], iter)
+                if cache_dir and embed != 'none':
+                    X_train_emb, X_test_emb = emb_cache.load(
+                        cache_dir,
+                        data_key,
+                        emb_cache.embedding_spec(
+                            args, file, dataset_sha256, embed, iter, scaler_name
+                        ),
+                        train_idx,
+                        test_idx,
+                    )
+                    source = f"read from {emb_cache.cache_file(cache_dir, data_key)}"
+                else:
+                    X_train_emb, X_test_emb = _embed(embed, X_train, X_test, args, split_seed)
+                    source = "computed in this run"
+                # The digest is what makes two jobs' features comparable after the fact:
+                # jobs that used the same features log the same one.
+                log.info(
+                    f"Features of {data_key}: {X_train_emb.shape[1]} columns, "
+                    f"sha256 {emb_cache.features_digest(X_train_emb, X_test_emb)}, {source}"
                 )
                 summary.update({'embeddings': embed})
                 model_results.update({'embeddings': embed})
@@ -726,18 +906,6 @@ def main(args):
                 #log.info(f"\nThe characteristics of the embedding train dataset are: \n{evaluate_data}")
                 summary.update({'iteration': iter})
                 model_results.update({'iteration': iter})
-                # os.path.splitext, not re.sub(r'\..*'): that regex truncated at the
-                # FIRST dot, so any dataset whose name carries a decimal parameter lost
-                # everything after it and collapsed onto a shared key. Two pairs in the
-                # curated 84-dataset corpus collide that way --
-                # GAMETES_Epistasis_2_Way_20atts_0.1H vs _0.4H, and
-                # GAMETES_Heterogeneity_20atts_1600_Het_0.4_0.2_50 vs _75 -- and since the
-                # colliding members share (n=1600, p=20), the row-count and width checks in
-                # compute_pqk/compute_qpl cannot tell them apart. The second dataset of each
-                # pair was scored on the first one's cached projections, without a warning,
-                # and the parameter that differs between them is the one that sets the
-                # difficulty the comparison is meant to measure.
-                data_key = '_'.join( [os.path.splitext( file )[0], embed, str(args["n_components"]), str(iter)])
                 # `summary` is created ONCE per dataset (line 396), above both the
                 # iteration and the embedding loop, and is only ever updated in place --
                 # so any key a pass does not itself write survives from the previous

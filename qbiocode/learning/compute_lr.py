@@ -7,7 +7,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 
 # ====== Additional local imports ======
-from qbiocode.learning._tuning import search_hyperparameters
+from qbiocode.learning._tuning import search_hyperparameters, tuning_scorer
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Scikit-learn imports ======
@@ -194,6 +194,7 @@ def compute_lr_opt(
         y_train,
         cv=cv,
         tuner=tuner,
+        scoring=tuning_scorer(args),
         n_trials=n_trials,
         seed=random_state,
         fixed={"random_state": random_state},

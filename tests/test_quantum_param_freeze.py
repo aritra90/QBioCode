@@ -48,15 +48,18 @@ from qbiocode.learning._tuning import build_search_space, run_function_study
 def make_stub(calls, accuracy_of=None):
     """A ``compute_*``-shaped function that records its kwargs instead of fitting.
 
-    Returns a frame with the one column ``_accuracy_of`` needs: a ``results_`` column
+    Returns a frame with the one column ``_metric_of`` needs: a ``results_`` column
     holding a metrics dict. ``accuracy_of`` maps the trial's parameters to a score, so a
-    test can make a particular configuration the winner deterministically.
+    test can make a particular configuration the winner deterministically. The score is
+    written under ``balanced_accuracy`` too, the default ``tuning_metric``.
     """
 
     def stub(X_train, X_test, y_train, y_test, args, **kwargs):
         calls.append(dict(kwargs))
         score = accuracy_of(kwargs) if accuracy_of else 0.5
-        return pd.DataFrame({"results_stub": [{"accuracy": score, "f1_score": score}]})
+        return pd.DataFrame({"results_stub": [
+            {"accuracy": score, "balanced_accuracy": score, "f1_score": score}
+        ]})
 
     return stub
 

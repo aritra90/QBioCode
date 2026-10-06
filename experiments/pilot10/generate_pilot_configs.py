@@ -28,6 +28,11 @@ pull it in through hydra's defaults list and set just those keys. So a protocol 
 made once per dataset instead of once per job, and a job file says only which job it is.
 --self-contained writes every job as one full config instead; the pilot's runs/ was
 generated that way. Either way a job composes to the same config, key for key (tested).
+
+Both layouts read their embedded features from one directory, --embedding-cache
+(default embeddings/ here), instead of embedding in each job. The submit scripts write
+the files first, one per (dataset, embedding, split), so every job of one embedding sees
+the same features whichever host runs it.
 """
 
 import argparse
@@ -100,6 +105,11 @@ STATEVECTOR_MAX_QUBITS = 13         # inclusive upper bound of band 1 (measured 
 MPS_MAX_QUBITS = 20                 # inclusive upper bound of band 2
 EMBEDDING_MIN_FEATURES = 20         # embed only when width > this
 N_COMPONENTS = 8                    # embedded width, so band 3 lands back in band 1
+# Where every layout's jobs read their embedded features (the config's embedding_cache).
+# One directory for both layouts, so the combined and the split run of one dataset score
+# their models on the same features. A split's file depends on its iteration number, not
+# on --iter, so a run with more resamples reuses the files for the splits it shares.
+EMBEDDING_CACHE_DIR = os.path.join(HERE, "embeddings")
 
 
 def _load_cost_model():
@@ -249,6 +259,15 @@ embeddings: @@EMBEDDINGS@@
 embedding_min_features: @@MINFEAT@@
 # Output width of every embedding. 8 keeps wide datasets inside the statevector band.
 n_components: @@NCOMP@@
+# Every embedding but 'none' is read from here, one file per (dataset, embedding, split),
+# and none is computed in the job: seeded UMAP differs between CPU types, so jobs that
+# embed for themselves score one arm's models on different features depending on the
+# host they land on. @@SUBMIT@@ writes the files before it submits, with
+#     python -m qbiocode.apps.qprofiler.embedding_cache <these configs>
+# and a job whose files are missing or were written under other settings stops before
+# fitting anything. null embeds in each job instead. A dataset that is not embedded
+# reads nothing from here.
+embedding_cache: @@EMBCACHE@@
 
 # ---------------------------------------------------------------------------
 # Models
@@ -348,8 +367,10 @@ n_trials_quantum: @@NTQ@@
 # Tune once, on iteration 0, then reuse those parameters for the remaining iterations.
 # This is what makes tuning the quantum arm affordable: cost per arm becomes
 # n_trials_quantum + (iter - 1) fits instead of iter x n_trials_quantum.
-# It handicaps ONLY the quantum side (the classical arm re-tunes every iteration), so a
-# quantum win measured this way is a lower bound.
+# It is OPTIMISTIC for the quantum side, not a handicap: the resamples overlap (73-87% of
+# a later iteration's test rows were iteration-0 training rows), while the classical arm
+# re-tunes every iteration. A quantum win measured this way is not a lower bound; set
+# False (or use disjoint folds) for confirmatory runs.
 freeze_quantum_params: True
 # Where the frozen parameters are cached. Per-config, so two configs cannot collide.
 # The cache key includes the backend, so switching simulators re-tunes instead of
@@ -727,10 +748,15 @@ def load_config(path):
 
 def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
           test_size=TEST_SIZE_DEFAULT, n_trials_quantum=N_TRIALS_QUANTUM_DEFAULT,
-          emb=None, model=None, runs_dir=RUNS_DIR, protocol=False):
+          emb=None, model=None, runs_dir=RUNS_DIR, protocol=False,
+          embedding_cache=EMBEDDING_CACHE_DIR):
     """One config. With ``model`` (and ``emb``) set, the self-contained split-layout job for
     that pair. With ``protocol``, the dataset's PROTOCOL for build_job's files: the same
-    text as any of its jobs, with the job keys left UNSET."""
+    text as any of its jobs, with the job keys left UNSET. ``embedding_cache`` is the
+    directory the jobs read their embedded features from, or None to embed in each job."""
+    if embedding_cache and not os.path.isabs(embedding_cache):
+        # qprofiler refuses a relative one: every job runs from its own output directory.
+        raise ValueError(f"embedding_cache must be an absolute path, got {embedding_cache!r}")
     split = model is not None or protocol
     dataset = csv[:-4]
     backend, qubits, embeddings = backend_for(feats)
@@ -795,6 +821,7 @@ def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
         ("@@ENTSPACE@@", ENTANGLEMENT_BY_BACKEND[backend]),
         ("@@MINFEAT@@", str(EMBEDDING_MIN_FEATURES)),
         ("@@NCOMP@@", str(N_COMPONENTS)),
+        ("@@EMBCACHE@@", f"'{embedding_cache}'" if embedding_cache else "null"),
         ("@@NMODELS@@", str(n_models)),
         ("@@RUNDIR@@", rundir),
         ("@@ITER@@", str(n_iter)),
@@ -851,7 +878,13 @@ def main():
     ap.add_argument("--self-contained", action="store_true",
                     help="--layout split: write each job as one full config, instead of a "
                          f"job file over its dataset's {PROTOCOL}.yaml")
+    ap.add_argument("--embedding-cache", default=EMBEDDING_CACHE_DIR, metavar="DIR",
+                    help="where the jobs read their embedded features, written by the "
+                         "submit script before it submits; '' writes null, so each job "
+                         "embeds for itself")
     args = ap.parse_args()
+    # Absolute, because qprofiler requires it: each job runs from its own output directory.
+    args.embedding_cache = os.path.abspath(args.embedding_cache) if args.embedding_cache else None
 
     if not 0.0 < args.test_size < 1.0:
         ap.error(f"--test-size must lie in (0, 1), got {args.test_size}")
@@ -926,7 +959,7 @@ def main():
             bk = "mps" if backend == "mps_simulator" else "sv"
             quantum = ast.literal_eval(QUANTUM_MODELS)
             same = dict(n_iter=args.n_iter, test_size=args.test_size, n_trials_quantum=ntq,
-                        runs_dir=args.runs_dir)
+                        runs_dir=args.runs_dir, embedding_cache=args.embedding_cache)
             if not args.self_contained:
                 _, pbody = build(i, folder, csv, rows, feats, why, protocol=True, **same)
                 with open(os.path.join(args.runs_dir, csv[:-4], f"{PROTOCOL}.yaml"), "w") as fh:
@@ -955,7 +988,7 @@ def main():
         else:
             name, body = build(i, folder, csv, rows, feats, why,
                                n_iter=args.n_iter, test_size=args.test_size,
-                               n_trials_quantum=ntq)
+                               n_trials_quantum=ntq, embedding_cache=args.embedding_cache)
             with open(os.path.join(args.config_dir, f"{name}.yaml"), "w") as fh:
                 fh.write(body)
             name += ".yaml"

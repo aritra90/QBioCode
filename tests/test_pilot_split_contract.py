@@ -9,14 +9,18 @@ hold, and each has a way of failing silently:
      ones that say which job it is. A key that drifts -- a trial budget, a seed, a search
      space -- produces a table in which one arm was run under a different protocol, and
      nothing downstream can tell.
-  2. **Same features.** The jobs of one (dataset, embedding) each embed the data
-     themselves, so the embedding must be a function of the split alone. It was not: UMAP
-     ran unseeded, from numpy's global stream, with numba-parallel SGD. In the combined
-     layout that stream was the parent's and the models ran in loky workers, so it was at
-     least one stream per dataset; split, each job's stream is advanced by its own model
+  2. **Same features.** The jobs of one (dataset, embedding) must score their models on
+     the same features. Embedding in each job, that first failed because UMAP ran
+     unseeded, from numpy's global stream, with numba-parallel SGD. In the combined layout
+     that stream was the parent's and the models ran in loky workers, so it was at least
+     one stream per dataset; split, each job's stream is advanced by its own model
      (``n_jobs: 1`` runs the model in-process), so from the second split on every model of
      a umap pass trained on different features. Randomised PCA (any matrix with a side
-     over 500, i.e. colon_cancer) had the same hole.
+     over 500, i.e. colon_cancer) had the same hole. Seeding fixed that on one CPU type
+     only: the 2026 pilot's UMAP jobs fell into three groups by host type, and the groups
+     computed different features on every split. So every config now names one
+     ``embedding_cache``, which the submit scripts fill before they submit, and the jobs
+     read their features from it.
   3. **No shared writes.** 208 concurrent jobs must not write one file. The tuner dumps
      trial kernels with an empty data_key (``proj_pqk_.npz``), so a per-dataset kernel
      directory would be written by the pca and umap pqk jobs at once.
@@ -31,6 +35,7 @@ hydra itself composes it.
 import csv
 import functools
 import importlib.util
+import os
 import pathlib
 import re
 
@@ -197,7 +202,8 @@ class TestTheShippedYamlsAreFresh:
                 return gen.build_job(idx, folder, csv_name, feats, **job)[1]
             return gen.build(idx, folder, csv_name, rows, feats, why,
                              n_iter=cfg["iter"], test_size=cfg["test_size"],
-                             n_trials_quantum=cfg["n_trials_quantum"], **job)[1]
+                             n_trials_quantum=cfg["n_trials_quantum"],
+                             embedding_cache=cfg.get("embedding_cache"), **job)[1]
         raise AssertionError(f"{ds} is not in the generator's DATASETS")
 
     def test_combined(self, generator, parents):
@@ -323,8 +329,8 @@ class TestTheComposedLayoutRunsTheSameConfig:
     ])
     def test_hydra_composes_it_the_same_way(self, layouts, ds, name):
         # load_config is only a stand-in for hydra; this is the check that it stands in
-        # faithfully. qprofiler's @hydra.main is version_base='1.1'.
-        pytest.importorskip("hydra")
+        # faithfully. qprofiler's @hydra.main is version_base='1.1'. Imported directly:
+        # hydra-core is a base requirement, so a missing one is a broken install.
         from hydra import compose, initialize_config_dir
 
         OmegaConf = _omegaconf()
@@ -371,7 +377,8 @@ class TestTheComposedLayoutRunsTheSameConfig:
 
 
 class TestTheEmbeddingIsAFunctionOfTheSplit:
-    """Two jobs of one (dataset, embedding) must embed identically, whatever ran before."""
+    """On one CPU type, a split embeds identically whatever ran before: in the precompute,
+    and in a run without a cache."""
 
     @staticmethod
     def _data(n=60, p=30, seed=0):
@@ -392,7 +399,7 @@ class TestTheEmbeddingIsAFunctionOfTheSplit:
         return out
 
     def test_umap_with_random_state_is_reproducible(self):
-        pytest.importorskip("umap")
+        # No importorskip: umap-learn is a base requirement (test_suite_hygiene.py).
         X_tr, X_te = self._data()
         (a_tr, a_te), (b_tr, b_te) = self._twice("umap", X_tr, X_te, n_components=3,
                                                  n_neighbors=10, random_state=7)
@@ -411,6 +418,99 @@ class TestTheEmbeddingIsAFunctionOfTheSplit:
         src = (ROOT / "qbiocode" / "apps" / "qprofiler" / "qprofiler.py").read_text()
         call = re.search(r"get_embeddings\((.*?)\n\s*\)", src, re.S)
         assert call and "random_state=split_seed" in call.group(1)
+
+
+class TestEveryJobReadsOneEmbeddingCache:
+    """Across CPU types: every job reads its features from one directory of files.
+
+    A config that names another directory, or none, embeds for itself on whichever host
+    it lands on, and nothing downstream can tell its features from the others'.
+    """
+
+    def test_every_config_names_the_same_absolute_directory(self, parents, splits):
+        named = {}
+        for path, cfg in [*parents.values(), *splits]:
+            named.setdefault(cfg.get("embedding_cache"), []).append(path.name)
+        assert len(named) == 1, "the configs name different caches:\n" + "\n".join(
+            f"{cache}: {len(names)} configs, e.g. {names[:3]}" for cache, names in named.items())
+        (cache,) = named
+        assert cache and os.path.isabs(cache), cache
+
+    @pytest.mark.parametrize("kind", ["combined", "protocol", "split"])
+    def test_build_writes_the_directory_it_is_given(self, generator, kind):
+        OmegaConf = _omegaconf()
+        idx, (folder, csv_name, rows, feats, why) = next(
+            (i, d) for i, d in enumerate(generator.DATASETS, start=1)
+            if "pca" in generator.backend_for(d[3])[2])
+        emb, model = generator.split_jobs(feats)[0]
+        job = {"combined": {}, "protocol": {"protocol": True},
+               "split": {"emb": emb, "model": model}}[kind]
+
+        def written(cache):
+            body = generator.build(idx, folder, csv_name, rows, feats, why,
+                                   embedding_cache=cache, **job)[1]
+            return OmegaConf.to_container(OmegaConf.create(body),
+                                          resolve=False)["embedding_cache"]
+
+        assert written("/x/emb") == "/x/emb"
+        assert written(None) is None
+        # qprofiler refuses a relative one, since every job runs from its own directory.
+        with pytest.raises(ValueError, match="absolute"):
+            written("emb")
+
+    @pytest.mark.parametrize("layout", [["--layout", "combined"], ["--layout", "split"],
+                                        ["--layout", "split", "--self-contained"]],
+                             ids=["combined", "composed", "self-contained"])
+    @pytest.mark.parametrize("flag", ["", "cache"], ids=["empty", "relative"])
+    def test_the_generator_writes_its_flag_into_every_job(self, generator, tmp_path,
+                                                          monkeypatch, capsys, layout, flag):
+        import sys
+
+        monkeypatch.chdir(tmp_path)
+        out = tmp_path / "out"
+        combined = "combined" in layout
+        monkeypatch.setattr(sys, "argv", [
+            "generate_pilot_configs.py", *layout, "--config-dir" if combined else "--runs-dir",
+            str(out), "--embedding-cache", flag])
+        generator.main()
+        capsys.readouterr()
+        jobs = _jobs(sorted(out.glob("*.yaml" if combined else "*/*.yaml")))
+        assert len(jobs) == (len(generator.DATASETS) if combined else
+                             sum(len(generator.split_jobs(f)) for *_, f, _ in generator.DATASETS))
+        # '' is null, so each job embeds for itself; a relative directory is made absolute
+        # against the working directory.
+        want = os.path.join(os.getcwd(), flag) if flag else None
+        assert {_load(p).get("embedding_cache") for p in jobs} == {want}
+
+    def test_the_shipped_cache_is_current_for_every_config(self, parents, splits):
+        """What both submit scripts check before they submit, in one call.
+
+        The combined and the split configs share the files, so a split job that needed
+        other contents than its parent is a CONFLICT here, not a file that one submit
+        script rewrites under the other's running jobs.
+        """
+        configs = [*parents.values(), *splits]
+        absent = sorted({cfg["embedding_cache"] for _, cfg in configs
+                         if cfg.get("embedding_cache")
+                         and not os.path.isdir(cfg["embedding_cache"])})
+        if absent:
+            pytest.skip(f"no embedding cache at {absent}; the submit scripts write it")
+        csvs = {os.path.join(cfg["folder_path"], name)
+                for _, cfg in configs for name in cfg["file_dataset"]}
+        absent = sorted(path for path in csvs if not os.path.isfile(path))
+        if absent:
+            pytest.skip(f"{len(absent)} datasets are not on this machine, e.g. {absent[0]}")
+        from qbiocode.apps.qprofiler import embedding_cache as emb_cache
+
+        lines = []
+        problems = emb_cache.precompute([str(p) for p, _ in configs], check_only=True,
+                                        out=lines.append)
+        assert problems == 0, "\n".join(
+            line for line in lines if not line.startswith(("current ", "skip ")))
+        # Every embedded split once, however many configs read it.
+        want = sum(len(set(cfg["embeddings"]) - {"none"}) * cfg["iter"]
+                   for _, cfg in parents.values())
+        assert lines[-1] == f"0 written, {want} already current, 0 problems"
 
 
 class TestAnInProcessModelLeavesTheCallersStreamAlone:

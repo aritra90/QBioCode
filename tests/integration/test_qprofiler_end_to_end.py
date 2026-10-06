@@ -55,6 +55,12 @@ OVERRIDES = [
     f"iter={N_ITER}",
     f"n_components={N_COMPONENTS}",
     "n_jobs=2",
+    # The shipped config tunes (grid_search and tune_quantum both True), which names the
+    # rows lr_opt/dt_opt and writes BestParams_Tuned. This module pins the untuned
+    # schema, so it asks for it explicitly, as the config's own comment says to; both
+    # keys, because grid_search off with tune_quantum on is rejected.
+    "grid_search=False",
+    "tune_quantum=False",
 ]
 
 

@@ -2,7 +2,10 @@
 import time
 from typing import Literal
 
+import numpy as np
+
 # from qiskit.primitives import Sampler
+from qiskit.quantum_info import SparsePauliOp
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit_algorithms.utils import algorithm_globals
 
@@ -19,6 +22,7 @@ from qbiocode.learning._tuning import (
     build_search_space,
     record_tuned_params,
     run_function_study,
+    seed_from,
 )
 
 
@@ -45,15 +49,32 @@ def compute_qnn(
     It then predicts the labels for the test data and evaluates the model's performance.
     The function returns the performance results, including accuracy, F1-score, AUC, runtime, as well as model parameters, and other relevant metrics.
 
+    The classifier is binary. The two labels of ``y_train`` are encoded for the network
+    -- as -1/+1 for the estimator's expectation value, as parity outcome 0/1 for the
+    sampler -- and predictions are decoded back, so ``y_predicted`` holds the caller's
+    own labels in their own dtype, and the AUC score is oriented towards the larger one.
+
+    The primitive always comes from :func:`qbiocode.utils.qutils.get_backend_session`,
+    so ``args['seed']`` (and, for the sampler, ``args['shots']``) apply on
+    ``'simulator'`` as on every other backend. ``'simulator'`` needs no transpilation;
+    ``'simulator_aer'`` and the IBM backends also get an optimization-level-3 preset
+    pass manager. The estimator runs at ``default_precision=0.0``: no artificial noise
+    is added to its expectation values, so it is exact and reproducible on both
+    simulators.
+
     Args:
         X_train (array-like): Training feature set.
         X_test (array-like): Test feature set.
-        y_train (array-like): Training labels.
+        y_train (array-like): Training labels. Exactly two distinct values, of any
+            sortable type; the larger is the positive class.
         y_test (array-like): Test labels.
         args (dict): Dictionary containing configuration parameters for the QNN.
         model (str, optional): Model type. Defaults to 'QNN'.
         data_key (str, optional): Key for the dataset. Defaults to ''.
-        primitive (Literal['estimator', 'sampler'], optional): Type of primitive to use. Defaults to 'sampler'.
+        primitive (Literal['estimator', 'sampler'], optional): Type of primitive to use.
+            'estimator' is an exact expectation value of Z on every qubit, classified by
+            its sign; 'sampler' is the parity of the measured bitstring, estimated from
+            ``args['shots']`` shots. Defaults to 'sampler'.
         verbose (bool, optional): If True, prints additional information. Defaults to False.
         local_optimizer (Literal['COBYLA', 'L_BFGS_B', 'GradientDescent'], optional): Optimizer to use. Defaults to 'COBYLA'.
         maxiter (int, optional): Maximum number of iterations for the optimizer. Defaults to 100.
@@ -64,8 +85,31 @@ def compute_qnn(
 
     Returns:
         modeleval (dict): A dictionary containing the evaluation results, including accuracy, runtime, model parameters, and other relevant metrics.
+
+    Raises:
+        ValueError: If ``y_train`` does not hold exactly two classes.
     """
     beg_time = time.time()
+
+    # NeuralNetworkClassifier does not encode integer labels: it trains against y as
+    # given and returns the network's own output space from predict() -- sign(raw) in
+    # {-1, +1} for the one-output EstimatorQNN, the argmax column index for SamplerQNN.
+    # Fitting it on a {0, 1} target therefore trained the estimator network with a
+    # squared loss against the wrong targets and made it unable to ever predict class 0
+    # (balanced accuracy <= 0.5 by construction). Both are fitted here on an explicit
+    # encoding and decoded back to the caller's labels below. Checked first, before
+    # any backend or runtime session is opened, so a bad target leaves nothing open.
+    classes = np.unique(np.asarray(y_train))
+    if classes.shape[0] != 2:
+        raise ValueError(
+            f"compute_qnn is a binary classifier: y_train must hold exactly two classes, "
+            f"got {classes.shape[0]} ({classes.tolist()!r}). Both primitives map the "
+            f"circuit to a two-way decision -- the estimator's sign, or the sampler's "
+            f"parity -- so a multiclass target cannot be represented."
+        )
+    # Index 1 is the larger label, the class roc_auc_score treats as positive, so the
+    # scores extract_binary_scores reads off below stay oriented towards it.
+    y_index = (np.asarray(y_train) == classes[1]).astype(int)
 
     # choose a method for mapping your features onto the circuit
     feature_map, _ = qutils.get_feature_map(
@@ -96,29 +140,51 @@ def compute_qnn(
     print(f"The number of parameters in your circuit is: {feature_map.num_parameters}")
     print(f"The number of ansatz parameters in your circuit is: {ansatz.num_parameters}")
 
+    # 'simulator' hands over a seeded Statevector primitive, which runs any circuit as
+    # it stands, so no transpilation is needed. Every other backend ('simulator_aer' and
+    # the IBM ones) is a real backend object whose primitive expects ISA circuits.
+    # Decided on the normalised name, like get_backend_session itself, so an alias
+    # takes the same branch as the name it resolves to.
+    needs_transpile = qutils.normalize_backend(args)["backend"] != "simulator"
+    pm = (
+        generate_preset_pass_manager(backend=backend, optimization_level=3)
+        if needs_transpile
+        else None
+    )
+
     neural_network: EstimatorQNN | SamplerQNN
 
     if primitive == "estimator":
-        if args["backend"] == "simulator":
-            neural_network = EstimatorQNN(
-                circuit=qc, input_params=feature_map.parameters, weight_params=ansatz.parameters
-            )
-        else:
-            pm = generate_preset_pass_manager(backend=backend, optimization_level=3)
-            neural_network = EstimatorQNN(
-                circuit=qc,
-                estimator=prim,
-                pass_manager=pm,
-                input_params=feature_map.parameters,
-                weight_params=ansatz.parameters,
-            )
+        # Z on every qubit, which is EstimatorQNN's own default -- built here because the
+        # default is placed on physical qubits 0..n-1 of the transpiled circuit without
+        # applying its layout, so on a device with a non-trivial layout it would measure
+        # the wrong qubits.
+        observable = SparsePauliOp("Z" * qc.num_qubits)
+        if pm is not None:
+            qc = pm.run(qc)
+            observable = observable.apply_layout(qc.layout)
+        # default_precision=0.0: EstimatorQNN's default (0.015625) is passed as the
+        # target precision of every run, and a V2 estimator honours it by adding
+        # Gaussian noise of that standard deviation to each expectation value. On Aer's
+        # EstimatorV2 that noise is unseeded, which is what made qnn on 'simulator_aer'
+        # irreproducible; on a statevector it is noise with no physical meaning.
+        neural_network = EstimatorQNN(
+            circuit=qc,
+            observables=observable,
+            estimator=prim,
+            pass_manager=pm,
+            input_params=feature_map.parameters,
+            weight_params=ansatz.parameters,
+            default_precision=0.0,
+        )
 
         # QNN maps inputs to [-1, +1]
         neural_network.forward(
             X_train[0, :], algorithm_globals.random.random(neural_network.num_weights)
         )
+        # The network's range: classes[0] -> -1, classes[1] -> +1.
+        y_fit = 2 * y_index - 1
     else:
-        # sampler=Sampler(backend=backend)
         # parity maps bitstrings to 0 or 1
         def parity(x):
             return "{:b}".format(x).count("1") % 2
@@ -126,32 +192,23 @@ def compute_qnn(
         output_shape = (
             2  # corresponds to the number of classes, possible outcomes of the (parity) mapping
         )
-        # construct QNN
-        if "simulator" in args["backend"]:
-            neural_network = SamplerQNN(
-                circuit=qc,
-                interpret=parity,
-                output_shape=output_shape,
-                input_params=feature_map.parameters,
-                weight_params=ansatz.parameters,
-            )
-        else:
-            pm = generate_preset_pass_manager(backend=backend, optimization_level=3)
-            neural_network = SamplerQNN(
-                circuit=qc,
-                sampler=prim,
-                interpret=parity,
-                output_shape=output_shape,
-                pass_manager=pm,
-                input_params=feature_map.parameters,
-                weight_params=ansatz.parameters,
-            )
+        neural_network = SamplerQNN(
+            circuit=qc,
+            sampler=prim,
+            interpret=parity,
+            output_shape=output_shape,
+            pass_manager=pm,
+            input_params=feature_map.parameters,
+            weight_params=ansatz.parameters,
+        )
+        # Parity outcome k is class classes[k].
+        y_fit = y_index
 
     # construct classifier
     qnn = NeuralNetworkClassifier(neural_network=neural_network, optimizer=optimizer)
 
     # fit classifier to data
-    model_fit = qnn.fit(X_train, y_train)
+    model_fit = qnn.fit(X_train, y_fit)
     hyperparameters = {
         "feature_map": feature_map.__class__.__name__,
         "ansatz": ansatz.__class__.__name__,
@@ -160,15 +217,22 @@ def compute_qnn(
         # Add other hyperparameters as needed
     }
     model_params = hyperparameters
-    y_predicted = qnn.predict(X_test)
+    # Decoded back to the caller's labels, in their own dtype: raw > 0 (estimator) or
+    # parity 1 (sampler) is classes[1], anything else classes[0].
+    raw_predicted = np.asarray(qnn.predict(X_test)).reshape(-1)
+    y_predicted = classes[(raw_predicted > 0).astype(int)]
     # `auc` is computed from these scores alone, never from y_predicted.
     # NeuralNetworkClassifier.predict_proba returns the network's forward pass, and its
     # shape depends on which primitive was chosen above -- both are rankings, and
     # extract_binary_scores handles each:
     #   * sampler (the default): SamplerQNN with `interpret=parity` and
-    #     `output_shape=2`, so (n, 2) probabilities over the two parity outcomes;
+    #     `output_shape=2`, so (n, 2) probabilities over the two parity outcomes; column
+    #     1 is parity 1, which the encoding above made classes[1];
     #   * estimator: EstimatorQNN, so a single (n, 1) expectation value in [-1, +1] --
-    #     not a probability, but exactly the quantity `predict` takes the sign of.
+    #     not a probability, but exactly the quantity `predict` takes the sign of, and
+    #     +1 was classes[1] in training.
+    # Either way higher means classes[1], the larger label, which is the class
+    # roc_auc_score treats as positive.
     # Scored before the session is closed: the forward pass runs the circuit again.
     y_score = extract_binary_scores(qnn, X_test)
 
@@ -216,8 +280,8 @@ def compute_qnn_opt(
     The quantum counterpart of the classical ``compute_*_opt`` functions, and driven by
     the same ``gridsearch_qnn_args`` config block -- a list is a choice, a
     ``{low, high}`` mapping is a range. It differs in how a candidate is scored: a
-    quantum fit builds an n-by-n fidelity kernel by circuit simulation, so scoring by
-    k-fold cross-validation would multiply an already expensive search by k. Each trial
+    quantum fit simulates the variational circuit at every optimizer step, so scoring
+    by k-fold cross-validation would multiply an already expensive search by k. Each trial
     is scored once, on a stratified holdout carved out of ``X_train``; the caller's test
     set is never touched by the search.
 
@@ -274,7 +338,7 @@ def compute_qnn_opt(
         args,
         model="qnn",
         n_trials=n_trials,
-        seed=args.get("seed") if isinstance(args, dict) else None,
+        seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
     )

@@ -63,10 +63,12 @@ import qbiocode.utils.qutils as qutils
 
 # ====== Additional local imports ======
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
+from qbiocode.learning.compute_pqk import _resolve_data_map
 from qbiocode.learning._tuning import (
     build_search_space,
     record_tuned_params,
     run_function_study,
+    seed_from,
 )
 
 # Imported for its availability probe and lazy loader rather than for the estimator
@@ -95,6 +97,7 @@ def compute_qpl(
     entanglement="linear",
     reps=2,
     classical_models=None,
+    data_map="unit",
 ):
     """
     This function generates quantum circuits, computes projections of the data onto these circuits,
@@ -129,14 +132,26 @@ def compute_qpl(
             optional ``[tabpfn]`` extra, so defaulting it on would make every QPL run warn
             in an ordinary install. Name it explicitly to use it. It needs no API token:
             QBioCode pins the ungated ``v2`` weights.
+        data_map (str or bool): How features become gate angles, as in
+            :func:`qbiocode.learning.compute_pqk.compute_pqk`. ``'unit'`` (the default,
+            and QPL's historical map) keeps every multiplicative factor of a feature at
+            1.0; ``'qiskit'`` uses qiskit's default ``phi(x_i, x_j) = (pi - x_i)(pi - x_j)``,
+            the map the ``eng_zz``/``qlab_zz`` generators use. ``True``/``False`` are
+            accepted as ``'unit'``/``'qiskit'``.
 
     Returns:
         modeleval (pd.DataFrame): A DataFrame containing evaluation metrics and model parameters for all models.
+
+    Raises:
+        ValueError: If ``data_map`` is not ``'unit'``, ``'qiskit'`` or a bool.
     """
 
     # Set default classical models if not provided
     if classical_models is None:
         classical_models = ["rf", "mlp", "svc", "lr", "xgb", "catboost"]
+
+    # Checked before the projection directory is created, so a typo leaves no trace.
+    data_map = _resolve_data_map(data_map)
 
     beg_time = time.time()
     feat_dimension = X_train.shape[1]
@@ -170,6 +185,10 @@ def compute_qpl(
     _projection_backend = args.get("projection_backend")
     if _projection_backend:
         fingerprint_parts = fingerprint_parts + (_projection_backend,)
+    # `data_map` joins only when it is not the default, for the same reason: 'unit' keys
+    # stay byte-identical, and a 'qiskit' projection can never load a 'unit' file.
+    if data_map != "unit":
+        fingerprint_parts = fingerprint_parts + (f"data_map={data_map}",)
     # The data itself, plus the two settings that change the numbers a projection holds
     # without changing the circuit. Without them the key names the feature map and the
     # dataset but never the rows, so a different fold of the same dataset, a regenerated
@@ -229,6 +248,9 @@ def compute_qpl(
         except (TypeError, ValueError):
             # If conversion fails, it's likely a Parameter expression
             return coeff
+
+    # 'qiskit' passes no data map, so the feature map falls back to qiskit's default.
+    data_map_func = data_map_func if data_map == "unit" else None
 
     # choose a method for mapping your features onto the circuit
     feature_map, _ = qutils.get_feature_map(
@@ -541,6 +563,9 @@ def compute_qpl(
             "best_params": getattr(estimator, "best_params_", None) or estimator.get_params(),
             # Add other hyperparameters as needed
         }
+        # Only when not the default, so 'unit' rows stay identical to earlier results.
+        if data_map != "unit":
+            hyperparameters["data_map"] = data_map
         model_params = hyperparameters
 
         model_res.append(
@@ -818,6 +843,7 @@ def compute_qpl_opt(
     entanglement=None,
     reps=None,
     classical_models=None,
+    data_map=None,
     *,
     n_trials=10,
     validation_split=0.25,
@@ -827,7 +853,7 @@ def compute_qpl_opt(
     The quantum counterpart of the classical ``compute_*_opt`` functions, and driven by
     the same ``gridsearch_qpl_args`` config block -- a list is a choice, a
     ``{low, high}`` mapping is a range. It differs in how a candidate is scored: a
-    quantum fit builds an n-by-n fidelity kernel by circuit simulation, so scoring by
+    quantum fit computes a projection of every row by circuit simulation, so scoring by
     k-fold cross-validation would multiply an already expensive search by k. Each trial
     is scored once, on a stratified holdout carved out of ``X_train``; the caller's test
     set is never touched by the search.
@@ -851,6 +877,8 @@ def compute_qpl_opt(
         primitive (list or dict): Qiskit primitives to search ('sampler', 'estimator'). None leaves it at the default.
         entanglement (list or dict): Entanglement patterns to search ('linear', 'full', ...). None leaves it at the default.
         reps (list or dict): Feature-map repetition counts to search. None leaves it at the default.
+        data_map (list): Data maps to search ('unit', 'qiskit'; see :func:`compute_qpl`).
+            None leaves it at the default.
         classical_models (list, optional): Which classical heads to fit on the quantum
             projection. **Not** a hyperparameter to search -- it selects which models
             run, so it is a list of heads rather than a list of candidate values, and
@@ -876,12 +904,13 @@ def compute_qpl_opt(
         "primitive": primitive,
         "entanglement": entanglement,
         "reps": reps,
+        "data_map": data_map,
     }
 
     # `classical_models` selects which heads run; it is not a candidate value, so it goes
     # to every trial via `fixed` rather than into the search space. Handing it to the
     # trials as well as to the final fit is what keeps the two consistent: the objective
-    # is the MEAN accuracy across heads (see _tuning._accuracy_of), so scoring candidates
+    # is the MEAN tuning_metric across heads (see _tuning._metric_of), so scoring candidates
     # on the default six while the final fit ran a different set would have chosen the
     # projection that suited heads the config excluded.
     best_params = run_function_study(
@@ -892,7 +921,7 @@ def compute_qpl_opt(
         args,
         model="qpl",
         n_trials=n_trials,
-        seed=args.get("seed") if isinstance(args, dict) else None,
+        seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
         fixed={"classical_models": classical_models},

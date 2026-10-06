@@ -70,6 +70,7 @@ from sklearn.model_selection import train_test_split
 # tests/test_openmp_import_order.py.
 import qbiocode
 from qbiocode import learning
+from qbiocode.evaluation.model_evaluation import TUNING_EVIDENCE_COLUMNS
 from qbiocode.evaluation.model_run import QUANTUM_MODELS, model_run
 from qbiocode.learning.compute_tabpfn import tabpfn_is_available
 
@@ -95,9 +96,11 @@ RESULT_KEYS = frozenset(
     }
 )
 
-#: The tuned branch swaps exactly one key. Everything else must stay put, or a run
-#: with grid_search on writes a differently-shaped table from one without.
-TUNED_RESULT_KEYS = (RESULT_KEYS - {"Model_Parameters"}) | {"BestParams_Tuned"}
+#: The tuned branch swaps exactly one key and adds the tuning evidence (the metric
+#: searched on, its score, whether the params were reused). Everything else must stay
+#: put, or a run with grid_search on writes a differently-shaped table from one without.
+TUNED_RESULT_KEYS = ((RESULT_KEYS - {"Model_Parameters"}) | {"BestParams_Tuned"}
+                     | set(TUNING_EVIDENCE_COLUMNS))
 
 #: ``model_run`` files four columns per model label. ``y_score`` is the ranking score
 #: ``modeleval`` feeds to ``roc_auc_score`` and ``average_precision_score``; it is
@@ -569,7 +572,8 @@ class TestNoResultsTableComesOutRagged:
         A tuned run and an untuned run of the same models end up in the same
         results file often enough (the documented restart workflow appends one to
         the other), so the tuned schema is not free to differ by more than the
-        parameter column. The ``_opt`` label is asserted alongside because it is
+        parameter column and the tuning evidence (``TUNING_EVIDENCE_COLUMNS``, which
+        simply read NaN on the untuned rows of a concatenated table). The ``_opt`` label is asserted alongside because it is
         the only thing that distinguishes the two rows once they are in one table.
         """
         result = _run(
@@ -585,7 +589,8 @@ class TestNoResultsTableComesOutRagged:
         assert _labels(result) == ["dt_opt", "rf_opt"]
         shapes = {label: frozenset(_row(result, label)) for label in _labels(result)}
         assert set(shapes.values()) == {TUNED_RESULT_KEYS}, (
-            f"the tuned rows are not the untuned schema with one key swapped: "
+            f"the tuned rows are not the untuned schema with one key swapped plus the "
+            f"tuning evidence: "
             f"{ {label: sorted(keys) for label, keys in shapes.items()} }"
         )
 

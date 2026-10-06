@@ -8,6 +8,8 @@
 # Usage:  ./submit_pilot.sh            submit all 12
 #         ./submit_pilot.sh 5          submit only pilot05
 #         DRY=1 ./submit_pilot.sh      print the bsub lines without submitting
+#
+# Before submitting, it writes the embedded features the jobs read (see embedding_cache).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 PY=/dccstor/boseukb/Q/envs/qbc/bin/python
@@ -199,6 +201,19 @@ for cfg in "${configs[@]}"; do
   selected+=("$cfg")
 done
 [ ${#selected[@]} -eq 0 ] && { echo "no config matched the selection"; exit 1; }
+
+# The embedded features, before any job goes out. A job reads them from its config's
+# embedding_cache and never computes them, so the combined and the split run of a dataset,
+# and any rerun, see the same features, whichever host runs them. Computed in the jobs,
+# seeded UMAP differed between CPU types. Files already current are kept. A job whose files
+# are missing stops before fitting anything, so this is not optional. DRY=1 only checks.
+if [ "${DRY:-0}" = "1" ]; then
+  env $ENVV NUMBA_NUM_THREADS=$THREADS "$PY" -m qbiocode.apps.qprofiler.embedding_cache --check "${selected[@]}" >&2 ||
+    echo "WARNING: the embedding cache cannot serve these jobs yet; a real submit writes it first" >&2
+elif ! env $ENVV NUMBA_NUM_THREADS=$THREADS "$PY" -m qbiocode.apps.qprofiler.embedding_cache "${selected[@]}" >&2; then
+  echo "!! the embedding cache could not be written (above), so nothing was submitted" >&2
+  exit 1
+fi
 
 N=${#selected[@]}
 hosts=()
