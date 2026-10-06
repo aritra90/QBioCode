@@ -15,11 +15,19 @@ wrong value silently rescales every confidence interval instead of raising -- so
 hard-coded default here would quietly drift out of step the first time the configs were
 regenerated with a different one. If the configs disagree with each other, that is a
 corpus that cannot share one correction factor, and this script refuses to guess.
+
+The configs read are the ones the jobs ran (``--config-dir``: the combined-layout
+``configs`` by default, or a runs tree such as ``runs_cv/<run_id>``). Under ``split_mode: manifest`` (stratified k-fold repeated R times, each fold
+with its own validation rows) the protocol is ``k`` and ``R`` from the split manifests
+the configs name, the correction is ``r = 1/(k-1)`` with ``kR - 1`` degrees of freedom,
+and winners are selected on validation (``select_winners(selection='validation')``)
+instead of by leave-one-iteration-out.
 """
 import argparse
 import glob
 import logging
 import os
+from typing import NamedTuple
 
 import pandas as pd
 import yaml
@@ -29,35 +37,155 @@ from qbiocode.utils.qc_winner_finder import aggregate_benchmark
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def read_run_protocol(config_dir):
-    """Return ``(test_size, n_iter, configs)`` as the configs actually declare them.
+class RunProtocol(NamedTuple):
+    """The evaluation protocol of a set of configs, as :func:`read_run_protocol` reads it.
 
-    Raises if the configs disagree: one shared ``test_size`` is an assumption baked into
-    every interval the aggregator computes, so a split corpus has to be analysed as two.
+    ``test_size`` is the value the Nadeau-Bengio / Bouckaert-Frank correction uses:
+    the config's ``test_size`` under ``split_mode: internal``, ``1/k`` under
+    ``split_mode: manifest`` (so ``r = test_size/(1-test_size) = 1/(k-1)``).
+    ``n_iter`` is ``iter`` (internal) or, in manifest mode, the number of distinct
+    global iterations the configs select through their ``splits`` key (``k * n_repeats``
+    when every config runs ``'all'``); ``k`` and ``n_repeats`` are ``None`` in internal
+    mode.
     """
+
+    split_mode: str
+    test_size: float
+    n_iter: int
+    k: int | None
+    n_repeats: int | None
+    configs: list
+
+    @property
+    def r(self):
+        """``n_test / n_train``, the correction term."""
+        return self.test_size / (1.0 - self.test_size)
+
+    @property
+    def selection(self):
+        """The select_winners rule this protocol calls for."""
+        return "validation" if self.split_mode == "manifest" else "loio"
+
+
+def _load_config(path):
+    """A config with its same-directory hydra defaults merged in (``_self_`` last unless
+    listed), the way the generator composes split-layout job files. Top-level merge only:
+    the protocol keys read here are all top-level."""
+    with open(path) as fh:
+        cfg = yaml.safe_load(fh) or {}
+    defaults = cfg.pop("defaults", None)
+    if not defaults:
+        return cfg
+    merged = {}
+    for entry in defaults if "_self_" in defaults else [*defaults, "_self_"]:
+        if entry == "_self_":
+            merged.update(cfg)
+        elif isinstance(entry, str):
+            layer = os.path.join(os.path.dirname(path), f"{entry}.yaml")
+            if os.path.exists(layer):
+                merged.update(_load_config(layer))
+    return merged
+
+
+def _config_paths(config_dir):
+    """The job configs under ``config_dir``: the combined layout's ``pilot*.yaml``, else a
+    runs tree's ``<dataset>/*.yaml`` (the files the jobs actually ran), skipping the
+    ``_``-prefixed layers (``_protocol.yaml``) that are not jobs themselves."""
     paths = sorted(glob.glob(os.path.join(config_dir, "pilot*.yaml")))
     if not paths:
+        paths = sorted(p for p in glob.glob(os.path.join(config_dir, "*", "*.yaml"))
+                       if not os.path.basename(p).startswith("_"))
+    return paths
+
+
+def _manifest_protocol(cfg, path):
+    """``(k, n_repeats, iterations)`` of a manifest-mode config, from the manifests it
+    names; ``iterations`` are the global iterations its ``splits`` key selects."""
+    from qbiocode.apps.qprofiler.split_manifest import load_manifest, manifest_path
+
+    split_dir = cfg.get("split_dir")
+    files = cfg.get("file_dataset") or []
+    files = [files] if isinstance(files, str) else list(files)
+    if not split_dir or not files:
+        raise SystemExit(f"{path}: split_mode manifest needs split_dir and file_dataset")
+    shapes, iterations = set(), set()
+    for csv in files:
+        manifest = load_manifest(manifest_path(split_dir, csv))
+        shapes.add((int(manifest.k), int(manifest.n_repeats)))
+        iterations.update(int(sp.iteration) for sp in manifest.select(cfg.get("splits", "all")))
+    if len(shapes) > 1:
+        raise SystemExit(f"{path}: its datasets' manifests disagree on (k, R): {sorted(shapes)}")
+    return (*shapes.pop(), iterations)
+
+
+def read_run_protocol(config_dir, *, detail=False):
+    """Return ``(test_size, n_iter, configs)`` as the configs actually declare them.
+
+    ``config_dir`` is either a combined-layout config directory (``pilot*.yaml``) or a
+    runs tree (``<dataset>/*.yaml``, the job files that were actually executed; their
+    ``_protocol.yaml`` defaults layer is merged in). Under ``split_mode: manifest``,
+    ``k`` and ``R`` are read from the split manifests the configs name
+    (``split_dir``), ``test_size = 1/k``, and ``n_iter`` counts the distinct global
+    iterations the configs' ``splits`` select (``k*R`` for a run over every split).
+
+    Raises if the configs disagree: one shared protocol is an assumption baked into
+    every interval the aggregator computes, so a split corpus has to be analysed as two.
+
+    Args:
+        config_dir (str): directory of configs, as above.
+        detail (bool): return a :class:`RunProtocol` (with ``split_mode``, ``k``,
+            ``n_repeats`` and ``r``) instead of the 3-tuple.
+    """
+    paths = _config_paths(config_dir)
+    if not paths:
         raise SystemExit(f"no configs under {config_dir}; run generate_pilot_configs.py")
-    seen, configs = {}, []
+    seen, configs, iterations = {}, [], set()
     for path in paths:
-        with open(path) as fh:
-            cfg = yaml.safe_load(fh)
+        cfg = _load_config(path)
         configs.append((path, cfg))
-        seen.setdefault((cfg.get("test_size"), cfg.get("iter")), []).append(
-            os.path.basename(path)
-        )
+        mode = cfg.get("split_mode") or "internal"
+        if mode == "manifest":
+            k_, reps_, its = _manifest_protocol(cfg, path)
+            key = (mode, k_, reps_)
+            iterations |= its
+        else:
+            key = (mode, cfg.get("test_size"), cfg.get("iter"))
+        seen.setdefault(key, []).append(os.path.basename(path))
     if len(seen) > 1:
-        detail = "; ".join(f"test_size={k[0]}, iter={k[1]}: {len(v)} configs" for k, v in seen.items())
+        detail_ = "; ".join(
+            (f"split_mode=manifest, k={key[1]}, R={key[2]}" if key[0] == "manifest"
+             else f"test_size={key[1]}, iter={key[2]}") + f": {len(v)} configs"
+            for key, v in seen.items())
+        # --test-size can re-scale an internal group, but is refused in manifest mode, so
+        # the advice depends on what is mixed.
+        advice = ("Point --config-dir at one runs tree per protocol."
+                  if any(key[0] == "manifest" for key in seen)
+                  else "Analyse each group separately with --test-size.")
         raise SystemExit(
             "configs disagree on the run protocol, so one correction factor cannot cover "
-            f"them ({detail}). Analyse each group separately with --test-size."
+            f"them ({detail_}). {advice}"
         )
-    (test_size, n_iter), _ = next(iter(seen.items()))
-    return float(test_size), int(n_iter), configs
+    key, _ = next(iter(seen.items()))
+    if key[0] == "manifest":
+        k, n_repeats = key[1], key[2]
+        protocol = RunProtocol("manifest", 1.0 / k, len(iterations), k, n_repeats, configs)
+    else:
+        if key[1] is None or key[2] is None:
+            raise SystemExit(
+                f"configs under {config_dir} do not declare test_size and iter "
+                f"({len(configs)} configs); cannot derive the correction factor."
+            )
+        protocol = RunProtocol("internal", float(key[1]), int(key[2]), None, None, configs)
+    if detail:
+        return protocol
+    return protocol.test_size, protocol.n_iter, protocol.configs
 
 
 def granularity_report(configs, test_size, epsilon):
     """Flag datasets where ``epsilon`` is finer than one step of balanced accuracy.
+
+    ``test_size`` is the test fraction: ``1/k`` under ``split_mode: manifest``, so the
+    test minority is about ``minority/k`` per outer fold.
 
     Balanced accuracy on a test set holding ``m`` minority rows can only take values on a
     grid of spacing ``0.5/m``. Where that spacing exceeds ``epsilon`` (the equivalence
@@ -66,13 +194,15 @@ def granularity_report(configs, test_size, epsilon):
     ``test_size`` repairs it -- only more data does. Reported so those rows are read as
     granularity-limited rather than as null results.
     """
-    rows = []
+    rows, done = [], set()
     for path, cfg in configs:
         folder = cfg.get("folder_path", "")
         for csv in cfg.get("file_dataset", []) or []:
             full = os.path.join(folder, csv)
-            if not os.path.exists(full):
+            # A split-layout runs tree has one config per job, many per dataset.
+            if full in done or not os.path.exists(full):
                 continue
+            done.add(full)
             # Label is the last column -- the convention the rest of the repo uses when it
             # computes `df.shape[1] - 1` features.
             y = pd.read_csv(full).iloc[:, -1]
@@ -95,8 +225,11 @@ def granularity_report(configs, test_size, epsilon):
 def tuning_budget_report(configs):
     """Per-dataset search budgets for the two arms, which the pilot does NOT equalise.
 
-    Both arms are tuned by the same tuner over the same inner validation split, but not for
-    the same number of trials. The classical budget is one number for the whole corpus; the
+    Both arms are tuned by the same tuner, but in the pilot (``split_mode: internal``) not
+    for the same number of trials, nor on the same validation rows: classical tuners score
+    an inner cross-validation, quantum ones an inner holdout. (``split_mode: manifest``
+    gives every arm the same ``n_trials`` on the fold's shared validation rows, and the
+    ratio below is then 1.) The classical budget is one number for the whole corpus; the
     quantum budget is chosen per dataset by the wall-clock model (see cost_model.py and
     ``generate_pilot_configs.py --budget-hours``), because quantum cost grows with row count
     -- quadratically for qsvc, whose kernel needs one circuit per training pair -- while
@@ -138,9 +271,13 @@ def main():
     p.add_argument("--output-dir", default=os.path.join(HERE, "analysis"))
     p.add_argument("--tag", default="pilot10")
     p.add_argument("--primary-metric", default="balanced_accuracy")
-    p.add_argument("--config-dir", default=os.path.join(HERE, "configs"))
+    p.add_argument("--config-dir", default=os.path.join(HERE, "configs"),
+                   help="the configs the jobs ran: a combined-layout dir (pilot*.yaml; "
+                        "the default) or a runs tree (<dataset>/*.yaml), e.g. "
+                        "runs_cv/ID for a split_mode: manifest run")
     p.add_argument("--test-size", type=float, default=None,
-                   help="override; by default read from the configs")
+                   help="override; by default read from the configs (split_mode "
+                        "internal only: under split_mode manifest it is 1/k)")
     p.add_argument("--epsilon", type=float, default=None,
                    help="TOST equivalence bound; omit to derive it per metric from the "
                         "resolution floor")
@@ -154,14 +291,24 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    cfg_test_size, cfg_iter, configs = read_run_protocol(args.config_dir)
+    protocol = read_run_protocol(args.config_dir, detail=True)
+    configs, cfg_test_size = protocol.configs, protocol.test_size
+    if protocol.split_mode == "manifest" and args.test_size is not None:
+        raise SystemExit("--test-size does not apply to split_mode manifest: the "
+                         f"correction is r = 1/(k-1) with k={protocol.k} from the manifests")
     test_size = args.test_size if args.test_size is not None else cfg_test_size
     if args.test_size is not None and abs(args.test_size - cfg_test_size) > 1e-12:
         # Loud, because every interval below is scaled by it and a silent override would
         # make the tables look precise while being wrong.
         print(f"!! overriding config test_size={cfg_test_size:g} with {args.test_size:g}")
-    print(f"protocol from configs: test_size={cfg_test_size:g}  iter={cfg_iter}  "
-          f"({len(configs)} configs)")
+    if protocol.split_mode == "manifest":
+        print(f"protocol from configs: split_mode=manifest  k={protocol.k}  "
+              f"R={protocol.n_repeats}  r=1/(k-1)={protocol.r:.4g}  "
+              f"splits run={protocol.n_iter}/{protocol.k * protocol.n_repeats}  "
+              f"({len(configs)} configs); validation-selected winners")
+    else:
+        print(f"protocol from configs: test_size={cfg_test_size:g}  iter={protocol.n_iter}  "
+              f"({len(configs)} configs)")
 
     out = aggregate_benchmark(
         results_root=args.results_root,
@@ -173,6 +320,8 @@ def main():
         margin=args.margin,
         fdr=args.fdr,
         kernels_root=None if args.no_kernels else args.kernels_root,
+        selection=protocol.selection,
+        k=protocol.k,
     )
 
     print("\n=== inventory (did every arm land?) ===")

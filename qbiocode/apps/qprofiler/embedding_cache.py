@@ -45,6 +45,20 @@ A file holds the embedded train and test rows, the dataset rows each side came f
 two JSON records. ``spec`` holds every input the embedding depends on, and each read
 checks it. ``provenance`` records where, when and with which library versions the file
 was computed, and is never checked.
+
+``--check`` is the dry run: it lists every file the configs read, as ``current``,
+``MISSING`` or ``STALE``, writes nothing, and exits 1 if anything would be written.
+``--dry-run`` lists the same and writes nothing, but exits 0 unless a config is invalid,
+for a preview of what a real run would write.
+
+Under ``split_mode: manifest`` the splits are the dataset manifest's, and only those the
+config's ``splits`` selects are written. Each split has two files: the final stage,
+``emb_<data_key>.npz``, fitted on the outer training fold and applied to the test fold,
+and the tuning stage, ``emb_<data_key>__tune.npz``, fitted on the fit rows and applied
+to the validation rows (stored under the same array names). Their spec names the
+manifest, the outer split, the stage and the embedding seed instead of the seed, test
+size and stratification of a drawn split, so a file written in one split mode is stale
+to a run in the other.
 """
 
 import argparse
@@ -69,7 +83,13 @@ CACHE_VERSION = 1
 #: How a missing file gets written. Every error quotes it.
 PRECOMPUTE_COMMAND = "python -m qbiocode.apps.qprofiler.embedding_cache <config.yaml> ..."
 
+#: The array names of a file. A tuning-stage file (``split_mode: manifest``) stores the
+#: fit rows under the ``train`` names and the validation rows under the ``test`` names;
+#: its spec's ``stage`` says which it is.
 _ARRAYS = ("X_train", "X_test", "train_idx", "test_idx")
+
+#: Appended to a pass's data_key to name its tuning-stage file, ``emb_<data_key>__tune.npz``.
+TUNE_SUFFIX = "__tune"
 _ABSENT = "<absent>"
 
 log = logging.getLogger(__name__)
@@ -82,6 +102,12 @@ class EmbeddingCacheError(ValueError):
 def cache_file(cache_dir, data_key):
     """Where the embedding of one (dataset, embedding, split) pass is stored."""
     return os.path.join(cache_dir, f"emb_{data_key}.npz")
+
+
+def tune_key(data_key):
+    """The cache key of a pass's tuning stage: its fit and validation rows, embedded with
+    the embedding fitted on the fit rows (``split_mode: manifest`` only)."""
+    return f"{data_key}{TUNE_SUFFIX}"
 
 
 def file_sha256(path):
@@ -126,23 +152,55 @@ def _canonical(record):
     return json.loads(json.dumps(record, sort_keys=True))
 
 
-def embedding_spec(args, dataset, dataset_sha256, embedding, iteration, scaler_name):
+def embedding_spec(args, dataset, dataset_sha256, embedding, iteration, scaler_name,
+                   manifest=None, stage="final"):
     """Every input that determines the embedding of one (dataset, embedding, split).
 
     A file serves a run exactly when its stored spec equals the run's. The model, the
     backend and the output paths are left out on purpose: they are what differ between
     the jobs that share one file.
 
+    Under ``split_mode: manifest`` (``manifest`` given) the split is the manifest's, so
+    the spec names the manifest, the outer split and the stage instead of the seed,
+    test size and stratification a drawn split depends on. The two layouts share no
+    spec, so a file written in one mode is stale to a run in the other.
+
     Args:
         args: the run config (a dict or an OmegaConf DictConfig).
         dataset (str): the CSV's file name, as ``file_dataset`` lists it.
         dataset_sha256 (str): :func:`file_sha256` of that CSV.
         embedding (str): the embedding name, as the config writes it.
-        iteration (int): the split, 1-based.
+        iteration (int): the split, 1-based (the global iteration in manifest mode).
         scaler_name (str): what ``_validate_config`` resolved ``scaling`` to.
+        manifest: the dataset's :class:`~qbiocode.apps.qprofiler.split_manifest.SplitManifest`
+            under ``split_mode: manifest``; None otherwise.
+        stage (str): manifest mode only. ``'final'``: fitted on the outer training
+            fold, applied to the test fold. ``'tune'``: fitted on the fit rows, applied
+            to the validation rows.
     """
     from qbiocode.apps.qprofiler import qprofiler as qp
 
+    if manifest is not None:
+        if stage not in ("final", "tune"):
+            raise ValueError(f"stage must be 'final' or 'tune'; got {stage!r}")
+        split = manifest.split(iteration)
+        return _canonical({
+            "cache_version": CACHE_VERSION,
+            "dataset": dataset,
+            "dataset_sha256": dataset_sha256,
+            "index_col": bool(args.get("index_col", False)),
+            # The split: which manifest, which outer split, which side of it.
+            "split_mode": "manifest",
+            "manifest_sha256": manifest.file_sha256,
+            "iteration": int(iteration),
+            "repeat": int(split.repeat),
+            "fold": int(split.fold),
+            "stage": stage,
+            "embed_seed": int(qp._split_seed(args, iteration)),
+            "scaling": scaler_name,
+            "embedding": embedding,
+            **{key: _plain(value) for key, value in qp._embedding_settings(args).items()},
+        })
     return _canonical({
         "cache_version": CACHE_VERSION,
         # The rows: which file, byte for byte, and how it is parsed.
@@ -162,22 +220,49 @@ def embedding_spec(args, dataset, dataset_sha256, embedding, iteration, scaler_n
     })
 
 
-def plan(dataset, dataset_sha256, n_features, args, scaler_name):
-    """``[(data_key, spec)]``, one pair for each embedding a run reads for ``dataset``.
+def plan(dataset, dataset_sha256, n_features, args, scaler_name, manifest=None):
+    """``[(key, spec)]``, one pair for each embedding a run reads for ``dataset``.
 
     That is every split, crossed with every embedding except ``'none'`` that
     ``resolve_embeddings`` keeps at this feature count. main's embedding loop makes the
-    same choice.
+    same choice. The key is the pass's data_key.
+
+    Under ``split_mode: manifest`` (``manifest`` given) the splits are the ones the
+    config's ``splits`` selects, and each has two entries: the final stage under its
+    data_key and the tuning stage under :func:`tune_key` of it.
+
+    Raises:
+        ValueError: under ``split_mode: manifest``, for a transductive embedding.
     """
     from qbiocode import resolve_embeddings
     from qbiocode.apps.qprofiler import qprofiler as qp
-    from qbiocode.embeddings import DEFAULT_EMBEDDING_MIN_FEATURES
+    from qbiocode.embeddings import DEFAULT_EMBEDDING_MIN_FEATURES, is_transductive
 
     embeddings, _ = resolve_embeddings(
         args["embeddings"],
         n_features,
         min_features=args.get("embedding_min_features", DEFAULT_EMBEDDING_MIN_FEATURES),
     )
+    if manifest is not None:
+        # qprofiler._validate_config refuses these first; this keeps plan safe on its own.
+        transductive = [e for e in embeddings if is_transductive(e)]
+        if transductive:
+            raise ValueError(
+                f"split_mode: manifest needs inductive embeddings; {transductive} would "
+                f"be fit on the validation rows at the tuning stage."
+            )
+        entries = []
+        for split in manifest.select(qp._split_selection(args)):
+            for embed in embeddings:
+                if embed == "none":
+                    continue
+                data_key = qp._data_key(dataset, embed, args["n_components"], split.iteration)
+                for stage, key in (("final", data_key), ("tune", tune_key(data_key))):
+                    entries.append((key, embedding_spec(
+                        args, dataset, dataset_sha256, embed, split.iteration, scaler_name,
+                        manifest=manifest, stage=stage,
+                    )))
+        return entries
     return [
         (
             qp._data_key(dataset, embed, args["n_components"], iteration),
@@ -406,11 +491,16 @@ def load(cache_dir, data_key, spec, train_idx, test_idx):
             f"{problem}. Rewrite it with --force added to\n    {PRECOMPUTE_COMMAND}"
         )
     if not _same_rows(entry, train_idx, test_idx):
+        if "split_mode" in spec:
+            # Manifest mode: the spec pins the manifest's bytes, so the rows cannot have
+            # changed with it; the file does not hold what its spec says.
+            cause = "The manifest is the same, so the file itself is damaged"
+        else:
+            cause = "So the split itself has changed, probably with the scikit-learn version"
         raise EmbeddingCacheError(
             f"{path} was embedded from other rows than this run's split "
-            f"{spec['iteration']}, although its settings match. So the split itself has "
-            f"changed, probably with the scikit-learn version. Rewrite the file with "
-            f"--force added to\n    {PRECOMPUTE_COMMAND}"
+            f"{spec['iteration']}, although its settings match. {cause}. Rewrite the file "
+            f"with --force added to\n    {PRECOMPUTE_COMMAND}"
         )
     return entry["X_train"], entry["X_test"]
 
@@ -459,6 +549,9 @@ def precompute(config_paths, check_only=False, force=False, out=print):
 
     With ``check_only`` it writes nothing and reports what is missing or stale.
 
+    A ``split_mode: manifest`` config has its datasets checked against their manifests
+    first, as the job does, and gets both stages of each split its ``splits`` selects.
+
     A file that already holds an entry's spec, embedded from the same rows, is left
     alone, because that is what running jobs already read. A file written under other
     settings is reported, not replaced, unless ``force`` is set. Two configs that need
@@ -493,12 +586,19 @@ def precompute(config_paths, check_only=False, force=False, out=print):
             out(f"skip     {config_path}: no embedding_cache, so its run embeds for itself")
             continue
         path_to_input = qp._input_folder(args)
+        manifest_mode = qp._split_mode(args) == "manifest"
         for file in qp._input_files(args, path_to_input):
-            X, y_encoded, sha256 = _dataset(
-                loaded, os.path.join(path_to_input, file), args.get("index_col", False)
+            dataset_path = os.path.join(path_to_input, file)
+            X, y_encoded, sha256 = _dataset(loaded, dataset_path, args.get("index_col", False))
+            # Under split_mode: manifest the rows come from the dataset's manifest, which
+            # is checked against the CSV here exactly as the job will check it.
+            manifest = (
+                qp._dataset_manifest(args, dataset_path, len(X), y_encoded, sha256)
+                if manifest_mode else None
             )
             todo = []
-            for data_key, spec in plan(file, sha256, X.shape[1], args, scaler_name):
+            for data_key, spec in plan(file, sha256, X.shape[1], args, scaler_name,
+                                       manifest=manifest):
                 path = cache_file(cache_dir, data_key)
                 if path in claimed:
                     other_spec, other_config = claimed[path]
@@ -519,12 +619,18 @@ def precompute(config_paths, check_only=False, force=False, out=print):
             # stream rather than its random_state.
             np.random.seed(args["seed"])
             algorithm_globals.random_seed = args["q_seed"]
-            for iteration in sorted({spec["iteration"] for spec, _ in todo}):
+            # One (split, stage) at a time. Internal-mode specs have no stage: their one
+            # file per split is the final stage.
+            for iteration, stage in sorted(
+                {(spec["iteration"], spec.get("stage", "final")) for spec, _ in todo}
+            ):
                 X_train, X_test, _, _, train_idx, test_idx = qp._split_and_scale(
-                    X, y_encoded, args, iteration, scaler_name
+                    X, y_encoded, args, iteration, scaler_name,
+                    split=manifest.split(iteration) if manifest is not None else None,
+                    stage=stage,
                 )
                 for spec, path in todo:
-                    if spec["iteration"] != iteration:
+                    if (spec["iteration"], spec.get("stage", "final")) != (iteration, stage):
                         continue
                     name = os.path.basename(path)
                     status, reason = _status(path, spec, train_idx, test_idx)
@@ -560,8 +666,8 @@ def main(argv=None):
         prog="python -m qbiocode.apps.qprofiler.embedding_cache",
         description=(
             "Write the embedded features that QProfiler configs with embedding_cache "
-            "read, one file per (dataset, embedding, split). Files that are already "
-            "current are kept."
+            "read, one file per (dataset, embedding, split), two under split_mode: "
+            "manifest (final and tuning stage). Files that are already current are kept."
         ),
     )
     parser.add_argument(
@@ -571,7 +677,13 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--check", action="store_true",
-        help="write nothing; exit 1 if any file is missing or stale",
+        help="the dry run: list each file's status and write nothing; exit 1 if any "
+             "file is missing or stale",
+    )
+    mode.add_argument(
+        "--dry-run", action="store_true",
+        help="list what would be written, as --check does, and write nothing; exit 0 "
+             "unless a config is invalid",
     )
     mode.add_argument(
         "--force", action="store_true",
@@ -585,11 +697,12 @@ def main(argv=None):
     # Seeded UMAP says it runs single-threaded once per fit, which is intended.
     warnings.filterwarnings("ignore", message=r"n_jobs value .* overridden")
     try:
-        problems = precompute(options.configs, check_only=options.check, force=options.force)
+        problems = precompute(options.configs, check_only=options.check or options.dry_run,
+                              force=options.force)
     except ValueError as exc:  # a config that fails validation, or EmbeddingCacheError
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    return 1 if problems else 0
+    return 1 if problems and not options.dry_run else 0
 
 
 if __name__ == "__main__":

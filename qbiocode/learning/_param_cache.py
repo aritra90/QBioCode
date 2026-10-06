@@ -158,6 +158,22 @@ def freezing_enabled(args: Mapping[str, Any]) -> bool:
     return bool(args.get(FREEZE_KEY, False))
 
 
+def _refuse_validation(validation: Any, model: str) -> None:
+    """Freezing has no place in a fold-based run (``split_mode: manifest``).
+
+    There every outer fold is tuned on its own validation rows, and a configuration
+    frozen on one fold was selected on rows that are another fold's test rows. The
+    tuners never call the cache with a validation split; this makes a caller that tries
+    fail loudly instead of leaking across folds.
+    """
+    if validation is not None:
+        raise ValueError(
+            f"frozen quantum parameters cannot be used with a validation split "
+            f"(split_mode: manifest) for {model!r}: each fold is tuned on its own "
+            f"validation rows. Set freeze_quantum_params: False."
+        )
+
+
 #: What a frozen payload without a ``tuning_metric`` field was tuned on. Such files
 #: predate the key, when every tuner selected on plain accuracy.
 LEGACY_TUNING_METRIC = "accuracy"
@@ -170,6 +186,7 @@ def load_frozen_params(
     space: Mapping[str, Any] | None = None,
     *,
     metric: str | None = None,
+    validation: Any = None,
 ) -> dict | None:
     """The parameters frozen for this ``(dataset, embedding, n_components, model)``.
 
@@ -196,10 +213,15 @@ def load_frozen_params(
         space (Mapping): optional current search space, for the staleness check.
         metric (str or None): the run's ``tuning_metric``, for the same check. ``None``
             skips it.
+        validation (ValidationSplit or None): must be ``None``; see :func:`_refuse_validation`.
 
     Returns:
         TunedParams | None: the frozen parameters, or ``None`` to search.
+
+    Raises:
+        ValueError: If ``validation`` is given.
     """
+    _refuse_validation(validation, model)
     if not freezing_enabled(args):
         return None
     path = _cache_path(args, data_key, model)
@@ -277,6 +299,7 @@ def save_frozen_params(
     *,
     metric: str | None = None,
     score: float | None = None,
+    validation: Any = None,
 ) -> str | None:
     """Persist ``params`` as the frozen configuration for later resamples.
 
@@ -295,7 +318,10 @@ def save_frozen_params(
     Returns the path written, or ``None`` if freezing is off, ``params`` is empty, or the
     write failed. A failed write is logged and ignored: the run continues and later
     resamples simply search again.
+
+    Raises ``ValueError`` if ``validation`` is given; see :func:`_refuse_validation`.
     """
+    _refuse_validation(validation, model)
     if not freezing_enabled(args) or not params:
         return None
     path = _cache_path(args, data_key, model)

@@ -628,13 +628,23 @@ class TestTheCommandLine:
         assert "4 problems" in capsys.readouterr().out
         assert not (tmp_path / "cache").exists()
 
+    def test_dry_run_lists_the_missing_files_writes_nothing_and_exits_zero(
+            self, experiment, tmp_path, capsys):
+        """--dry-run is a preview, not a gate; submit_runs.sh DRY=1 uses --check for its exit."""
+        config = _write_config(tmp_path / "job.yaml", experiment.data, tmp_path / "cache")
+        assert emb_cache.main(["--dry-run", str(config)]) == 0
+        assert "4 problems" in capsys.readouterr().out
+        assert not (tmp_path / "cache").exists()
+
     def test_two_when_a_config_is_invalid(self, experiment, tmp_path, capsys):
         config = _write_config(tmp_path / "job.yaml", experiment.data, "embeddings")
         assert emb_cache.main([str(config)]) == 2
         assert "error: embedding_cache must be an absolute path" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("argv", [["missing.yaml"], ["--check", "--force", "job.yaml"], []],
-                             ids=["no-such-config", "check-and-force", "no-config"])
+    @pytest.mark.parametrize("argv", [["missing.yaml"], ["--check", "--force", "job.yaml"],
+                                      ["--dry-run", "--check", "job.yaml"], []],
+                             ids=["no-such-config", "check-and-force", "dry-run-and-check",
+                                  "no-config"])
     def test_usage_errors_exit_two_before_anything_runs(self, experiment, argv, monkeypatch,
                                                         capsys):
         monkeypatch.chdir(experiment.config.parent)

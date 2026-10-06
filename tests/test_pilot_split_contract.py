@@ -539,3 +539,413 @@ class TestAnInProcessModelLeavesTheCallersStreamAlone:
         with pytest.raises(RuntimeError):
             _call_with_global_seeds(boom, 1, None)
         np.testing.assert_array_equal(np.random.rand(4), expected)
+
+
+# ---------------------------------------------------------------------------
+# --split-mode manifest: one job per (dataset, split, embedding, group) under
+# <runs-dir>/<run-id>/, every split from a precomputed manifest.
+# ---------------------------------------------------------------------------
+
+#: Fake curated datasets: id -> p. labor is the pilot's p=16 mps case (no embedding); spect
+#: and spectf share a prefix, so 'spect' must resolve by the exact '__spect' suffix only.
+FAKE_CURATED = {"pmlb__labor": 16, "pmlb__spect": 22, "pmlb__spectf": 44,
+                "pmlb__glass2": 9, "libsvm__glass2": 9, "pmlb__appendicitis": 7}
+
+
+def _fake_tree(root, with_manifest=None, repeats=3, k=5):
+    """A curated tree (<id>/<id>.csv + meta.yaml) and schema-2 manifests for it."""
+    import json
+
+    data, splits = root / "datasets", root / "splits"
+    splits.mkdir(parents=True)
+    for i, (ds, p) in enumerate(sorted(FAKE_CURATED.items())):
+        sha = f"{i:064x}"
+        (data / ds).mkdir(parents=True)
+        (data / ds / f"{ds}.csv").write_text("x,y\n")
+        (data / ds / "meta.yaml").write_text(f"n: 60\np: {p}\nsha256: '{sha}'\n")
+        if with_manifest is not None and ds not in with_manifest:
+            continue
+        folds = [{"repeat": r, "fold": f, "train": [], "val": [], "test": []}
+                 for r in range(repeats) for f in range(k)]
+        (splits / f"{ds}.json").write_text(json.dumps(
+            {"schema_version": 2, "dataset_id": ds, "sha256": sha, "k": k,
+             "n_repeats": repeats, "folds": folds}))
+    return data, splits
+
+
+def _manifest_run(generator, monkeypatch, tmp_path, *extra, run_id="t1", with_manifest=None):
+    import sys
+
+    data, splits = _fake_tree(tmp_path / "in", with_manifest=with_manifest)
+    runs = tmp_path / "runs_cv"
+    monkeypatch.setattr(sys, "argv", [
+        "generate_pilot_configs.py", "--split-mode", "manifest", "--run-id", run_id,
+        "--runs-dir", str(runs), "--datasets-root", str(data), "--split-dir", str(splits),
+        *extra])
+    generator.main()
+    root = runs / run_id
+    with open(root / "MANIFEST.tsv", newline="") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    return root, rows
+
+
+SHORT = ("--datasets", "appendicitis,labor,spect", "--models", "qsvc,pqk,qnn",
+         "--splits", "1-5", "--n-trials", "30",
+         "--wall", "classical=0:45,qsvc=2:00,pqk=2:00,qnn=4:00")
+
+
+class TestTheManifestModeGenerator:
+    """The short-pilot generation, run on a fake curated tree and fake manifests."""
+
+    @pytest.fixture
+    def short(self, generator, monkeypatch, tmp_path):
+        return _manifest_run(generator, monkeypatch, tmp_path, *SHORT)
+
+    def test_one_job_per_dataset_split_embedding_and_group(self, short):
+        root, rows = short
+        # appendicitis and labor: none; spect (p=22): pca + umap. 4 groups, 5 splits.
+        assert len(rows) == (1 + 1 + 2) * 5 * 4
+        keys = {(r["dataset"], r["iteration"], r["embedding"], r["group"]) for r in rows}
+        assert len(keys) == len(rows)
+        assert len(_jobs(sorted(root.glob("*/*.yaml")))) == len(rows)
+        assert {r["group"] for r in rows} == {"classical", "qsvc", "pqk", "qnn"}
+        assert {r["iteration"] for r in rows} == {"1", "2", "3", "4", "5"}
+
+    def test_embeddings_follow_the_default_rule(self, short):
+        _, rows = short
+        emb = {}
+        for r in rows:
+            emb.setdefault(r["dataset"], set()).add(r["embedding"])
+        assert emb == {"pmlb__appendicitis": {"none"}, "pmlb__labor": {"none"},
+                       "pmlb__spect": {"pca", "umap"}}
+        labor = {r["backend"] for r in rows if r["dataset"] == "pmlb__labor"}
+        assert labor == {"mps_simulator"}
+
+    def test_no_two_jobs_share_a_writable_path(self, short):
+        root, rows = short
+        seen = {}
+        for r in rows:
+            cfg = _load(pathlib.Path(r["yaml"]))
+            for key in ("quantum_param_dir", "kernel_dump_dir"):
+                seen.setdefault(key, []).append(cfg[key])
+            seen.setdefault("run_dir", []).append(_run_dir_root(cfg))
+            assert all(str(v).startswith(str(root)) for v in (cfg["quantum_param_dir"],
+                                                              cfg["kernel_dump_dir"]))
+        for key, values in seen.items():
+            assert len(set(values)) == len(values), key
+
+    def test_walls_are_per_group(self, short):
+        _, rows = short
+        want = {"classical": "0:45", "qsvc": "2:00", "pqk": "2:00", "qnn": "4:00"}
+        assert all(r["wall"] == want[r["group"]] for r in rows)
+
+    def test_the_subsets_and_the_run_are_recorded(self, short):
+        _, rows = short
+        header = list(rows[0])
+        gen = _module("generate_pilot_configs")
+        assert header == list(gen.MANIFEST_COLUMNS) + list(gen.MANIFEST_MODE_COLUMNS)
+        r = rows[0]
+        assert r["split_mode"] == "manifest" and r["run_id"] == "t1"
+        assert r["sel_datasets"] == "pmlb__appendicitis,pmlb__labor,pmlb__spect"
+        assert r["sel_splits"] == "1-5" and r["n_trials"] == "30"
+        assert set(r["sel_models"].split(",")) == {"qsvc", "pqk", "qnn", "classical"}
+        assert all(x["config"].startswith(f"{x['dataset']}_{x['embedding']}_i") for x in rows)
+
+    def test_every_config_runs_the_manifest_protocol(self, short):
+        _, rows = short
+        for r in rows:
+            cfg = _load(pathlib.Path(r["yaml"]))
+            assert cfg["split_mode"] == "manifest"
+            assert cfg["splits"] == [int(r["iteration"])]
+            assert cfg["freeze_quantum_params"] is False
+            assert cfg["n_trials"] == cfg["n_trials_quantum"] == 30
+            for gone in ("iter", "test_size", "validation_split", "cross_validation"):
+                assert gone not in cfg, gone
+            ds = r["dataset"]
+            assert cfg["file_dataset"] == [f"{ds}.csv"]
+            assert cfg["folder_path"].endswith(f"/datasets/{ds}")
+            if r["group"] == "classical":
+                assert len(cfg["classical_model"]) == 9 and cfg["quantum_model"] == []
+            else:
+                assert cfg["classical_model"] == [] and cfg["quantum_model"] == [r["group"]]
+            if r["group"] == "qnn":
+                assert cfg["gridsearch_qnn_args"]["readout"] == ["global", "local"]
+
+    def test_the_embedding_cache_lives_under_the_run(self, short):
+        root, rows = short
+        caches = {_load(pathlib.Path(r["yaml"]))["embedding_cache"] for r in rows}
+        assert caches == {str(root / "embeddings")}
+
+    def test_a_fixed_qnn_readout(self, generator, monkeypatch, tmp_path):
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                                "--models", "qnn", "--splits", "3", "--qnn-readout", "local")
+        # The classical group always comes along: naming no classical arm keeps all nine.
+        assert sorted(r["group"] for r in rows) == ["classical", "qnn"]
+        (r,) = [r for r in rows if r["group"] == "qnn"]
+        cfg = _load(pathlib.Path(r["yaml"]))
+        assert cfg["qnn_args"]["readout"] == "local"
+        assert cfg["gridsearch_qnn_args"]["readout"] == ["local"]
+
+    def test_all_splits_by_default(self, generator, monkeypatch, tmp_path):
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets",
+                                "pmlb__appendicitis", "--models", "qsvc")
+        rows = [r for r in rows if r["group"] == "qsvc"]
+        assert sorted(int(r["iteration"]) for r in rows) == list(range(1, 16))
+        assert {(r["iteration"], r["repeat"], r["fold"]) for r in rows} >= {
+            ("1", "0", "0"), ("6", "1", "0"), ("15", "2", "4")}
+
+    def test_naming_a_classical_arm_splits_the_classical_group(self, generator, monkeypatch,
+                                                               tmp_path):
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                                "--models", "lr,svc", "--splits", "1")
+        (r,) = rows
+        cfg = _load(pathlib.Path(r["yaml"]))
+        assert r["group"] == "classical" and cfg["classical_model"] == ["lr", "svc"]
+
+    def test_an_ambiguous_dataset_name_is_an_error(self, generator, monkeypatch, tmp_path):
+        with pytest.raises((SystemExit, ValueError)):
+            _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "glass2")
+
+    def test_a_dataset_without_a_manifest_is_skipped(self, generator, monkeypatch, tmp_path,
+                                                     capsys):
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets",
+                                "labor,appendicitis", "--models", "qsvc", "--splits", "1",
+                                with_manifest={"pmlb__appendicitis"})
+        assert {r["dataset"] for r in rows} == {"pmlb__appendicitis"}
+        assert "skipping pmlb__labor: no manifest" in capsys.readouterr().out
+
+    def test_manifest_flags_are_refused_in_internal_mode(self, generator, monkeypatch):
+        import sys
+
+        monkeypatch.setattr(sys, "argv", ["generate_pilot_configs.py", "--splits", "1-5"])
+        with pytest.raises(SystemExit):
+            generator.main()
+
+    def test_run_id_is_required(self, generator, monkeypatch, tmp_path):
+        with pytest.raises(SystemExit):
+            _manifest_run(generator, monkeypatch, tmp_path, run_id="")
+
+
+class TestTheShortPilotFlagParsers:
+    def test_splits(self, generator):
+        assert generator.parse_splits("1-5") == [1, 2, 3, 4, 5]
+        assert generator.parse_splits("1,6,11") == [1, 6, 11]
+        assert generator.parse_splits("all") == "all"
+        for bad in ("0", "5-1", "a", "1,,2"):
+            with pytest.raises(ValueError):
+                generator.parse_splits(bad)
+
+    def test_walls(self, generator):
+        groups = ["qsvc", "classical"]
+        assert generator.parse_wall("3:00", groups) == {"qsvc": "3:00", "classical": "3:00"}
+        assert generator.parse_wall("classical=0:45,qsvc=2:00", groups) == {
+            "qsvc": "2:00", "classical": "0:45"}
+        for bad in ("qsvc=2:00", "nope=1:00,*=2:00", "2h", "1:75"):
+            with pytest.raises(ValueError):
+                generator.parse_wall(bad, groups)
+
+
+class TestStatusAndCollateReadAManifestRun:
+    def test_expected_rows_and_the_job_prefix(self, generator, monkeypatch, tmp_path):
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path, *SHORT, run_id="s-2")
+        status = _module("status")
+        assert status.job_prefix(str(root)) == "p10_s-2_"
+        assert status.job_prefix(str(tmp_path)) == "p10_"
+        for r in rows:
+            cfg = status.read_config(r["yaml"])
+            assert cfg["iter"] == 1
+            assert cfg["expected"] == (9 if r["group"] == "classical" else 1)
+
+    def test_bjobs_of_another_run_do_not_count(self, monkeypatch):
+        status = _module("status")
+        out = ("1|RUN|p10_a_x_none_i01_qsvc|h1|10 second(s)\n"
+               "2|PEND|p10_b_x_none_i01_qsvc|-|0 second(s)\n")
+
+        class Done:
+            stdout = out
+
+        monkeypatch.setattr(status.subprocess, "run", lambda *a, **k: Done())
+        assert set(status.lsf_jobs("p10_a_")) == {"x_none_i01_qsvc"}
+        assert status.lsf_jobs("p10_b_")["x_none_i01_qsvc"][1] == "PEND"
+
+    def test_collate_keeps_its_key_and_reads_the_sidecars(self):
+        collate = _module("collate_results")
+        assert collate.KEY == ["Dataset", "embeddings", "iteration", "model"]
+        assert set(collate.SIDECARS) == {"oof", "trials", "val_predictions"}
+
+
+class TestTheManifestModeReviewFixes:
+    """Dataset selection, stale files and flag refusals of --split-mode manifest."""
+
+    def test_the_default_set_resolves_by_the_pilots_source(self, generator, monkeypatch,
+                                                           tmp_path):
+        # glass2 is curated from pmlb and libsvm here; the pilot ran pmlb_data/glass2.csv.
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--models", "qsvc",
+                                "--splits", "1")
+        assert {r["dataset"] for r in rows} == {
+            "pmlb__appendicitis", "pmlb__glass2", "pmlb__labor", "pmlb__spect"}
+
+    def test_a_name_and_its_id_make_one_set_of_jobs(self, generator, monkeypatch, tmp_path,
+                                                    capsys):
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets",
+                                   "spect,pmlb__spect", "--models", "qsvc", "--splits", "1")
+        assert len(rows) == 2 * 2                    # pca + umap, classical + qsvc
+        assert len({r["config"] for r in rows}) == len(rows)
+        assert rows[0]["sel_datasets"] == "pmlb__spect"
+        assert "pmlb__spect is already selected" in capsys.readouterr().out
+
+    def test_a_regeneration_with_fewer_datasets_leaves_no_yaml_behind(self, generator,
+                                                                      monkeypatch, tmp_path):
+        import sys
+
+        root, _ = _manifest_run(generator, monkeypatch, tmp_path, "--datasets",
+                                "labor,appendicitis", "--models", "qsvc", "--splits", "1")
+        argv = [a if a != "labor,appendicitis" else "labor" for a in sys.argv]
+        monkeypatch.setattr(sys, "argv", argv)
+        generator.main()
+        assert sorted(p.parent.name for p in root.glob("*/*.yaml")) == ["pmlb__labor"] * 2
+        assert _module("status").find_configs(str(root)) == sorted(
+            str(p) for p in root.glob("pmlb__labor/*.yaml"))
+
+    @pytest.mark.parametrize("flag", [("--n-trials-quantum", "5"), ("--budget-hours", "3"),
+                                      ("--layout", "split"), ("--self-contained",),
+                                      ("--iter", "3"), ("--test-size", "0.3")])
+    def test_internal_mode_flags_are_refused(self, generator, monkeypatch, tmp_path, flag):
+        with pytest.raises(SystemExit):
+            _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor", *flag)
+
+    def test_the_comments_say_what_this_mode_does(self, generator, monkeypatch, tmp_path):
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                                "--models", "pqk", "--splits", "1")
+        body = pathlib.Path(rows[0]["yaml"]).read_text()
+        assert "which no quantum space is" not in body
+        assert "Where the frozen parameters are cached" not in body
+        assert "classical RNG: splits" not in body
+
+
+def _fake_results(run_dir, dataset, emb, iteration, models, oof_rows=(0, 1)):
+    """One job's ModelResults.csv, and an oof/ and trials/ sidecar, under run_dir."""
+    run_dir.mkdir(parents=True)
+    lines = ["Dataset,embeddings,iteration,model,accuracy"]
+    lines += [f"{dataset},{emb},{iteration},{m},0.5" for m in models]
+    (run_dir / "ModelResults.csv").write_text("\n".join(lines) + "\n")
+    key = f"{dataset}_{emb}_{iteration}"
+    (run_dir / "oof").mkdir()
+    (run_dir / "oof" / f"{key}.csv").write_text(
+        "data_key,model,row_id,y_true,y_score\n"
+        + "".join(f"{key},{m},{r},0,0.5\n" for m in models for r in oof_rows))
+    (run_dir / "trials").mkdir()
+    (run_dir / "trials" / f"{key}.csv").write_text(
+        "data_key,model,trial,value\n" + "".join(f"{key},{m},0,0.5\n" for m in models))
+
+
+class TestCollateAndStatusOnAManifestRun:
+    @pytest.fixture
+    def landed(self, generator, monkeypatch, tmp_path):
+        """A two-job run (labor, classical + qsvc, split 1) with both jobs' results."""
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                                   "--models", "qsvc", "--splits", "1",
+                                   "--wall", "classical=0:45,qsvc=2:00")
+        for r in rows:
+            cfg = _load(pathlib.Path(r["yaml"]))
+            models = cfg["classical_model"] + cfg["quantum_model"]
+            _fake_results(root / r["dataset"] / "results" / r["config"] / "run_1",
+                          r["dataset"], r["embedding"], r["iteration"], models)
+        return root, rows
+
+    def _collate(self, monkeypatch, root, out):
+        import sys
+
+        monkeypatch.setattr(sys, "argv", ["collate_results.py", "--runs-dir", str(root),
+                                          "--out-dir", str(out)])
+        _module("collate_results").main()
+
+    def test_the_sidecars_are_concatenated_with_a_config_column(self, landed, monkeypatch,
+                                                                tmp_path):
+        import pandas as pd
+
+        root, rows = landed
+        out = tmp_path / "collated"
+        self._collate(monkeypatch, root, out)
+        res = pd.read_csv(out / "ModelResults.csv")
+        assert len(res) == 10 and not res.duplicated(["Dataset", "embeddings", "iteration",
+                                                      "model"]).any()
+        oof = pd.read_csv(out / "oof.csv")
+        assert list(oof.columns[:4]) == ["config", "data_key", "model", "row_id"]
+        assert len(oof) == 10 * 2
+        assert set(oof["config"]) == {r["config"] for r in rows}
+        assert oof.equals(oof.sort_values(["data_key", "model", "row_id"], kind="stable")
+                          .reset_index(drop=True))
+        assert len(pd.read_csv(out / "trials.csv")) == 10
+        assert not (out / "val_predictions.csv").exists()
+
+    def test_a_duplicate_sidecar_key_fails(self, landed, monkeypatch, tmp_path):
+        root, rows = landed
+        (r,) = [r for r in rows if r["group"] == "qsvc"]
+        oof = root / r["dataset"] / "results" / r["config"] / "run_1" / "oof"
+        (oof / "again.csv").write_text(
+            "data_key,model,row_id,y_true,y_score\n"
+            f"{r['dataset']}_none_1,qsvc,0,0,0.5\n")
+        with pytest.raises(SystemExit, match="not writing"):
+            self._collate(monkeypatch, root, tmp_path / "collated")
+
+    def test_status_lists_each_jobs_wall(self, landed, monkeypatch, capsys):
+        import sys
+
+        root, rows = landed
+        monkeypatch.setattr(sys, "argv", ["status.py", "--runs-dir", str(root), "--no-lsf",
+                                          "--list", "all"])
+        _module("status").main()
+        out = capsys.readouterr().out
+        for r in rows:
+            (line,) = [x for x in out.splitlines() if r["config"] in x]
+            assert f"wall {r['wall']}" in line
+
+
+class TestSubmitRunsDryOnAManifestRun:
+    def test_each_job_gets_its_wall_and_a_run_aware_name(self, generator, monkeypatch,
+                                                         tmp_path):
+        import shutil
+        import subprocess
+
+        if not shutil.which("bash"):
+            pytest.skip("no bash")
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path, *SHORT, run_id="dry1")
+        # A stub for the cache step: this checks the bsub lines, not embedding_cache.
+        stub = tmp_path / "stub_py"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        env = dict(os.environ, DRY="1", FORCE="1", SPREAD="0", RUNS=str(root),
+                   CACHE_PY=str(stub))
+        done = subprocess.run(["bash", str(PILOT / "submit_runs.sh")], env=env,
+                              capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0, done.stderr[-2000:]
+        subs = [x for x in done.stdout.splitlines() if "bsub" in x]
+        assert len(subs) == len(rows)
+        for r in rows:
+            (line,) = [x for x in subs if f"-J p10_dry1_{r['config']} " in x]
+            assert f"-W {r['wall']} " in line
+        assert "would precompute the embedding cache for 80 configs" in done.stderr
+        assert "WARNING: the embedding cache cannot serve" not in done.stderr
+
+    def test_a_cache_the_check_finds_incomplete_warns(self, generator, monkeypatch,
+                                                      tmp_path):
+        """DRY=1 runs the cache step's --check, so a missing file still warns."""
+        import shutil
+        import subprocess
+
+        if not shutil.which("bash"):
+            pytest.skip("no bash")
+        root, _ = _manifest_run(generator, monkeypatch, tmp_path, *SHORT, run_id="dry2")
+        # Stands in for embedding_cache --check finding a missing file (exit 1).
+        stub = tmp_path / "stub_py"
+        stub.write_text('#!/bin/sh\necho "$@" > "$0.args"\nexit 1\n')
+        stub.chmod(0o755)
+        env = dict(os.environ, DRY="1", FORCE="1", SPREAD="0", RUNS=str(root),
+                   CACHE_PY=str(stub))
+        done = subprocess.run(["bash", str(PILOT / "submit_runs.sh")], env=env,
+                              capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0, done.stderr[-2000:]
+        assert "WARNING: the embedding cache cannot serve these jobs yet" in done.stderr
+        args = (tmp_path / "stub_py.args").read_text().split()
+        assert args[:3] == ["-m", "qbiocode.apps.qprofiler.embedding_cache", "--check"]

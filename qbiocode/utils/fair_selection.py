@@ -81,6 +81,14 @@ paired analysis is valid.
    (``"+"``, which cannot be confused with the ``"|"`` inside an
    ``"embedding|model"`` arm label).
 
+   Under ``split_mode: manifest`` (stratified k-fold repeated R times, each outer fold
+   with its own validation rows carved from its training rows) the choice needs no other
+   iteration: ``selection='validation'`` takes, per fold and side, the arm with the best
+   validation score (``tuning_score``) and scores it on that fold's test rows. Ties are
+   averaged as above. The interval is then the corrected repeated-CV t of Bouckaert &
+   Frank (2004), the same formula as step 4 with ``r = 1/(k-1)``, ``n = kR`` folds and
+   ``kR - 1`` degrees of freedom.
+
 3. **Paired difference per iteration.** ``delta_i = classical_i - quantum_i``, keeping
    the user's sign convention: ``delta > 0`` classical ahead, ``delta < 0`` quantum
    ahead.
@@ -147,6 +155,8 @@ paired analysis is valid.
 References
 ----------
 Nadeau & Bengio (2003), *Inference for the Generalization Error*, Machine Learning 52.
+Bouckaert & Frank (2004), *Evaluating the Replicability of Significance Tests for
+Comparing Learning Algorithms*, PAKDD.
 Benjamini & Hochberg (1995), JRSS-B 57. Holm (1979), Scand. J. Statist. 6.
 Demsar (2006), JMLR 7. Schuirmann (1987).
 """
@@ -192,6 +202,15 @@ VERDICTS = ("quantum_wins", "classical_wins", "equivalent", "inconclusive",
 #: label splits back into its arms unambiguously.
 TIE_SEPARATOR = "+"
 
+#: How the arm scored on each resample is chosen: ``'loio'`` (leave one iteration out,
+#: for repeated random holdouts) or ``'validation'`` (argmax of each fold's own
+#: validation score, for ``split_mode: manifest``). See :func:`select_winners`.
+SELECTION_MODES = ("loio", "validation")
+
+#: Split coordinates of a global ``iteration`` under ``split_mode: manifest``; carried
+#: into the selection trace when present.
+_FOLD_COLUMNS = ("repeat", "fold")
+
 #: Verdicts that are not the outcome of a test and are carried through the multiplicity
 #: adjustment unchanged.
 _SPECIAL_VERDICTS = ("below_baseline", "insufficient_iterations")
@@ -232,6 +251,10 @@ class WinnerReport:
     margin: float = 0.0
     fdr: float = 0.10
     controls: tuple = ()
+    #: ``'loio'`` or ``'validation'``: how :attr:`selection` was built.
+    selection_mode: str = "loio"
+    #: Outer folds per repeat under ``selection_mode='validation'``, else ``None``.
+    k: int | None = None
 
     def __bool__(self) -> bool:
         return True
@@ -403,15 +426,24 @@ def _parameter_payload(df: pd.DataFrame) -> pd.Series:
     return df[present].bfill(axis=1).iloc[:, 0]
 
 
-def arm_iteration_table(df: pd.DataFrame, metric: str = "f1_score") -> pd.DataFrame:
+def arm_iteration_table(df: pd.DataFrame, metric: str = "f1_score",
+                        validation_col: str | None = None,
+                        extra_cols: Sequence[str] = ()) -> pd.DataFrame:
     """One row per ``(Dataset, side, arm, iteration)``: the atomic unit of comparison.
 
     Averaging happens over nothing here. Any duplicate ``(Dataset, embeddings, model,
     iteration)`` -- which a resumed or double-appended run produces -- is reduced by
-    ``mean`` with a warning, because silently keeping the first would make the result
-    depend on row order.
+    ``mean`` with a logged warning, because silently keeping the first would make the
+    result depend on row order.
+
+    With ``validation_col`` (validation selection, see :func:`select_winners`) that
+    column is carried as a second value beside ``metric``, reduced the same way; it may
+    be NaN. ``repeat`` and ``fold`` are carried when the frame has them, and so is every
+    numeric column in ``extra_cols`` (e.g. the validation tie-break), reduced by mean.
     """
     required = {"Dataset", "embeddings", "model", "iteration", metric}
+    if validation_col is not None:
+        required.add(validation_col)
     missing = required - set(df.columns)
     if missing:
         raise ValueError(
@@ -427,25 +459,35 @@ def arm_iteration_table(df: pd.DataFrame, metric: str = "f1_score") -> pd.DataFr
     )
     work = work[pd.to_numeric(work[metric], errors="coerce").notna()].copy()
     work[metric] = pd.to_numeric(work[metric], errors="coerce")
+    if validation_col is not None:
+        work[validation_col] = pd.to_numeric(work[validation_col], errors="coerce")
+    extra_cols = [c for c in extra_cols if c in work.columns]
+    for col in extra_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
 
     keys = ["Dataset", "side", "arm", "embeddings", "model", "iteration"]
     dup = work.duplicated(subset=keys).sum()
     if dup:
-        # warnings.warn, not logger.warning: this one changes the numbers. A library log
-        # line is easy to miss under a configured root logger, and a duplicated arm
-        # silently reweights the iteration it lands on.
-        warnings.warn(
-            f"{dup} duplicate (Dataset, arm, iteration) rows in the results frame; "
-            f"reducing each by mean. A resumed run that re-appended to "
-            f"ModelResults.csv is the usual cause.",
-            UserWarning,
-            stacklevel=2,
+        # A log line at WARNING, not warnings.warn: this one changes the numbers, and
+        # warnings are silenced in any process that has imported matplotlib.pyplot
+        # (qc_winner_finder does), which would hide a duplicated arm silently
+        # reweighting the iteration it lands on.
+        logger.warning(
+            "%d duplicate (Dataset, arm, iteration) rows in the results frame; "
+            "reducing each by mean. A resumed run that re-appended to "
+            "ModelResults.csv is the usual cause.",
+            dup,
         )
-    out = (
-        work.groupby(keys, dropna=False)
-        .agg(**{metric: (metric, "mean"), "parameters": ("_params", "first")})
-        .reset_index()
-    )
+    aggs = {metric: (metric, "mean"), "parameters": ("_params", "first")}
+    if validation_col is not None:
+        aggs[validation_col] = (validation_col, "mean")
+    for col in extra_cols:
+        aggs[col] = (col, "mean")
+    for col in _FOLD_COLUMNS:
+        # The split coordinates of the global iteration, carried for the selection trace.
+        if col in work.columns:
+            aggs[col] = (col, "first")
+    out = work.groupby(keys, dropna=False).agg(**aggs).reset_index()
     return out
 
 
@@ -496,6 +538,253 @@ def _loio_side_scores(
     return scores, chosen
 
 
+def _validation_side_scores(
+    val: np.ndarray, test: np.ndarray, arms: Sequence[str],
+    tiebreak: np.ndarray | None = None, ties: dict | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Validation-selected scores over one side's ``[arm, iteration]`` matrices.
+
+    For each iteration (one outer fold) the arm with the best validation score on that
+    fold is chosen and scored on the same fold's test rows. The validation rows are
+    disjoint from the test rows, so the test score of the chosen arm carries no winner's
+    curse. Candidates are arms finite in both ``val`` and ``test`` on that iteration.
+
+    Arms whose validation scores are within ``atol=1e-12`` of the best are tied. With a
+    ``tiebreak`` matrix (higher is better, same shape), a tie is narrowed to the tied
+    arms with the best ``tiebreak`` value -- unless one of them has none, in which case
+    the tie stands. A tie that remains follows :func:`_loio_side_scores`: the test score
+    is the mean of the tied arms' test scores (or the shared value when identical), and
+    the label joins the sorted tied arms with :data:`TIE_SEPARATOR`. ``ties``, when
+    given, counts ``tied`` / ``broken`` / ``unbreakable`` folds.
+
+    Returns:
+        ``(test_scores, validation_scores, chosen)`` per iteration; NaN and ``""`` where
+        no arm is a candidate.
+    """
+    n_arms, n_iter = test.shape
+    scores = np.full(n_iter, np.nan)
+    vals = np.full(n_iter, np.nan)
+    chosen: list[str] = []
+    for i in range(n_iter):
+        cand = [a for a in range(n_arms) if np.isfinite(val[a, i]) and np.isfinite(test[a, i])]
+        if not cand:
+            chosen.append("")
+            continue
+        top = max(val[a, i] for a in cand)
+        tied = [a for a in cand if np.isclose(val[a, i], top, rtol=0.0, atol=1e-12)]
+        if len(tied) > 1 and ties is not None:
+            ties["tied"] = ties.get("tied", 0) + 1
+        if len(tied) > 1 and tiebreak is not None:
+            tb = tiebreak[tied, i]
+            if np.isfinite(tb).all():
+                best = tb.max()
+                tied = [a for a, v in zip(tied, tb) if np.isclose(v, best, rtol=0.0, atol=1e-12)]
+                if ties is not None and len(tied) == 1:
+                    ties["broken"] = ties.get("broken", 0) + 1
+            elif ties is not None:
+                ties["unbreakable"] = ties.get("unbreakable", 0) + 1
+        held = test[tied, i]
+        scores[i] = float(held[0]) if np.all(held == held[0]) else float(held.mean())
+        vals[i] = float(top)
+        chosen.append(TIE_SEPARATOR.join(sorted(arms[a] for a in tied)))
+    return scores, vals, chosen
+
+
+def _validation_dataset_scores(
+    block: pd.DataFrame, iters: Sequence, metric: str, validation_col: str,
+    tiebreak_col: str | None = None, tiebreak_higher_is_better: bool = True,
+    ties: dict | None = None,
+) -> tuple[dict[str, np.ndarray], list[dict]]:
+    """Validation selection for one dataset: per ``(embeddings, iteration)`` and side.
+
+    Each embedding is its own selection unit: on every fold the classical and quantum
+    winners are the validation argmax among that embedding's models
+    (:func:`_validation_side_scores`), so a contrast never pairs a classical arm on one
+    embedding with a quantum arm on another. The dataset's score per fold, which feeds
+    the one-row-per-dataset inference, is the mean over the embeddings whose two winners
+    are both finite on that fold (so ``delta`` is the mean paired contrast); the folds,
+    not the embeddings, stay the replicates, since the embeddings of a dataset share
+    their splits.
+
+    Returns:
+        ``(side_scores, trace)``: per-side score arrays aligned with ``iters``, and one
+        trace row per ``(embeddings, iteration)`` without the ``Dataset`` key.
+    """
+    n_iter = len(iters)
+    per_emb, trace = [], []
+    coord_cols = [c for c in _FOLD_COLUMNS if c in block.columns]
+    coords = (block.groupby("iteration")[coord_cols].first().to_dict("index")
+              if coord_cols else {})
+    for emb, eblock in block.groupby("embeddings", sort=True, dropna=False):
+        scores, vals, arms = {}, {}, {}
+        for side in ("classical", "quantum"):
+            sub = eblock[eblock["side"] == side]
+            if sub.empty:
+                scores[side] = np.full(n_iter, np.nan)
+                vals[side] = np.full(n_iter, np.nan)
+                arms[side] = [""] * n_iter
+                continue
+            wide = sub.pivot_table(index="arm", columns="iteration", values=metric,
+                                   aggfunc="mean").reindex(columns=iters)
+            vwide = (sub.pivot_table(index="arm", columns="iteration",
+                                     values=validation_col, aggfunc="mean")
+                     .reindex(index=wide.index, columns=iters))
+            tb = None
+            if tiebreak_col is not None:
+                tb = (sub.pivot_table(index="arm", columns="iteration", values=tiebreak_col,
+                                      aggfunc="mean", dropna=False)
+                      .reindex(index=wide.index, columns=iters).to_numpy(float))
+                tb = tb if tiebreak_higher_is_better else -tb
+            scores[side], vals[side], arms[side] = _validation_side_scores(
+                vwide.to_numpy(float), wide.to_numpy(float), list(wide.index), tb, ties)
+        per_emb.append(scores)
+        for j, it in enumerate(iters):
+            row = dict(embeddings=emb, iteration=it)
+            row.update(coords.get(it, {}))
+            row.update(
+                classical_arm=arms["classical"][j], quantum_arm=arms["quantum"][j],
+                classical_score=scores["classical"][j],
+                quantum_score=scores["quantum"][j],
+                classical_val=vals["classical"][j], quantum_val=vals["quantum"][j],
+            )
+            trace.append(row)
+
+    c = np.vstack([e["classical"] for e in per_emb])
+    q = np.vstack([e["quantum"] for e in per_emb])
+    paired = np.isfinite(c) & np.isfinite(q)
+
+    def _mean(m: np.ndarray, ok: np.ndarray) -> np.ndarray:
+        n = ok.sum(axis=0)
+        tot = np.where(ok, m, 0.0).sum(axis=0)
+        return np.where(n > 0, tot / np.maximum(n, 1), np.nan)
+
+    if len(per_emb) == 1:
+        # One embedding: each side keeps its own folds, exactly as the per-side means of
+        # the LOIO path do; the delta is NaN wherever one side is missing.
+        return {"classical": c[0], "quantum": q[0]}, trace
+    # Several embeddings: average only the embeddings paired on that fold, and leave a
+    # fold with no paired embedding NaN on both sides -- mixing one embedding's classical
+    # winner with another's quantum winner is the cross-embedding contrast this avoids.
+    side_scores = {"classical": _mean(c, paired), "quantum": _mean(q, paired)}
+    return side_scores, trace
+
+
+def resolve_split_k(results: pd.DataFrame, k: int | None = None) -> int:
+    """Outer folds per repeat for validation selection: ``k``, else the ``split_k`` column.
+
+    The corrected repeated-CV standard error needs ``r = n_test / n_train = 1 / (k - 1)``.
+    ``split_mode: manifest`` records ``k`` on every row as ``split_k``; an explicit ``k``
+    must agree with it.
+
+    Raises:
+        ValueError: neither is available, the column holds several values, the two
+            disagree, or ``k < 2``.
+    """
+    col = None
+    if "split_k" in results.columns:
+        vals = pd.to_numeric(results["split_k"], errors="coerce").dropna().unique()
+        if len(vals) > 1:
+            raise ValueError(
+                f"split_k takes several values {sorted(vals.tolist())}; one correction "
+                f"r = 1/(k-1) cannot cover them. Analyse each group separately."
+            )
+        if len(vals) == 1:
+            col = int(vals[0])
+    if k is None:
+        if col is None:
+            raise ValueError(
+                "validation selection needs k (outer folds per repeat) for the corrected "
+                "repeated-CV t, r = 1/(k-1): pass k= or supply a 'split_k' column "
+                "(split_mode: manifest writes it)."
+            )
+        k = col
+    elif col is not None and int(k) != col:
+        raise ValueError(f"k={k} disagrees with the split_k column ({col})")
+    if int(k) < 2:
+        raise ValueError(f"k must be >= 2; got {k!r}")
+    return int(k)
+
+
+def _validation_rows(results: pd.DataFrame, metric: str, validation_col: str) -> pd.DataFrame:
+    """The rows validation selection compares, with one consistent ``tuning_metric``.
+
+    Rows whose ``validation_col`` is not finite cannot be selected and are dropped with a
+    log message naming the arms. A validation score is comparable across arms only when
+    every arm was scored by the same metric, so a ``tuning_metric`` column holding more
+    than one value among the kept rows raises.
+    """
+    if validation_col not in results.columns:
+        raise ValueError(
+            f"selection='validation' needs the validation column {validation_col!r}; "
+            f"present: {sorted(results.columns)}"
+        )
+    val = pd.to_numeric(results[validation_col], errors="coerce").to_numpy(float)
+    # Rows without a test score are dropped by arm_iteration_table anyway; count only the
+    # ones this rule removes.
+    test_ok = (pd.to_numeric(results[metric], errors="coerce").notna().to_numpy()
+               if metric in results.columns else np.ones(len(results), dtype=bool))
+    bad = ~np.isfinite(val) & test_ok
+    if bad.any():
+        dropped = results.loc[bad]
+        arms = sorted(set((dropped["embeddings"].astype(str) + "|"
+                           + dropped["model"].astype(str)).tolist())) \
+            if {"embeddings", "model"} <= set(dropped.columns) else []
+        logger.warning(
+            "excluding %d row(s) with no finite %r from validation selection (arms: %s); "
+            "an arm without a validation score cannot be chosen.",
+            int(bad.sum()), validation_col,
+            ", ".join(arms[:20]) + (" ..." if len(arms) > 20 else ""),
+        )
+    kept = results.loc[~bad]
+    if "tuning_metric" in kept.columns:
+        metrics = sorted(set(kept["tuning_metric"].dropna().astype(str)))
+        if len(metrics) > 1:
+            raise ValueError(
+                f"the compared rows were tuned on different metrics {metrics}; validation "
+                f"scores on different metrics are not comparable across arms. Filter the "
+                f"frame to one tuning_metric."
+            )
+        if kept["tuning_metric"].isna().any() and metrics:
+            raise ValueError(
+                f"some compared rows have no tuning_metric while others use {metrics}; "
+                f"their validation scores cannot be assumed comparable."
+            )
+    else:
+        logger.info("no 'tuning_metric' column; assuming every %r used the same metric",
+                    validation_col)
+    return kept
+
+
+def _check_split_mode(results: pd.DataFrame, mode: str) -> None:
+    """Refuse validation selection over rows that are not ``split_mode: manifest``.
+
+    Internal-mode rows carry a ``tuning_score`` too (from their inner CV or holdout),
+    but their iterations are random holdouts, not the folds ``r = 1/(k-1)`` assumes, so
+    pooling them into a validation-mode report would mis-scale every interval. LOIO
+    over manifest rows is valid but not what the protocol calls for, so it is logged.
+    Frames without a ``split_mode`` column (older results) are not checked.
+
+    Raises:
+        ValueError: ``mode == 'validation'`` and some row's ``split_mode`` is not
+            ``'manifest'``.
+    """
+    if "split_mode" not in results.columns:
+        return
+    modes = results["split_mode"].fillna("internal").astype(str)
+    if mode == "validation":
+        other = sorted(set(modes[modes != "manifest"]))
+        if other:
+            raise ValueError(
+                f"selection='validation' needs split_mode 'manifest' rows; "
+                f"{int((modes != 'manifest').sum())} row(s) have split_mode {other}. "
+                f"Analyse internal-mode rows with selection='loio'."
+            )
+    elif (modes == "manifest").any():
+        logger.warning(
+            "selection=%r over %d split_mode 'manifest' row(s); those runs were designed "
+            "for selection='validation'.", mode, int((modes == "manifest").sum()))
+
+
 def _bh_adjust(p: np.ndarray) -> np.ndarray:
     """Benjamini-Hochberg q-values, returned in the input order."""
     m = p.size
@@ -534,6 +823,11 @@ def select_winners(
     margin: float = 0.0,
     fdr: float = 0.10,
     controls: Iterable[str] | None = None,
+    selection: str = "loio",
+    validation_col: str = "tuning_score",
+    k: int | None = None,
+    tiebreak_col: str | None = "val_auc",
+    tiebreak_higher_is_better: bool = True,
 ) -> WinnerReport:
     """Decide, per dataset, whether either side wins, and by how much.
 
@@ -556,8 +850,10 @@ def select_winners(
         family of ``controls``.
     test_size
         Test fraction of the ``train_test_split`` that produced every iteration.
-        Required: the Nadeau-Bengio correction ``r = test_size / (1 - test_size)``
-        depends on it and ModelResults.csv does not record it. The pilot used 0.2.
+        Required with ``selection='loio'``: the Nadeau-Bengio correction
+        ``r = test_size / (1 - test_size)`` depends on it and ModelResults.csv does not
+        record it. The pilot used 0.2. With ``selection='validation'`` it is ``1/k`` and
+        may be omitted; a value other than ``1/k`` raises.
     seed
         Unused. Kept so existing calls still work; ties are now resolved by averaging
         (see :func:`_loio_side_scores`), so results do not depend on any seed.
@@ -580,6 +876,38 @@ def select_winners(
         :attr:`WinnerReport.quantum_datasets` / ``classical_datasets`` and from the
         across-dataset inference. A name absent from ``results``, or with no finite
         ``metric`` values, raises ``ValueError``.
+    selection
+        ``'loio'`` (default): leave-one-iteration-out nested selection, for repeated
+        random holdouts (``split_mode: internal``). ``'validation'``: for
+        ``split_mode: manifest``, where every outer fold has its own validation rows.
+        Per ``(Dataset, embeddings, iteration)`` and side the chosen model is the
+        argmax of ``validation_col`` over that embedding's models finite in both
+        ``validation_col`` and ``metric``, and it is scored by ``metric`` on that fold's
+        test rows; a contrast never pairs two embeddings. A dataset's fold contrast is
+        the mean paired contrast over its embeddings with both winners finite on that
+        fold (see :func:`_validation_dataset_scores`). Ties within
+        ``atol=1e-12`` average the tied arms' test scores and join their labels with
+        :data:`TIE_SEPARATOR`. The interval is the corrected repeated-CV t of
+        Bouckaert & Frank (2004) / Nadeau & Bengio (2003): ``r = 1/(k-1)``, ``n = kR``
+        folds, ``df = n - 1``. Rows with a non-finite ``validation_col`` are excluded
+        (logged), the compared rows must share one ``tuning_metric``, and a
+        ``split_mode`` column, when present, must read ``'manifest'`` on every row.
+    validation_col
+        Validation-score column for ``selection='validation'``; higher is better.
+    k
+        Outer folds per repeat for ``selection='validation'``. Defaults to the
+        ``split_k`` column; one of the two is required.
+    tiebreak_col
+        ``selection='validation'`` only: a continuous validation score that breaks ties
+        on ``validation_col``. A validation fold of ten-odd rows gives balanced accuracy
+        only a few values, so arms tie often; the default ``'val_auc'`` (the refit
+        trial's validation AUC, written on manifest-mode rows) ranks any arm, decision
+        functions included. A tie stands -- and the tied arms' test scores are averaged --
+        when a tied arm has no ``tiebreak_col`` value or the values tie too. ``None``, or
+        a frame without the column, keeps the plain averaging rule.
+    tiebreak_higher_is_better
+        Direction of ``tiebreak_col``; pass ``False`` for a loss such as
+        ``'val_log_loss'`` (finite only for arms that output probabilities).
 
     Returns
     -------
@@ -587,8 +915,30 @@ def select_winners(
         ``per_dataset`` has one row per dataset with ``delta``, ``se``, ``ci_lo``,
         ``ci_hi``, ``p_value``, ``within_equivalence``, ``verdict_raw``, ``family``
         (``'discovery'`` or ``'control'``), ``p_adjusted`` (BH q-value, or Holm for
-        controls) and ``verdict_adjusted``.
+        controls) and ``verdict_adjusted``. ``selection`` has one row per
+        ``(Dataset, iteration)`` with the chosen arms and their ``classical_score`` /
+        ``quantum_score``; with ``selection='validation'`` it has one row per
+        ``(Dataset, embeddings, iteration)`` instead, with ``repeat`` and ``fold`` (when
+        the frame has them) and the chosen arms' validation scores ``classical_val`` /
+        ``quantum_val``.
     """
+    if selection not in SELECTION_MODES:
+        raise ValueError(f"selection must be one of {SELECTION_MODES}; got {selection!r}")
+    mode = selection  # the name `selection` is reused for the trace frame below
+    by_validation = mode == "validation"
+    _check_split_mode(results, mode)
+    if by_validation:
+        k = resolve_split_k(results, k)
+        if test_size is not None and not np.isclose(float(test_size), 1.0 / k,
+                                                    rtol=0.0, atol=1e-9):
+            raise ValueError(
+                f"test_size={test_size!r} contradicts k={k}: with k-fold outer splits "
+                f"each test fold is 1/k = {1.0 / k:.4g} of the rows. Omit test_size."
+            )
+        test_size = 1.0 / k
+        results = _validation_rows(results, metric, validation_col)
+    else:
+        k = None
     if test_size is None:
         raise ValueError(
             "test_size is required: the Nadeau-Bengio correction r = test_size / "
@@ -613,7 +963,15 @@ def select_winners(
             f"controls name datasets absent from results: {unknown}. Control names must "
             f"match the Dataset column exactly."
         )
-    table = arm_iteration_table(results, metric=metric)
+    tb_col = None
+    if by_validation and tiebreak_col is not None:
+        if tiebreak_col in results.columns:
+            tb_col = tiebreak_col
+        else:
+            logger.info("no %r column: validation ties are averaged, not broken", tiebreak_col)
+    table = arm_iteration_table(results, metric=metric,
+                                validation_col=validation_col if by_validation else None,
+                                extra_cols=(tb_col,) if tb_col else ())
     unscorable = sorted(control_set - set(table["Dataset"].unique()))
     if unscorable:
         raise ValueError(
@@ -633,30 +991,37 @@ def select_winners(
         .rename(columns={"parameters": "n_distinct_parameters"})
     )
 
+    # r = n_test / n_train. For k-fold outer splits (test_size = 1/k) this is 1/(k-1),
+    # the Bouckaert-Frank correction for repeated k-fold CV.
     r = test_size / (1.0 - test_size)
     rows, sel_rows = [], []
+    ties: dict = {}
     for dataset, block in table.groupby("Dataset", sort=True):
         iters = sorted(block["iteration"].unique())
-        side_scores, side_arms = {}, {}
-        for side in ("classical", "quantum"):
-            sub = block[block["side"] == side]
-            if sub.empty:
-                side_scores[side] = np.full(len(iters), np.nan)
-                side_arms[side] = [""] * len(iters)
-                continue
-            wide = sub.pivot_table(index="arm", columns="iteration", values=metric,
-                                   aggfunc="mean").reindex(columns=iters)
-            s, chosen = _loio_side_scores(wide.to_numpy(float), list(wide.index))
-            side_scores[side], side_arms[side] = s, chosen
-
-        for k, it in enumerate(iters):
-            sel_rows.append(dict(
-                Dataset=dataset, iteration=it,
-                classical_arm=side_arms["classical"][k],
-                quantum_arm=side_arms["quantum"][k],
-                classical_score=side_scores["classical"][k],
-                quantum_score=side_scores["quantum"][k],
-            ))
+        if by_validation:
+            side_scores, trace = _validation_dataset_scores(
+                block, iters, metric, validation_col, tb_col, tiebreak_higher_is_better, ties)
+            sel_rows.extend({"Dataset": dataset, **t} for t in trace)
+        else:
+            side_scores, side_arms = {}, {}
+            for side in ("classical", "quantum"):
+                sub = block[block["side"] == side]
+                if sub.empty:
+                    side_scores[side] = np.full(len(iters), np.nan)
+                    side_arms[side] = [""] * len(iters)
+                    continue
+                wide = sub.pivot_table(index="arm", columns="iteration", values=metric,
+                                       aggfunc="mean").reindex(columns=iters)
+                side_scores[side], side_arms[side] = _loio_side_scores(
+                    wide.to_numpy(float), list(wide.index))
+            for j, it in enumerate(iters):
+                sel_rows.append(dict(
+                    Dataset=dataset, iteration=it,
+                    classical_arm=side_arms["classical"][j],
+                    quantum_arm=side_arms["quantum"][j],
+                    classical_score=side_scores["classical"][j],
+                    quantum_score=side_scores["quantum"][j],
+                ))
 
         # Diagnostic only: what the old pooled-argmax rule would have said, with the
         # fragmentation bug removed (both sides averaged over iterations). Reporting it
@@ -719,6 +1084,15 @@ def select_winners(
                    p_value=p, within_equivalence=within, verdict_raw=verdict)
         rows.append(row)
 
+    if by_validation and ties.get("tied"):
+        tied = ties["tied"]
+        if tb_col:
+            how = (f"{ties.get('broken', 0)} broken by {tb_col}, "
+                   f"{ties.get('unbreakable', 0)} averaged because a tied arm has no {tb_col}, "
+                   f"the rest averaged because {tb_col} tied as well")
+        else:
+            how = "all averaged (no tie-break column)"
+        logger.info("validation selection: %d side-folds tied on %s; %s", tied, validation_col, how)
     per_dataset = pd.DataFrame(rows)
     selection = pd.DataFrame(sel_rows)
 
@@ -787,6 +1161,8 @@ def select_winners(
         if "naive_delta" in per_dataset and per_dataset["naive_delta"].notna().any()
         else np.nan,
     }
+    if by_validation:
+        corpus.update(selection=mode, validation_col=validation_col, k=k)
     # Controls are planted effects, not part of the corpus the claim is about.
     discovery = (per_dataset[per_dataset["family"] == "discovery"]
                  if "family" in per_dataset else per_dataset)
@@ -798,7 +1174,17 @@ def select_winners(
         corpus["epsilon_is_reachable"] = bool(
             corpus["median_interval_half_width"] <= epsilon
         )
-        if corpus["epsilon_is_reachable"] is False:
+        if corpus["epsilon_is_reachable"] is False and by_validation:
+            logger.warning(
+                "epsilon=%.4f (the equivalence bound) is below the median achieved "
+                "interval half-width %.4f, so equivalence cannot be certified on most "
+                "datasets at k=%d: an interval wider than +/-epsilon can never fit inside "
+                "it. More repeats will not close this -- the corrected repeated-CV "
+                "standard error floors at s*sqrt(1/(k-1)). Use more outer folds k or "
+                "widen epsilon.",
+                epsilon, corpus["median_interval_half_width"], k,
+            )
+        elif corpus["epsilon_is_reachable"] is False:
             logger.warning(
                 "epsilon=%.4f (the equivalence bound) is below the median achieved "
                 "interval half-width %.4f, so equivalence cannot be certified on most "
@@ -813,12 +1199,14 @@ def select_winners(
         per_dataset=per_dataset, per_arm=per_arm, selection=selection,
         metric=metric, epsilon=epsilon, alpha=alpha, test_size=test_size, corpus=corpus,
         margin=margin, fdr=fdr, controls=tuple(sorted(control_set)),
+        selection_mode=mode, k=k,
     )
 
 
 __all__ = [
     "QUANTUM_STEMS",
     "PARAMETER_COLUMNS",
+    "SELECTION_MODES",
     "TIE_SEPARATOR",
     "VERDICTS",
     "WinnerReport",
@@ -826,5 +1214,6 @@ __all__ = [
     "corpus_inference",
     "iteration_floor_half_width",
     "model_side",
+    "resolve_split_k",
     "select_winners",
 ]

@@ -18,6 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 
 from qbiocode.utils.fair_selection import (
     PARAMETER_COLUMNS,
@@ -177,13 +178,17 @@ class TestNoParameterFragmentation:
             "quantum arms with a null parameter value were dropped from the table"
         )
 
-    def test_duplicate_rows_are_averaged_with_a_warning(self):
+    def test_duplicate_rows_are_averaged_with_a_warning(self, caplog):
         """A resumed run re-appends to ModelResults.csv. Keeping the first row silently
-        would make the verdict depend on row order, so they are reduced and announced."""
+        would make the verdict depend on row order, so they are reduced and announced.
+
+        Announced by logging, not warnings.warn: warnings are silenced in any process
+        that has imported matplotlib.pyplot, which qc_winner_finder does."""
         df = synth(n_datasets=1, iters=3, seed=4)
         doubled = pd.concat([df, df], ignore_index=True)
-        with pytest.warns(UserWarning, match="duplicate"):
+        with caplog.at_level("WARNING", logger="qbiocode.utils.fair_selection"):
             table = arm_iteration_table(doubled)
+        assert "duplicate" in caplog.text
         assert len(table) == len(arm_iteration_table(df))
 
 
@@ -802,3 +807,281 @@ class TestOutputTables:
         report = select_winners(df, test_size=TS, seed=0)
         assert report.per_dataset["Dataset"].is_unique
         assert set(report.per_dataset["Dataset"]) == set(df["Dataset"])
+
+
+# ---- validation selection (split_mode: manifest) --------------------------------------
+
+def fold_frame(val, test, k=3, repeats=2, datasets=("ds0",), tuning_metric="balanced_accuracy"):
+    """A manifest-mode ModelResults frame: ``val``/``test`` map model -> per-fold scores.
+
+    Scores are lists of length ``k * repeats``, indexed by the 0-based global fold
+    ``repeat * k + fold``; ``iteration`` is that plus one, as qprofiler writes it.
+    """
+    rows = []
+    for ds in datasets:
+        for model in test:
+            for g in range(k * repeats):
+                rows.append({
+                    "Dataset": ds, "embeddings": "none", "model": model,
+                    "iteration": g + 1, "repeat": g // k, "fold": g % k,
+                    "split_mode": "manifest", "split_k": k, "split_repeats": repeats,
+                    "balanced_accuracy": test[model][g],
+                    "tuning_score": val[model][g],
+                    "tuning_metric": tuning_metric,
+                })
+    return pd.DataFrame(rows)
+
+
+class TestValidationSelection:
+    """``selection='validation'``: argmax of each fold's own validation score."""
+
+    def _two_classical(self):
+        # 'lr' validates best on every fold but tests worse than 'rf'; the test-argmax
+        # rule would pick rf, validation selection must pick lr.
+        n = 6
+        val = {"lr": [0.9] * n, "rf": [0.6] * n, "qsvc": [0.7] * n}
+        test = {"lr": [0.70, 0.72, 0.71, 0.69, 0.73, 0.70],
+                "rf": [0.90] * n,
+                "qsvc": [0.60, 0.61, 0.66, 0.62, 0.64, 0.59]}
+        return fold_frame(val, test), test
+
+    def test_the_validation_winner_is_used_even_when_another_arm_tests_better(self):
+        df, test = self._two_classical()
+        rep = select_winners(df, metric="balanced_accuracy", selection="validation")
+        sel = rep.selection
+        assert (sel["classical_arm"] == "none|lr").all()
+        assert np.allclose(sel["classical_score"], test["lr"])
+        assert np.allclose(sel["classical_val"], 0.9)
+        assert np.allclose(sel["quantum_val"], 0.7)
+        # The LOIO rule on the same frame chooses rf, the test-argmax arm.
+        loio = select_winners(df, metric="balanced_accuracy", test_size=1 / 3)
+        assert (loio.selection["classical_arm"] == "none|rf").all()
+
+    def test_trace_carries_repeat_and_fold_and_keeps_the_score_columns(self):
+        df, _ = self._two_classical()
+        sel = select_winners(df, metric="balanced_accuracy", selection="validation").selection
+        assert {"Dataset", "iteration", "repeat", "fold", "classical_arm", "quantum_arm",
+                "classical_score", "quantum_score", "classical_val",
+                "quantum_val"} <= set(sel.columns)
+        assert sel["repeat"].tolist() == [0, 0, 0, 1, 1, 1]
+        assert sel["fold"].tolist() == [0, 1, 2, 0, 1, 2]
+
+    def test_the_loio_trace_is_unchanged(self):
+        df, _ = self._two_classical()
+        sel = select_winners(df, metric="balanced_accuracy", test_size=1 / 3).selection
+        assert list(sel.columns) == ["Dataset", "iteration", "classical_arm", "quantum_arm",
+                                     "classical_score", "quantum_score"]
+
+    def test_corrected_repeated_cv_t_by_hand(self):
+        """r = 1/(k-1), n = kR folds, df = kR - 1 (Bouckaert-Frank / Nadeau-Bengio)."""
+        df, test = self._two_classical()
+        k, R = 3, 2
+        rep = select_winners(df, metric="balanced_accuracy", selection="validation",
+                             alpha=0.05)
+        d = np.array(test["lr"]) - np.array(test["qsvc"])
+        n = k * R
+        se = d.std(ddof=1) * np.sqrt(1.0 / n + 1.0 / (k - 1))
+        tcrit = stats.t.ppf(0.975, df=n - 1)
+        p = 2 * stats.t.sf(abs(d.mean()) / se, df=n - 1)
+        row = rep.per_dataset.iloc[0]
+        assert row["n_iterations"] == n
+        assert row["delta"] == pytest.approx(d.mean())
+        assert row["se"] == pytest.approx(se)
+        assert row["ci_hi"] - row["delta"] == pytest.approx(tcrit * se)
+        assert row["p_value"] == pytest.approx(p)
+        assert rep.test_size == pytest.approx(1 / k)
+        assert rep.k == k and rep.selection_mode == "validation"
+
+    def test_k_comes_from_the_argument_or_split_k(self):
+        df, _ = self._two_classical()
+        a = select_winners(df, metric="balanced_accuracy", selection="validation")
+        b = select_winners(df.drop(columns="split_k"), metric="balanced_accuracy",
+                           selection="validation", k=3)
+        assert a.per_dataset["se"].iloc[0] == pytest.approx(b.per_dataset["se"].iloc[0])
+        with pytest.raises(ValueError, match="needs k"):
+            select_winners(df.drop(columns="split_k"), metric="balanced_accuracy",
+                           selection="validation")
+        with pytest.raises(ValueError, match="disagrees"):
+            select_winners(df, metric="balanced_accuracy", selection="validation", k=5)
+        with pytest.raises(ValueError, match="contradicts"):
+            select_winners(df, metric="balanced_accuracy", selection="validation",
+                           test_size=0.3)
+
+    def test_validation_ties_average_the_tied_test_scores(self):
+        n = 6
+        val = {"lr": [0.8] * n, "rf": [0.8] * n, "qsvc": [0.5] * n}
+        test = {"lr": [0.6] * n, "rf": [0.8] * n, "qsvc": [0.5] * n}
+        sel = select_winners(fold_frame(val, test), metric="balanced_accuracy",
+                             selection="validation").selection
+        assert (sel["classical_arm"] == TIE_SEPARATOR.join(["none|lr", "none|rf"])).all()
+        assert np.allclose(sel["classical_score"], 0.7)
+
+    def test_nan_validation_rows_are_excluded_and_logged(self, caplog):
+        n = 6
+        val = {"lr": [np.nan] * n, "rf": [0.6] * n, "qsvc": [0.7] * n}
+        test = {"lr": [0.99] * n, "rf": [0.8] * n, "qsvc": [0.5] * n}
+        with caplog.at_level("WARNING", logger="qbiocode.utils.fair_selection"):
+            rep = select_winners(fold_frame(val, test), metric="balanced_accuracy",
+                                 selection="validation")
+        assert "excluding 6 row(s)" in caplog.text and "none|lr" in caplog.text
+        assert (rep.selection["classical_arm"] == "none|rf").all()
+        assert "lr" not in set(rep.per_arm["model"])
+
+    def test_mixed_tuning_metrics_raise(self):
+        df, _ = self._two_classical()
+        df.loc[df["model"] == "qsvc", "tuning_metric"] = "f1_score"
+        with pytest.raises(ValueError, match="different metrics"):
+            select_winners(df, metric="balanced_accuracy", selection="validation")
+
+    def test_a_missing_validation_column_or_mode_raises(self):
+        df, _ = self._two_classical()
+        with pytest.raises(ValueError, match="validation column"):
+            select_winners(df.drop(columns="tuning_score"), metric="balanced_accuracy",
+                           selection="validation")
+        with pytest.raises(ValueError, match="selection must be"):
+            select_winners(df, metric="balanced_accuracy", selection="argmax", test_size=0.2)
+
+    def test_the_loio_default_ignores_the_validation_column(self):
+        df, _ = self._two_classical()
+        a = select_winners(df, metric="balanced_accuracy", test_size=1 / 3)
+        b = select_winners(df.drop(columns=["tuning_score", "tuning_metric"]),
+                           metric="balanced_accuracy", test_size=1 / 3)
+        pd.testing.assert_frame_equal(a.per_dataset, b.per_dataset)
+        assert a.selection_mode == "loio" and a.k is None
+        assert "selection" not in a.corpus
+
+
+class TestValidationTieBreak:
+    """Ties on the validation score are broken on ``val_auc`` (manifest-mode rows)."""
+
+    def _tied(self, auc):
+        n = 6
+        val = {"lr": [0.8] * n, "rf": [0.8] * n, "qsvc": [0.5] * n}
+        test = {"lr": [0.6] * n, "rf": [0.8] * n, "qsvc": [0.5] * n}
+        df = fold_frame(val, test)
+        df["val_auc"] = df["model"].map(auc)
+        return df
+
+    def test_the_higher_validation_auc_wins_a_tie(self, caplog):
+        df = self._tied({"lr": 0.9, "rf": 0.7, "qsvc": 0.6})
+        with caplog.at_level("INFO", logger="qbiocode.utils.fair_selection"):
+            sel = select_winners(df, metric="balanced_accuracy", selection="validation").selection
+        assert (sel["classical_arm"] == "none|lr").all()
+        assert np.allclose(sel["classical_score"], 0.6)
+        assert "6 side-folds tied" in caplog.text and "6 broken by val_auc" in caplog.text
+
+    def test_a_loss_tie_break_takes_the_lower_value(self):
+        df = self._tied({"lr": 0.9, "rf": 0.7, "qsvc": 0.6}).rename(columns={"val_auc": "val_log_loss"})
+        sel = select_winners(df, metric="balanced_accuracy", selection="validation",
+                             tiebreak_col="val_log_loss", tiebreak_higher_is_better=False).selection
+        assert (sel["classical_arm"] == "none|rf").all()
+
+    def test_a_missing_tie_break_value_keeps_the_tie(self):
+        df = self._tied({"lr": 0.9, "rf": np.nan, "qsvc": 0.6})
+        sel = select_winners(df, metric="balanced_accuracy", selection="validation").selection
+        assert (sel["classical_arm"] == TIE_SEPARATOR.join(["none|lr", "none|rf"])).all()
+        assert np.allclose(sel["classical_score"], 0.7)
+
+    def test_equal_tie_break_values_keep_the_tie(self):
+        df = self._tied({"lr": 0.8, "rf": 0.8, "qsvc": 0.6})
+        sel = select_winners(df, metric="balanced_accuracy", selection="validation").selection
+        assert (sel["classical_arm"] == TIE_SEPARATOR.join(["none|lr", "none|rf"])).all()
+
+    def test_the_tie_break_never_overrides_the_validation_score(self):
+        # rf validates higher; lr's better AUC must not matter when there is no tie.
+        n = 6
+        val = {"lr": [0.7] * n, "rf": [0.8] * n, "qsvc": [0.5] * n}
+        test = {"lr": [0.6] * n, "rf": [0.8] * n, "qsvc": [0.5] * n}
+        df = fold_frame(val, test)
+        df["val_auc"] = df["model"].map({"lr": 0.99, "rf": 0.5, "qsvc": 0.6})
+        sel = select_winners(df, metric="balanced_accuracy", selection="validation").selection
+        assert (sel["classical_arm"] == "none|rf").all()
+
+    def test_none_or_an_absent_column_averages_as_before(self):
+        df = self._tied({"lr": 0.9, "rf": 0.7, "qsvc": 0.6})
+        a = select_winners(df, metric="balanced_accuracy", selection="validation",
+                           tiebreak_col=None).selection
+        b = select_winners(df.drop(columns="val_auc"), metric="balanced_accuracy",
+                           selection="validation").selection
+        for sel in (a, b):
+            assert np.allclose(sel["classical_score"], 0.7)
+
+    def test_loio_ignores_the_tie_break(self):
+        df = self._tied({"lr": 0.9, "rf": 0.7, "qsvc": 0.6})
+        a = select_winners(df, metric="balanced_accuracy", test_size=1 / 3)
+        b = select_winners(df.drop(columns="val_auc"), metric="balanced_accuracy", test_size=1 / 3)
+        pd.testing.assert_frame_equal(a.per_dataset, b.per_dataset)
+
+
+class TestValidationSelectionPerEmbedding:
+    """Validation selection picks per (dataset, embedding, fold): never across embeddings."""
+
+    @staticmethod
+    def _two_embeddings(n=6):
+        g = np.arange(n)
+        none = fold_frame(val={"lr": [0.9] * n, "vqc": [0.6] * n},
+                          test={"lr": list(0.7 + 0.01 * g), "vqc": [0.6] * n})
+        pca = fold_frame(val={"rf": [0.95] * n, "qsvc": [0.5] * n},
+                         test={"rf": [0.8] * n, "qsvc": [0.75] * n})
+        pca["embeddings"] = "pca"
+        return pd.concat([none, pca], ignore_index=True), g
+
+    def test_the_contrast_never_pairs_two_embeddings(self):
+        df, g = self._two_embeddings()
+        rep = select_winners(df, metric="balanced_accuracy", selection="validation")
+        sel = rep.selection
+        # One trace row per (embedding, fold), each pairing arms of its own embedding.
+        assert len(sel) == 12
+        assert (sel["classical_arm"].str.split("|").str[0] == sel["embeddings"]).all()
+        assert (sel["quantum_arm"].str.split("|").str[0] == sel["embeddings"]).all()
+        # A pooled argmax would pair pca|rf with none|vqc: delta 0.8 - 0.6 = 0.2.
+        # Per embedding: none 0.1 + 0.01 g, pca 0.05; the dataset contrast is their mean.
+        expected = ((0.1 + 0.01 * g) + 0.05) / 2
+        row = rep.per_dataset.iloc[0]
+        assert row["delta"] == pytest.approx(expected.mean())
+        assert row["n_iterations"] == 6
+        n, s = 6, expected.std(ddof=1)
+        assert row["se"] == pytest.approx(s * np.sqrt(1 / n + 1 / 2))
+
+    def test_a_fold_with_one_unpaired_embedding_uses_the_paired_one(self):
+        df, g = self._two_embeddings()
+        df = df[~((df["embeddings"] == "pca") & (df["model"] == "qsvc")
+                  & (df["iteration"] == 1))]
+        rep = select_winners(df, metric="balanced_accuracy", selection="validation")
+        first = rep.selection[(rep.selection["iteration"] == 1)
+                              & (rep.selection["embeddings"] == "pca")].iloc[0]
+        assert first["quantum_arm"] == "" and np.isnan(first["quantum_score"])
+        expected = ((0.1 + 0.01 * g) + 0.05) / 2
+        expected[0] = 0.1                        # fold 1: only 'none' is paired
+        assert rep.per_dataset.iloc[0]["delta"] == pytest.approx(expected.mean())
+
+    def test_a_fold_with_no_paired_embedding_is_dropped(self):
+        df, _ = self._two_embeddings()
+        # Fold 1: 'none' has no quantum arm, 'pca' no classical one.
+        df = df[~((df["iteration"] == 1)
+                  & (((df["embeddings"] == "none") & (df["model"] == "vqc"))
+                     | ((df["embeddings"] == "pca") & (df["model"] == "rf"))))]
+        rep = select_winners(df, metric="balanced_accuracy", selection="validation")
+        assert rep.per_dataset.iloc[0]["n_iterations"] == 5
+
+    def test_internal_rows_are_refused_under_validation(self):
+        df, _ = self._two_embeddings()
+        df.loc[df["embeddings"] == "pca", "split_mode"] = "internal"
+        with pytest.raises(ValueError, match="split_mode"):
+            select_winners(df, metric="balanced_accuracy", selection="validation")
+        df["split_mode"] = np.nan                # NaN reads as internal, too
+        with pytest.raises(ValueError, match="split_mode"):
+            select_winners(df, metric="balanced_accuracy", selection="validation")
+
+    def test_loio_over_manifest_rows_is_logged(self, caplog):
+        df, _ = self._two_embeddings()
+        with caplog.at_level("WARNING", logger="qbiocode.utils.fair_selection"):
+            select_winners(df, metric="balanced_accuracy", test_size=1 / 3)
+        assert "designed for selection='validation'" in caplog.text
+
+    def test_the_resolution_warning_speaks_of_k_under_validation(self, caplog):
+        df, _ = self._two_embeddings()
+        with caplog.at_level("WARNING", logger="qbiocode.utils.fair_selection"):
+            select_winners(df, metric="balanced_accuracy", selection="validation",
+                           epsilon=1e-6)
+        assert "at k=3" in caplog.text and "test_size" not in caplog.text

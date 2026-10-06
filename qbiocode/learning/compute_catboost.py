@@ -88,6 +88,7 @@ except Exception as exc:  # noqa: BLE001 -- see above
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 from qbiocode.learning._grid import one_value
 from qbiocode.learning._tuning import search_hyperparameters, tuning_scorer
+from qbiocode.learning.compute_fold import estimator_param_names, fold_fixed
 
 # ====== Module constants ======
 
@@ -417,6 +418,8 @@ def compute_catboost_opt(
     *,
     tuner="optuna",
     n_trials=50,
+    validation=None,
+    default_params=None,
 ):
     """
     This function also generates a model using a Gradient Boosting Classifier method as implemented in
@@ -481,6 +484,13 @@ def compute_catboost_opt(
             automatically when the configured values describe fewer distinct
             combinations than that, so a small block does not re-evaluate the same
             models.
+
+        validation (ValidationSplit or None): ``split_mode: manifest``: every trial is
+            one fit on ``validation.X_fit`` scored on ``validation.X_val``, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the cross-validated search, unchanged.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
 
     Returns:
         modeleval (dict): A dictionary containing the evaluation metrics of the model, including accuracy, AUC, F1 score, and the time taken for training and validation.
@@ -551,6 +561,9 @@ def compute_catboost_opt(
         fixed["min_data_in_leaf"] = min_data_in_leaf
     _resolve_bootstrap(candidates, fixed)
 
+    if validation is not None:
+        fixed = fold_fixed("catboost", candidates, default_params,
+                           estimator_param_names(CatBoostClassifier), fixed)
     best_params = search_hyperparameters(
         "catboost",
         CatBoostClassifier,
@@ -563,6 +576,8 @@ def compute_catboost_opt(
         n_trials=n_trials,
         seed=random_state,
         fixed=fixed,
+        validation=validation,
+        default_params=default_params,
     )
     best_catboost = CatBoostClassifier(**best_params, **fixed)  # type: ignore
     best_catboost.fit(X_train, y_train)

@@ -23,6 +23,20 @@ merged from.
     collated/results.pkl            the chosen runs' results.pkl lists, concatenated: one
                                     summary per (config, pass) instead of per pass
     collated/collate_manifest.csv   config -> run_dir, rows, expected, complete
+    collated/oof.csv                split_mode: manifest runs only -- the chosen runs'
+    collated/trials.csv             oof/, trials/ and val_predictions/ sidecars (one file
+    collated/val_predictions.csv    per pass each), concatenated, with a config column
+
+A manifest-mode job written before ModelResults carried the validation tie-break columns
+(qbiocode.evaluation.protocol.TIEBREAK_COLUMNS: val_auc, val_log_loss) gets them here, from
+its own trials/ and val_predictions/ sidecars, so fair_selection can break validation ties
+on every run.
+
+A manifest-mode run (generate_pilot_configs.py --split-mode manifest) is collated the same
+way, from its own tree: ./collate_results.py --runs-dir runs_cv/ID --out-dir collated_ID.
+Its jobs are one (dataset, split, embedding, group) each, so the key's iteration is the
+manifest's global split number and a (dataset, embedding, iteration) pass spans a group's
+jobs; the feature check below compares them exactly as it compares split-layout jobs.
 
 Three checks fail loudly, because each would otherwise produce a table that looks fine:
 
@@ -30,6 +44,8 @@ Three checks fail loudly, because each would otherwise produce a table that look
     same observation;
   * RawDataEvaluation disagreeing between the jobs of one dataset -- they did not read the
     same file;
+  * a duplicate sidecar key -- (data_key, model, row_id) in oof, (data_key, model, trial)
+    in trials, (data_key, model, trial, row_id) in val_predictions;
   * the dataset-characteristic columns disagreeing between models of one (dataset,
     embedding, iteration). qprofiler computes them on the EMBEDDED training split, so a
     disagreement means the jobs trained on different features, and their scores are not a
@@ -50,10 +66,43 @@ sys.path.insert(0, HERE)
 from status import best_run, find_configs, read_config  # noqa: E402  (one definition of "the run that counts")
 
 KEY = ["Dataset", "embeddings", "iteration", "model"]
+TIEBREAK_COLUMNS = ("val_auc", "val_log_loss")   # qbiocode.evaluation.protocol.TIEBREAK_COLUMNS
+
+
+def attach_tiebreak(frame, job_sidecars, config):
+    """One job's ModelResults with the validation tie-break columns, from its sidecars.
+
+    A job is one (dataset, split, embedding, group) pass, so its trials/ and
+    val_predictions/ hold one data_key and the scores join on ``model`` alone. A job with
+    no sidecars, or with more than one data_key, is returned with NaN columns.
+    """
+    from qbiocode.evaluation.protocol import tiebreak_from_sidecars
+
+    out = frame.copy()
+    for col in TIEBREAK_COLUMNS:
+        out[col] = np.nan
+    if not job_sidecars["trials"] or not job_sidecars["val_predictions"]:
+        return out
+    tb = tiebreak_from_sidecars(pd.concat(job_sidecars["trials"], ignore_index=True),
+                                pd.concat(job_sidecars["val_predictions"], ignore_index=True))
+    if tb["data_key"].nunique() != 1:
+        print(f"  {config}: {tb['data_key'].nunique()} data_keys in one job's sidecars; "
+              f"tie-break columns left NaN")
+        return out
+    scores = tb.set_index("model")
+    for col in TIEBREAK_COLUMNS:
+        out[col] = out["model"].map(scores[col])
+    return out
 #: Relative tolerance for "the same number". The measured cross-run noise on these columns
 #: is ~1e-15 (a kernel-density sum in a different order); a real feature mismatch moves them
 #: at the first or second significant figure.
 RTOL, ATOL = 1e-6, 1e-9
+#: The per-pass sidecars a split_mode: manifest run writes under its run directory
+#: (qbiocode.evaluation.protocol OOF_DIR, TRIALS_DIR, VAL_PREDICTIONS_DIR), each with the
+#: columns that identify one row in it.
+SIDECARS = {"oof": ["data_key", "model", "row_id"],
+            "trials": ["data_key", "model", "trial"],
+            "val_predictions": ["data_key", "model", "trial", "row_id"]}
 
 
 def _disagreement(frame, cols):
@@ -103,6 +152,7 @@ def main():
         sys.exit(f"no configs under {args.runs_dir}")
 
     manifest, frames, raws, pkls, problems = [], [], [], [], []
+    sidecars = {name: [] for name in SIDECARS}
     for p in paths:
         cfg = read_config(p)
         run_dir, rows = best_run(cfg)
@@ -114,7 +164,12 @@ def main():
                          "run_dir": run_dir or ""})
         if run_dir is None or rows == 0 or (args.complete_only and not complete):
             continue
-        frames.append(pd.read_csv(os.path.join(run_dir, "ModelResults.csv")))
+        frame = pd.read_csv(os.path.join(run_dir, "ModelResults.csv"))
+        job_sidecars = {name: [pd.read_csv(f) for f in sorted(glob.glob(os.path.join(run_dir, name, "*.csv")))]
+                        for name in SIDECARS}
+        if "split_mode" in frame.columns and not set(TIEBREAK_COLUMNS) <= set(frame.columns):
+            frame = attach_tiebreak(frame, job_sidecars, cfg["config"])
+        frames.append(frame)
         raw = os.path.join(run_dir, "RawDataEvaluation.csv")
         if os.path.exists(raw):
             r = pd.read_csv(raw)
@@ -124,6 +179,10 @@ def main():
         if os.path.exists(pk):
             with open(pk, "rb") as fh:
                 pkls.extend(pickle.load(fh))
+        for name in SIDECARS:
+            for side in job_sidecars[name]:
+                side.insert(0, "config", cfg["config"])
+                sidecars[name].append(side)
 
     man = pd.DataFrame(manifest)
     missing = man[man["rows"] == 0]
@@ -148,6 +207,20 @@ def main():
     if len(dup):
         problems.append(f"{len(dup)} rows share a (Dataset, embeddings, iteration, model) key:\n"
                         + dup[KEY].drop_duplicates().head(20).to_string(index=False))
+
+    sides = {}
+    for name, parts in sidecars.items():
+        if not parts:
+            continue
+        side = pd.concat(parts, ignore_index=True)
+        key = [c for c in SIDECARS[name] if c in side.columns]
+        side = side.sort_values(key, kind="stable").reset_index(drop=True)
+        dup = side[side.duplicated(key, keep=False)]
+        if len(dup):
+            problems.append(f"{len(dup)} {name} rows share a ({', '.join(key)}) key:\n"
+                            + dup[["config"] + key].drop_duplicates().head(20)
+                            .to_string(index=False))
+        sides[name] = side
 
     raw_cols = []
     if raws:
@@ -197,6 +270,9 @@ def main():
         pickle.dump(pkls, fh)
     os.replace(tmp, os.path.join(args.out_dir, "results.pkl"))
     man.to_csv(os.path.join(args.out_dir, "collate_manifest.csv"), index=False)
+    for name, side in sides.items():
+        side.to_csv(os.path.join(args.out_dir, f"{name}.csv"), index=False)
+        print(f"wrote {len(side)} rows to {args.out_dir}/{name}.csv")
     print(f"wrote {len(res)} rows ({res['Dataset'].nunique()} datasets, "
           f"{res['model'].nunique()} models) to {args.out_dir}/ModelResults.csv")
     def short(p):

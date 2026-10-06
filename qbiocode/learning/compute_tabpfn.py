@@ -68,6 +68,7 @@ import numpy as np
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 from qbiocode.learning._grid import to_plain
 from qbiocode.learning._tuning import search_hyperparameters, tuning_scorer
+from qbiocode.learning.compute_fold import estimator_param_names, fold_fixed
 
 # ====== Module constants ======
 
@@ -609,6 +610,8 @@ def compute_tabpfn_opt(
     *,
     tuner="optuna",
     n_trials=50,
+    validation=None,
+    default_params=None,
 ):
     """
     This function also generates a model using `TabPFN <https://github.com/PriorLabs/TabPFN>`__.
@@ -671,6 +674,13 @@ def compute_tabpfn_opt(
             combinations than that, so a small block does not re-evaluate the same
             models.
 
+        validation (ValidationSplit or None): ``split_mode: manifest``: every trial is
+            one fit on ``validation.X_fit`` scored on ``validation.X_val``, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the cross-validated search, unchanged.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+
     Returns:
         modeleval (dict): A dictionary containing the evaluation metrics of the model, including accuracy, AUC, F1 score, and the time taken for training and validation.
 
@@ -711,6 +721,9 @@ def compute_tabpfn_opt(
         "random_state": random_state,
     }
 
+    if validation is not None:
+        fixed = fold_fixed("tabpfn", candidates, default_params,
+                           estimator_param_names(classifier_cls), fixed)
     # Optuna by default; the exhaustive grid stays reachable so a number published
     # against it can still be reproduced. The engine branch is the shared one every
     # other classical model uses, so both engines get the same `candidates` and the same
@@ -728,6 +741,8 @@ def compute_tabpfn_opt(
             n_trials=n_trials,
             seed=random_state,
             fixed=fixed,
+            validation=validation,
+            default_params=default_params,
             scoring=tuning_scorer(args),
         )
         best_tabpfn = classifier_cls(**best_params, **fixed)

@@ -19,6 +19,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from qbiocode.evaluation.protocol import TRIALS_PREFIX
 from qbiocode.utils.helper_fn import print_results
 
 
@@ -166,6 +167,11 @@ SCORE_COLUMNS = (
     "auc",
     "pr_auc",
 )
+
+#: The prefix of the per-model metrics column ``modeleval`` builds (``results_<model>``).
+#: Code that READS those columns elsewhere names it through this constant, so that
+#: modeleval stays the only place a ``results_`` column is composed.
+RESULTS_PREFIX = "results_"
 
 #: Every numeric column of the metrics row: the scores above plus wall-clock cost.
 METRIC_COLUMNS = SCORE_COLUMNS + ("time",)
@@ -340,6 +346,12 @@ def modeleval(
             column holds a plain ``dict`` copy. The quantum wrappers add the same three
             keys through ``record_tuned_params``. Untuned rows carry none of them.
 
+            When that ``TunedParams`` also carries ``trials`` (a search scored on a
+            validation split, ``split_mode: manifest``), ``tuning_score`` is the chosen
+            trial's validation score and the frame gains a fourth column,
+            ``trials_<model>``, holding its ``trial_log()`` dict. Otherwise no such
+            column is added.
+
     Returns:
         pd.DataFrame: A ONE-ROW frame with three columns per model, named for it:
         ``y_test_<model>``, ``y_predicted_<model>`` and ``y_score_<model>`` each hold one
@@ -454,12 +466,17 @@ def modeleval(
     # every evaluation. Only tuned rows get the keys, so an untuned row reads NaN in
     # the CSV exactly as it did before they existed.
     tuning_evidence = {}
+    trial_log = None
     if parameter_column == "BestParams_Tuned" and callable(getattr(params, "evidence", None)):
         tuning_evidence = params.evidence()
+        # Every trial of a validation-split search, as one plain-dict cell; see
+        # qbiocode.evaluation.protocol.trial_log. None for any other search.
+        if callable(getattr(params, "trial_log", None)):
+            trial_log = params.trial_log()
         # Stored as a plain dict so results.pkl stays readable without the tuning
         # module's class; str() -- the BestParams_Tuned CSV text -- is the same either way.
         params = dict(params)
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "y_test_" + model: [y_test],
             "y_predicted_" + model: [y_predicted],
@@ -493,6 +510,12 @@ def modeleval(
             ],
         }
     )
+    if trial_log is not None:
+        # Assigned after construction: a dict handed to the constructor inside a list
+        # is one cell either way, but this keeps the column absent, not NaN, when
+        # there is no log.
+        frame[TRIALS_PREFIX + model] = pd.Series([trial_log], dtype=object)
+    return frame
 
 
 def evaluation_metrics(predictions, y_test, metrics=["accuracy", "brier"], save=False):

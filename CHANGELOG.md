@@ -8,6 +8,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Fold-based evaluation: `split_mode: manifest`
+
+- **Splits: `benchmark/make_splits.py` is make_splits/2.0 and writes manifest schema 2.**
+  Stratified k-fold repeated `--repeats` times (default 3), repeat r shuffled with
+  `seed + r`; repeat 0 equals make_splits/1.0 (`splits/v1`). Each fold record carries
+  explicit `val` rows (next_fold: the test rows of fold (f + 1) mod k). The default output
+  is `splits/v2`. Every side (train/fit/val/test) must hold both classes and pass the
+  balance check; every written manifest is read back with `split_manifest` and verified,
+  and a failing one is deleted (exit 1). Output is byte-deterministic. `index.csv` gains
+  `repeat`, `iteration`, `n_fit`, `n_val`, `fit_minority`, `val_minority`, and
+  `n_neighbors_max` is now `n_fit - 1`. `spec.yaml` v2 adds `schema_version`,
+  `n_repeats`, `repeat_seeds`, `validation`, `n_splits` and a report-only
+  `low_validation_minority` (floor of 3 minority rows).
+- **QProfiler: new config keys `split_mode` (`internal`, the default and unchanged, or
+  `manifest`), `split_dir` and `splits`** (`all`, or 1-based global iterations
+  `repeat * k + fold + 1`, for one job per fold). A manifest is verified against the
+  CSV's sha256, row count and labels before anything is fitted. Manifest mode requires
+  `grid_search: True`, `tune_quantum: True` with quantum models,
+  `freeze_quantum_params: False`, `tuner: optuna` and inductive embeddings (`spectral`
+  and the QuVINE methods, fit on the stacked fit and validation rows, are refused; so is
+  their cache plan), and ignores `iter`, `test_size`
+  and `stratify`. Rows gain `qbiocode.evaluation.protocol.PROTOCOL_COLUMNS` (split,
+  manifest/dataset sha256, seeds, `host`, `cpu_model`, `lsf_jobid`); `results.pkl` gains
+  `train_idx`/`fit_idx`/`val_idx`/`test_idx`; each pass atomically writes the sidecars
+  `oof/<data_key>.csv`, `trials/<data_key>.csv` (`TRIAL_COLUMNS`, with each model's
+  non-searched params as JSON in `fixed`) and `val_predictions/<data_key>.csv`.
+  The embedding cache stores a second file per pass, `emb_<data_key>__tune.npz`
+  (fit/validation stage); manifest-mode specs record `split_mode`, `manifest_sha256`,
+  `repeat`, `fold`, `stage` and `embed_seed`, and a file of one split mode is stale in
+  the other. Internal-mode specs, file names and rows are unchanged. RawDataEvaluation is
+  still computed on all rows. `python -m qbiocode.apps.qprofiler.embedding_cache` gains
+  `--dry-run`: it lists what `--check` lists and writes nothing, but exits 0 unless a
+  config is invalid (`submit_runs.sh` DRY=1 keeps `--check`, whose exit raises its
+  WARNING).
+- **Tuning: `model_run(..., validation=ValidationSplit)`** tunes every arm on the fit rows
+  with ONE budget, `n_trials` (`n_trials_quantum` is ignored, with a warning), and scores
+  each trial once on the validation rows with `tuning_metric`; the best config is refit
+  on the training fold. Trial 0 is the arm's default config (`compute_<m>` defaults under
+  `<m>_args`); a default outside the searched space widens it (logged). Every trial is
+  kept in a new `trials_<model>` results key (params, value, state, duration_s,
+  is_default, is_best, validation y_pred/y_score, val_idx, y_val, fixed params), and
+  `tuning_score` is the chosen trial's validation score. A failed trial is FAIL/NaN and
+  the study continues; a libsvm fit that stops at `max_iter` counts as failed.
+  `run_study`, `search_hyperparameters` and `run_function_study` gain `validation` and
+  `default_params` (`run_function_study` also `reseed`); `TunedParams` gains `trials`,
+  `best_trial`, `val_idx`, `y_val`, `fixed` and `trial_log()`; new
+  `_tuning.check_fit_status`. `tuner: grid` with validation, a model without an `_opt`
+  twin (`qensemble`), and a frozen-parameter load/save with validation raise.
+- **Learners:** every `compute_<m>_opt` accepts `validation=` and `default_params=`
+  (quantum ones also `reseed=`); unsearched configured defaults are fixed for all trials
+  and the refit. In manifest mode SVC fits (`svc_opt` and the PQK/QPL SVC heads) are
+  capped at `max_iter` = the configured value if > 0, else 10,000,000; the PQK/QPL head
+  search is scored with `tuning_metric` (new keyword-only `head_scoring`,
+  `head_max_iter`); QPL heads get their own `trials_<model>_<head>` logs and
+  `tuning_score`, each trial's frame matched to its trial by number (a trial that fails
+  before its fit loses only its own entry). **`compute_qnn` gains `readout='global'|'local'`** (default `'global'`,
+  unchanged; `'local'` reads Z on virtual qubit 0 through the layout), searchable via
+  `gridsearch_qnn_args`.
+- **Validation ties are broken on validation AUC.** A validation fold of ten-odd rows
+  gives balanced accuracy only a few values, so arms tied often (13 of 15 folds on
+  labor's classical side in a controlled run). Manifest-mode rows now carry `val_auc`
+  and `val_log_loss` of the refit trial on its validation rows
+  (`protocol.TIEBREAK_COLUMNS`, `binary_validation_scores`, `validation_tiebreak`), and
+  `select_winners(selection='validation')` narrows a tie to the arms with the best
+  `tiebreak_col` (default `'val_auc'`; `tiebreak_higher_is_better=False` for a loss);
+  a tie whose arms also tie, or lack the column, is averaged as before. AUC, not log
+  loss as in TabZilla, because svc, qsvc, pqk and qnn output decision scores, not
+  probabilities; `val_log_loss` is reported for the models that do. `collate_results.py`
+  backfills both columns from a job's trials/ and val_predictions/ sidecars
+  (`protocol.tiebreak_from_sidecars`). On the controlled run the tied side-folds fell
+  from 39 to 24 (classical) and 21 to 10 (quantum) of 75, and no verdict changed.
+- **Analysis: `selection='loio'|'validation'`** (default `'loio'`, unchanged),
+  `validation_col='tuning_score'` and `k=None` on `select_winners`, `fair_winner`,
+  `delta_metric_table`, `aggregate_benchmark` and `meta_regression.unit_report`.
+  Validation selection picks, per (dataset, embedding, fold) and side, the best
+  validation score and scores it on the fold's test rows; ties within 1e-12 average;
+  inference is the corrected repeated-CV t with r = 1/(k-1), n = kR, df = kR-1. It
+  refuses rows whose `split_mode` is not `manifest` and mixed `tuning_metric`s. New
+  `fair_selection.resolve_split_k`, `SELECTION_MODES`, `qc_winner_finder.missing_folds`
+  (inventory column `n_missing_folds`, `<tag>_missing_folds.csv`);
+  `meta_feature_columns` excludes `PROTOCOL_COLUMNS`. `analyze_pilot.py` reads the
+  protocol from the configs run (`RunProtocol`, `read_run_protocol(detail=True)`;
+  `--config-dir` still defaults to `configs`, and takes a runs tree too), and
+  `meta_analysis.ipynb` passes its `selection` and `k` to `select_winners` and
+  `unit_report`. New `model_evaluation.RESULTS_PREFIX` (`'results_'`), through which
+  code outside `modeleval` names the per-model metrics columns.
+- **pilot10 jobs: `generate_pilot_configs.py --split-mode manifest`** writes one LSF job
+  per (dataset, outer split, embedding, group) under `runs_cv/<run-id>/` (classical arms
+  one group, each quantum arm its own), with new flags `--run-id`, `--split-dir`,
+  `--datasets-root`, `--runs-dir`, `--n-trials`, `--wall`, `--datasets`, `--models`,
+  `--splits` and `--qnn-readout`; MANIFEST.tsv gains the run and subset columns.
+  `submit_runs.sh` names such jobs `p10_<run_id>_<config>`, takes each job's wall from
+  MANIFEST.tsv and precomputes both cache stages of the selected splits (DRY=1 lists
+  them); `status.py` is run-aware; `collate_results.py` also concatenates the `oof/`,
+  `trials/` and `val_predictions/` sidecars. `submit_pilot.sh` refuses manifest configs.
+  Default-mode output is unchanged.
+
 #### Tuning metric, tuning evidence, and a `data_map` for PQK and QPL
 
 - **New top-level config key `tuning_metric`** sets what every hyperparameter tuner

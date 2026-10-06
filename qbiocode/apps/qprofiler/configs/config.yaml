@@ -187,6 +187,34 @@ NN_depth: 1
 # For each split, models are generated for every model-embedding combination specified above.
 iter: 2
 
+# Where the outer splits come from.
+#   internal -- (default) QProfiler draws `iter` train/test splits itself, at seed + iter,
+#               with test_size and stratify above. Nothing below applies.
+#   manifest -- the splits are read from a frozen manifest per dataset, written by
+#               benchmark/make_splits.py: stratified k-fold x R repeats, and for each
+#               outer fold the validation rows ("next_fold": the next fold's test rows).
+#               Every model is tuned inside every outer fold with the same n_trials
+#               (trial 0 = the <model>_args defaults), each trial fit on the fit rows
+#               (training fold minus validation) and scored on the validation rows with
+#               tuning_metric; the best configuration is refit on the whole training fold
+#               and scored once on the test fold. Scaler and embedding are fitted on the
+#               fit rows for the trials and on the training fold for the refit. Needs
+#               grid_search: True, tune_quantum: True (with quantum models),
+#               freeze_quantum_params: False and tuner: optuna; iter, test_size, stratify,
+#               cross_validation and validation_split are not used. The dataset CSV must be
+#               the file the manifest was computed from (sha256 and row count are checked).
+#               Rows gain the protocol columns (qbiocode.evaluation.protocol.PROTOCOL_COLUMNS:
+#               repeat, fold, manifest and dataset sha256, seeds, host, cpu_model,
+#               lsf_jobid), and each pass writes oof/, trials/ and val_predictions/ CSVs
+#               beside results.pkl. RawDataEvaluation.csv is still computed on all rows
+#               (dataset-level features).
+split_mode: internal
+# manifest mode: directory holding one <dataset stem>.json manifest per dataset.
+split_dir: null
+# manifest mode: which outer splits this run executes -- 'all', or one or a list of
+# 1-based global iterations (repeat * k + fold + 1), e.g. [3] for one LSF job per fold.
+splits: all
+
 # Begin function arguments
 # Each CML method takes a tuned set of arguments (gridsearch_<method>_args) as well as
 # a standard set (<method>_args), the latter usually the same values but not as lists.

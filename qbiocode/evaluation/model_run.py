@@ -79,6 +79,12 @@ def _call_with_global_seeds(compute_fn, seed, q_seed, *fn_args, **fn_kwargs):
 
 
 def _seed_and_call(compute_fn, seed, q_seed, fn_args, fn_kwargs):
+    _set_global_seeds(seed, q_seed)
+    return compute_fn(*fn_args, **fn_kwargs)
+
+
+def _set_global_seeds(seed, q_seed):
+    """Seed numpy's global stream and both qiskit ``algorithm_globals`` singletons."""
     import numpy as np
 
     if seed is not None:
@@ -105,10 +111,120 @@ def _seed_and_call(compute_fn, seed, q_seed, fn_args, fn_kwargs):
                 # to set.
                 continue
             algorithm_globals.random_seed = q_seed
-    return compute_fn(*fn_args, **fn_kwargs)
 
 
-def model_run(X_train, X_test, y_train, y_test, data_key, args):
+class _Reseed:
+    """The ``reseed`` callable a quantum ``_opt`` gets under ``split_mode: manifest``.
+
+    Resets numpy's global stream, Python's ``random`` and both qiskit
+    ``algorithm_globals`` to the state :func:`_seed_and_call` starts a model
+    from. The tuner calls it before every trial and before the refit, so qnn and vqc --
+    whose initial point is drawn from ``algorithm_globals`` -- start each trial from the
+    same state whatever ran before it, and trial order cannot move a score. A class
+    rather than a closure so it pickles into a loky worker by reference.
+    """
+
+    def __init__(self, seed, q_seed):
+        self.seed = seed
+        self.q_seed = q_seed
+
+    def __call__(self):
+        import random
+
+        if self.seed is not None:
+            random.seed(self.seed)
+        _set_global_seeds(self.seed, self.q_seed)
+
+    def __repr__(self):
+        return f"_Reseed(seed={self.seed!r}, q_seed={self.q_seed!r})"
+
+
+#: Keyword arguments model_run passes to a model function itself; a config block naming
+#: one is dropped (with a warning) rather than colliding with it. See _seeded_kwargs.
+_RESERVED_KWARGS = (
+    "model", "data_key", "n_trials", "validation_split", "cv", "tuner", "verbose",
+    "validation", "default_params", "reseed",
+)
+
+
+def _default_params(compute_fn, model_args):
+    """The default config of one arm: ``compute_<m>``'s defaults under ``<m>_args``.
+
+    What the arm runs at untuned, and so what a fold-based search enqueues as trial 0.
+    Reserved keyword arguments (see :data:`_RESERVED_KWARGS`) and ``random_state`` --
+    which the ``_opt`` function is given explicitly from ``args['seed']`` -- are left out.
+    """
+    from qbiocode.learning._grid import to_plain
+
+    try:
+        parameters = inspect.signature(compute_fn).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover - C callables
+        parameters = ()
+    defaults = {
+        p.name: p.default for p in parameters
+        if p.default is not inspect.Parameter.empty
+        and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    }
+    defaults.update(to_plain(dict(model_args or {})))
+    for key in _RESERVED_KWARGS + ("random_state",):
+        defaults.pop(key, None)
+    return defaults
+
+
+def _check_fold_tuning(requested, compute_ml_dict, grid_search, tune_quantum, args):
+    """What ``split_mode: manifest`` needs of a model_run config, checked before any fit.
+
+    The protocol tunes every arm inside the fold on the same trial budget and selects on
+    validation, so an arm that would run untuned, or be searched by an engine that
+    ignores the budget, or reuse parameters frozen on another fold, is a config error.
+    """
+    from qbiocode.learning._param_cache import freezing_enabled
+
+    if not grid_search:
+        raise ValueError(
+            "A validation split was given (split_mode: manifest), which tunes every "
+            "model inside the fold, but grid_search is off. Set grid_search: True."
+        )
+    no_twin = [m for m in requested if (m + "_opt") not in compute_ml_dict]
+    if no_twin:
+        raise ValueError(
+            f"split_mode: manifest tunes every model on the validation split, but "
+            f"{no_twin} have no '_opt' implementation to tune. Drop them from "
+            f"args['model']."
+        )
+    untuned = [m for m in requested if m in QUANTUM_MODELS and not tune_quantum]
+    if untuned:
+        raise ValueError(
+            f"split_mode: manifest gives every arm the same tuning budget, but "
+            f"tune_quantum is off, so {untuned} would run untuned. Set tune_quantum: True."
+        )
+    if args.get("tuner", "optuna") == "grid":
+        raise ValueError(
+            "tuner: 'grid' cannot be used with split_mode: manifest: the exhaustive grid "
+            "ignores n_trials, so the arms could not be given one equal budget. Use "
+            "tuner: optuna."
+        )
+    if freezing_enabled(args):
+        raise ValueError(
+            "freeze_quantum_params cannot be used with split_mode: manifest: each fold "
+            "is tuned on its own validation rows, and parameters frozen on one fold were "
+            "chosen on rows that are another fold's test rows. Set "
+            "freeze_quantum_params: False."
+        )
+    n_trials = args.get("n_trials", 50)
+    n_trials_quantum = args.get("n_trials_quantum")
+    if (
+        n_trials_quantum is not None
+        and n_trials_quantum != n_trials
+        and any(m in QUANTUM_MODELS for m in requested)
+    ):
+        logger.warning(
+            "n_trials_quantum=%r is ignored under split_mode: manifest; every arm, "
+            "quantum included, is tuned with n_trials=%r.", n_trials_quantum, n_trials,
+        )
+
+
+def model_run(X_train, X_test, y_train, y_test, data_key, args, validation=None):
     """This function runs the ML methods, with or without a grid search, as specified in the config.yaml file.
     It returns a python dictionary contatining these results, which can then be parsed out. It is designed to run
     each of the ML methods in parallel, for each data set (this is done by calling the Parallel module in results below).
@@ -139,6 +255,19 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
               models; see qbiocode.learning.compute_catboost and .compute_tabpfn for
               the hyperparameters each accepts.
             - <model>_args: Additional arguments for each model.
+        validation (ValidationSplit or None): ``split_mode: manifest``. The fit and
+            validation rows of this outer training fold, with features transformed for
+            the tuning stage (see :class:`qbiocode.evaluation.protocol.ValidationSplit`).
+            Every model is then tuned -- classical and quantum alike, so grid_search and
+            (for quantum models) tune_quantum must be on, and every model needs an
+            '_opt' twin -- on ONE budget, args['n_trials'] (n_trials_quantum is ignored,
+            with a warning when it differs). Each trial is one fit on the fit rows
+            scored on the validation rows; trial 0 is the arm's default config
+            (``compute_<m>``'s defaults under ``<m>_args``); the winner is refit on
+            X_train and scored once on X_test. Each tuned model also contributes a
+            'trials_<label>' key holding its trial log
+            (:func:`qbiocode.evaluation.protocol.trial_log`). None (the default) runs
+            exactly as before.
 
     Returns:
         model_total_result (dict): The results of every model run, ready to be turned
@@ -183,7 +312,10 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
             no '_opt' twin; if tune_quantum is on without grid_search, or without a
             gridsearch_<model>_args block per quantum model; or if args['tuner'] is
             not one of 'optuna' or 'grid', or args['tuning_metric'] is not a known
-            metric. All of these are raised before any model is fitted.
+            metric. All of these are raised before any model is fitted. With
+            ``validation``, also if grid_search is off, a model has no '_opt' twin, a
+            quantum model is requested without tune_quantum, args['tuner'] is 'grid',
+            or freeze_quantum_params is on.
 
     """
 
@@ -342,6 +474,8 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
             "tune_quantum is enabled but grid_search is not, so no tuning would run. "
             "Set grid_search: True as well, or drop tune_quantum."
         )
+    if validation is not None:
+        _check_fold_tuning(requested, compute_ml_dict, grid_search, tune_quantum, args)
 
     # Run classical and quantum models
     n_jobs = len(args["model"])
@@ -443,8 +577,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
         # redundant here and the explicit value must win. Warn rather than drop
         # silently, so a key that was meant to do something is not simply ignored.
         model_kwargs = dict(model_kwargs)
-        for reserved in ("model", "data_key", "n_trials", "validation_split",
-                         "cv", "tuner", "verbose"):
+        for reserved in _RESERVED_KWARGS:
             if reserved in model_kwargs:
                 logger.warning(
                     "ignoring %r from this model's config block: model_run passes it "
@@ -467,6 +600,20 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
     seed = args.get("seed")
     q_seed = args.get("q_seed")
 
+    def _fold_kwargs(method, quantum):
+        """The extra ``_opt`` keywords of a fold-based run; none without a validation split."""
+        if validation is None:
+            return {}
+        kwargs = {
+            "validation": validation,
+            "default_params": _default_params(
+                compute_ml_dict[method], args.get(method + "_args")
+            ),
+        }
+        if quantum:
+            kwargs["reseed"] = _Reseed(seed, q_seed)
+        return kwargs
+
     if grid_search:
         results = []
         for method in args["model"]:
@@ -487,11 +634,17 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
                     args,
                     model=method + "_opt",
                     data_key=data_key,
-                    n_trials=args.get("n_trials_quantum", 10),
+                    # One budget for every arm in a fold-based run; see
+                    # _check_fold_tuning for the warning when the two keys differ.
+                    n_trials=(
+                        args.get("n_trials_quantum", 10) if validation is None
+                        else args.get("n_trials", 50)
+                    ),
                     validation_split=args.get("validation_split", 0.25),
                     **_seeded_kwargs(
                         compute_fn, _tuned_quantum_kwargs(method)
                     ),
+                    **_fold_kwargs(method, quantum=True),
                     verbose=False,
                 )
             elif method in quantum_models:
@@ -533,6 +686,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args):
                     **_seeded_kwargs(
                         compute_fn, args.get("gridsearch_" + method + "_args", {})
                     ),
+                    **_fold_kwargs(method, quantum=False),
                     verbose=False,
                 )
             results.append(result)

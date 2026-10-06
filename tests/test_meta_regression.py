@@ -369,6 +369,32 @@ class TestEndToEnd:
     def test_joint_model_refuses_when_clusters_are_too_few(self):
         assert mr.joint_tests(synthetic_design(), n_boot=99) is None
 
+    def test_too_few_clusters_give_nan_not_zero_p_values(self, caplog):
+        # Two clusters for an intercept and a feature: the CR1 standard error is zero and,
+        # before the guard, t was ~1e15 with p_cr1 = 0. Now the cluster-robust columns are
+        # NaN, the iid column (wrong by construction) is still reported, and it is logged.
+        d = synthetic_design(beta=1.0, G=2)
+        with caplog.at_level("WARNING", logger="qbiocode.utils.meta_regression"):
+            table = mr.marginal_tests(d, n_boot=99, n_perm=0, seed=19)
+        for col in ("se_cr1", "se_cv3", "ci_lo", "ci_hi", "t", "p_cr1", "p_cv3", "p_wcr", "q_bh"):
+            assert table[col].isna().all(), col
+        assert table["p_ols_iid"].notna().all()
+        assert "not identified" in caplog.text
+
+    def test_identified_designs_keep_their_p_values(self):
+        table = mr.marginal_tests(synthetic_design(), n_boot=99, n_perm=0, seed=20)
+        assert table[["se_cr1", "t", "p_cr1", "p_wcr", "q_bh"]].notna().all().all()
+
+    def test_lodo_influence_keeps_its_columns_when_no_fold_is_estimable(self):
+        cols = ["feature", "beta", "beta_min", "beta_max", "sign_flips", "most_influential",
+                "beta_without_it"]
+        lodo = mr.lodo_influence(synthetic_design(G=2))
+        assert list(lodo.columns) == cols
+        assert lodo["sign_flips"].isna().all() and lodo["most_influential"].isna().all()
+        estimable = mr.lodo_influence(synthetic_design())
+        assert list(estimable.columns) == cols and estimable["sign_flips"].notna().all()
+        assert list(mr.lodo_influence(synthetic_design(), features=[]).columns) == cols
+
     def test_within_unit_test_finds_a_shift_on_one_iteration(self):
         d = synthetic_design()
         first = (d.rows["iteration"] == 1).to_numpy()
@@ -450,3 +476,56 @@ class TestDatasetFamily:
         rule = table[table["stem"].str.match(r"(eng|gs|hl|ql|te)_|GAMETES")]
         assert len(rule) == 19
         assert [mr.dataset_family(s) for s in rule["stem"]] == rule["cluster_cons"].tolist()
+
+
+class TestManifestMode:
+    """split_mode: manifest -- protocol columns reserved, validation selection per pass."""
+
+    @staticmethod
+    def fold_frame(k=3, repeats=2, seed=0):
+        rng = np.random.default_rng(seed)
+        rows = []
+        for d in ("a", "b"):
+            for emb in ("pca", "umap"):
+                for g in range(k * repeats):
+                    for m, val in (("svc", 0.6), ("lr", 0.9), ("qsvc", 0.7), ("pqk", 0.5)):
+                        rows.append(dict(Dataset=d, embeddings=emb, iteration=g + 1,
+                                         repeat=g // k, fold=g % k, model=m,
+                                         split_mode="manifest", split_k=k,
+                                         split_repeats=repeats, n_fit=30, n_val=10,
+                                         n_test=10, seed=42, q_seed=42, embed_seed=43 + g,
+                                         balanced_accuracy=rng.normal(0.75, 0.03),
+                                         tuning_score=val,
+                                         tuning_metric="balanced_accuracy",
+                                         **{"mfe.x": {"a": 1.0, "b": 2.0}[d]}))
+        return pd.DataFrame(rows)
+
+    def test_protocol_columns_are_not_meta_features(self):
+        from qbiocode.evaluation.protocol import PROTOCOL_COLUMNS
+        res = self.fold_frame()
+        assert {"repeat", "fold", "n_val", "embed_seed", "split_k"} <= set(PROTOCOL_COLUMNS)
+        assert mr.meta_feature_columns(res) == ["mfe.x"]
+
+    def test_unit_report_forwards_the_selection_mode(self):
+        res = self.fold_frame()
+        rep = mr.unit_report(res, selection="validation")
+        assert rep.selection_mode == "validation" and rep.k == 3
+        sel = rep.selection
+        assert (sel["classical_arm"].str.endswith("|lr")).all()
+        assert (sel["quantum_arm"].str.endswith("|qsvc")).all()
+        assert set(zip(sel["Dataset"], sel["embeddings"])) == {
+            (d, e) for d in "ab" for e in ("pca", "umap")}
+        contrast = mr.loio_contrast(rep)
+        assert len(contrast) == 2 * 2 * 6
+        assert {"repeat", "fold", "classical_val", "quantum_val"} <= set(contrast.columns)
+        assert np.allclose(contrast["qadv"],
+                           contrast["quantum_score"] - contrast["classical_score"])
+
+    def test_unit_report_under_validation_matches_select_winners_per_pass(self):
+        res = self.fold_frame()
+        ours = mr.unit_report(res, selection="validation", validation_col="tuning_score",
+                              k=3)
+        relabelled = res.assign(Dataset=res["Dataset"] + "|" + res["embeddings"])
+        ref = select_winners(relabelled, metric="balanced_accuracy", epsilon=0.027,
+                             selection="validation")
+        assert np.allclose(ours.per_dataset["se"], ref.per_dataset["se"])

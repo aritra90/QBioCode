@@ -8,6 +8,7 @@ from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 
 # ====== Additional local imports ======
 from qbiocode.learning._tuning import search_hyperparameters, tuning_scorer
+from qbiocode.learning.compute_fold import estimator_param_names, fold_fixed
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Scikit-learn imports ======
@@ -138,6 +139,8 @@ def compute_lr_opt(
     *,
     tuner="optuna",
     n_trials=50,
+    validation=None,
+    default_params=None,
 ):
     """This function also generates a model using a Logistic Regression (LR) method as implemented in
     `scikit-learn <https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html>`__.
@@ -172,6 +175,13 @@ def compute_lr_opt(
             automatically when the configured values describe fewer distinct
             combinations than that, so a small block does not re-evaluate the same
             models.
+        validation (ValidationSplit or None): ``split_mode: manifest``: every trial is
+            one fit on ``validation.X_fit`` scored on ``validation.X_val``, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the cross-validated search, unchanged.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+
     Returns:
         modeleval (dict): A dictionary containing the evaluation metrics, best parameters, and time taken for training and validation.
     """
@@ -186,6 +196,10 @@ def compute_lr_opt(
         "solver": solver,
         "max_iter": max_iter,
     }
+    fixed = {"random_state": random_state}
+    if validation is not None:
+        fixed = fold_fixed("lr", candidates, default_params,
+                           estimator_param_names(LogisticRegression), fixed)
     best_params = search_hyperparameters(
         "lr",
         LogisticRegression,
@@ -197,9 +211,11 @@ def compute_lr_opt(
         scoring=tuning_scorer(args),
         n_trials=n_trials,
         seed=random_state,
-        fixed={"random_state": random_state},
+        fixed=fixed,
+        validation=validation,
+        default_params=default_params,
     )
-    best_logres = LogisticRegression(**best_params, random_state=random_state)
+    best_logres = LogisticRegression(**best_params, **fixed)
     best_logres.fit(X_train, y_train)
 
     # Make predictions and calculate accuracy

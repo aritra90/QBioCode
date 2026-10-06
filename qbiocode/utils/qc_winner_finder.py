@@ -224,6 +224,9 @@ def fair_winner(
     margin=0.0,
     fdr=0.10,
     controls=None,
+    selection="loio",
+    validation_col="tuning_score",
+    k=None,
 ):
     """Unbiased counterpart to :func:`qml_winner`; writes the tables a paper can cite.
 
@@ -251,8 +254,9 @@ def fair_winner(
         alpha (float): two-sided level of the per-dataset intervals, and of the Holm
             family of ``controls``.
         test_size (float): the split fraction the run used, for the Nadeau-Bengio term.
-            Required: ModelResults.csv does not record it, so ``None`` raises
-            ``ValueError`` (from ``select_winners``). The pilot used 0.2.
+            Required with ``selection='loio'``: ModelResults.csv does not record it, so
+            ``None`` raises ``ValueError`` (from ``select_winners``). The pilot used 0.2.
+            With ``selection='validation'`` it is ``1/k`` and may be omitted.
         seed (int): unused; kept so existing calls still work. Ties are averaged, so
             the result does not depend on any seed.
         baseline (pandas.DataFrame): optional ``['Dataset', metric]`` dummy floor.
@@ -262,10 +266,17 @@ def fair_winner(
         controls (str | Iterable[str] | None): datasets forming a separate
             Holm-adjusted family (e.g. synthetic controls), left out of the BH family and
             of ``report.quantum_datasets`` / ``classical_datasets``.
+        selection (str): ``'loio'`` (default, repeated holdouts) or ``'validation'``
+            (``split_mode: manifest``: per fold, the arm with the best validation score).
+            The selection trace is written as ``<tag>_fair_loio_selection.csv`` or
+            ``<tag>_fair_validation_selection.csv`` accordingly.
+        validation_col (str): validation-score column for ``selection='validation'``.
+        k (int | None): outer folds per repeat for ``selection='validation'``; defaults
+            to the ``split_k`` column.
 
     Returns:
         qbiocode.utils.fair_selection.WinnerReport: verdicts, per-arm means, the arm
-        chosen per held-out iteration, and corpus-level inference.
+        chosen per held-out iteration (or per fold), and corpus-level inference.
     """
     report = select_winners(
         results_df,
@@ -278,12 +289,16 @@ def fair_winner(
         margin=margin,
         fdr=fdr,
         controls=controls,
+        selection=selection,
+        validation_col=validation_col,
+        k=k,
     )
     os.makedirs(output_dir, exist_ok=True)
     report.per_dataset.to_csv(os.path.join(output_dir, tag + "_fair_verdicts.csv"), index=False)
     report.per_arm.to_csv(os.path.join(output_dir, tag + "_fair_per_arm.csv"), index=False)
     report.selection.to_csv(
-        os.path.join(output_dir, tag + "_fair_loio_selection.csv"), index=False
+        os.path.join(output_dir, f"{tag}_fair_{report.selection_mode}_selection.csv"),
+        index=False,
     )
     pd.Series(report.corpus, dtype=object).to_frame("value").to_csv(
         os.path.join(output_dir, tag + "_fair_corpus.csv")
@@ -308,6 +323,63 @@ BENCHMARK_METRICS = (
 )
 
 
+def missing_folds(results, expected="observed"):
+    """Arms of a ``split_mode: manifest`` frame that lack some of their dataset's folds.
+
+    Validation selection compares arms fold by fold, so an arm whose job for one fold
+    died is silently absent from that fold's choice -- the other side then wins that
+    fold by default. Every arm must carry every global ``iteration`` its dataset is
+    expected to have.
+
+    Args:
+        results (pandas.DataFrame): ModelResults-shaped frame with ``Dataset``,
+            ``model`` and ``iteration`` (``embeddings``, ``split_k`` and
+            ``split_repeats`` if present).
+        expected (str | Iterable[int]): the iterations every arm should have.
+            ``'observed'`` (default): every iteration any arm of the dataset has, which
+            is right for a run over a subset of the splits (``--splits 1-5``) but cannot
+            see a fold missing from every arm. ``'full'``: ``1 .. split_k *
+            split_repeats`` (falling back to ``'observed'`` without those columns), for a
+            run known to cover every split. An iterable of ints: exactly those.
+
+    Returns:
+        pandas.DataFrame: one row per incomplete ``(Dataset, embeddings, model)`` arm,
+        with ``n_expected``, ``n_present`` and ``missing`` (the absent iterations,
+        ``';'``-joined). Empty when every arm is complete.
+
+    Raises:
+        ValueError: ``expected`` is an unknown string.
+    """
+    cols = ["Dataset", "embeddings", "model", "n_expected", "n_present", "missing"]
+    if isinstance(expected, str) and expected not in ("observed", "full"):
+        raise ValueError(f"expected must be 'observed', 'full' or iterations; got {expected!r}")
+    if results.empty:
+        return pd.DataFrame(columns=cols)
+    work = results.copy()
+    if "embeddings" not in work:
+        work["embeddings"] = ""
+    work["iteration"] = pd.to_numeric(work["iteration"], errors="coerce")
+    rows = []
+    for dataset, block in work.groupby("Dataset", sort=True):
+        want = set(block["iteration"].dropna().astype(int))
+        if not isinstance(expected, str):
+            want = {int(i) for i in expected}
+        elif expected == "full" and {"split_k", "split_repeats"} <= set(block.columns):
+            k = pd.to_numeric(block["split_k"], errors="coerce").max()
+            reps = pd.to_numeric(block["split_repeats"], errors="coerce").max()
+            if np.isfinite(k) and np.isfinite(reps):
+                want = set(range(1, int(k) * int(reps) + 1))
+        for (emb, model), arm in block.groupby(["embeddings", "model"], dropna=False,
+                                               sort=True):
+            have = set(arm["iteration"].dropna().astype(int))
+            gone = sorted(want - have)
+            if gone:
+                rows.append({"Dataset": dataset, "embeddings": emb, "model": model,
+                             "n_expected": len(want), "n_present": len(have & want),
+                             "missing": ";".join(map(str, gone))})
+    return pd.DataFrame(rows, columns=cols)
+
+
 def collect_model_results(results_root, pattern="**/ModelResults.csv"):
     """Concatenate every per-dataset ``ModelResults.csv`` under ``results_root``.
 
@@ -326,10 +398,19 @@ def collect_model_results(results_root, pattern="**/ModelResults.csv"):
       quantum one, and reports the truncation as a classical win. So the per-file model
       count is returned alongside the frame for the caller to check, not buried.
 
+    * Under ``split_mode: manifest`` (a ``split_mode`` column holding ``'manifest'``),
+      an arm missing a fold that other arms of its dataset have, e.g. one per-fold job
+      that died. Each arm is checked with :func:`missing_folds` (its default
+      ``'observed'`` rule, so a run over a subset of the splits is not flagged; a
+      dataset covering fewer than its kR splits is logged at INFO); incomplete arms are
+      logged, and the inventory
+      gains ``n_missing_folds`` (incomplete arms of that file's datasets). The check
+      runs on the pooled frame, because one fold's arms can arrive in separate files.
+
     Returns:
         tuple[pandas.DataFrame, pandas.DataFrame]: the concatenated results, and a
         per-file inventory with columns ``['path', 'Dataset', 'n_rows', 'n_models',
-        'n_iterations']``.
+        'n_iterations']`` (plus ``n_missing_folds`` in manifest mode).
     """
     import glob as _glob
 
@@ -363,6 +444,29 @@ def collect_model_results(results_root, pattern="**/ModelResults.csv"):
             "the pooled results have no 'iteration' column, so no interval can be "
             "computed and no margin certified. Re-run with more than one resample."
         )
+    if "split_mode" in results.columns and (results["split_mode"] == "manifest").any():
+        manifest_rows = results[results["split_mode"] == "manifest"]
+        gaps = missing_folds(manifest_rows)
+        partial = missing_folds(manifest_rows, expected="full")
+        partial = sorted(set(partial["Dataset"]) - set(gaps["Dataset"]))
+        if partial:
+            # Every arm has the same folds but not all kR of them: a run over a subset of
+            # the splits (--splits), or a fold whose every job died. Not an arm gap.
+            logger.info("%d dataset(s) cover fewer than their split_k*split_repeats "
+                        "folds on every arm (a subset run?): %s",
+                        len(partial), ", ".join(map(str, partial)))
+        per_dataset = gaps.groupby("Dataset").size().to_dict()
+        inv["n_missing_folds"] = [
+            sum(per_dataset.get(d, 0) for d in str(ds).split("|")) for ds in inv["Dataset"]
+        ]
+        if not gaps.empty:
+            logger.warning(
+                "%d arm(s) lack some of their folds, so validation selection would drop "
+                "them from those folds -- re-run the missing jobs before reading a "
+                "verdict:\n%s",
+                len(gaps),
+                gaps.to_string(index=False),
+            )
     return results, inv
 
 
@@ -428,6 +532,9 @@ def delta_metric_table(
     margin=0.0,
     fdr=0.10,
     controls=None,
+    selection="loio",
+    validation_col="tuning_score",
+    k=None,
 ):
     """One row per dataset, one column block per metric: delta, interval, verdict.
 
@@ -451,17 +558,26 @@ def delta_metric_table(
             longer decides wins; ``margin`` does). A float applies to every metric; a
             mapping gives one per metric; ``None`` derives each from
             :func:`resolution_floor_epsilon`, the smallest bound this design can certify.
-        test_size (float): the run's split fraction. Required; ``None`` raises
-            ``ValueError``.
-        alpha, seed, baseline, margin, fdr, controls: forwarded to ``select_winners``
-            (``seed`` is unused there).
+        test_size (float): the run's split fraction. Required with
+            ``selection='loio'``; ``None`` raises ``ValueError``. With
+            ``selection='validation'`` it is ``1/k`` (``k`` from the argument or the
+            ``split_k`` column) and may be omitted.
+        alpha, seed, baseline, margin, fdr, controls, selection, validation_col, k:
+            forwarded to ``select_winners`` (``seed`` is unused there). Under
+            ``selection='validation'`` the arm scored on each fold is the one with the
+            best validation score on that fold, not a held-out-iteration choice.
 
     Returns:
         tuple[pandas.DataFrame, dict]: the wide per-dataset table, and
         ``{metric: WinnerReport}`` for the per-arm and selection detail.
     """
-    from qbiocode.utils.fair_selection import select_winners
+    from qbiocode.utils.fair_selection import resolve_split_k, select_winners
 
+    if selection == "validation":
+        k = resolve_split_k(results_df, k)
+        if test_size is None:
+            # The resolution floor needs the same r = 1/(k-1) the selector uses.
+            test_size = 1.0 / k
     if test_size is None:
         # Checked here, not left to select_winners, because resolution_floor_epsilon needs
         # it first.
@@ -509,6 +625,9 @@ def delta_metric_table(
             margin=margin,
             fdr=fdr,
             controls=controls,
+            selection=selection,
+            validation_col=validation_col,
+            k=k,
         )
         reports[metric] = report
         if report.per_dataset.empty:
@@ -572,6 +691,9 @@ def aggregate_benchmark(
     margin=0.0,
     fdr=0.10,
     controls=None,
+    selection="loio",
+    validation_col="tuning_score",
+    k=None,
 ):
     """Walk per-dataset run directories and write the corpus-level tables.
 
@@ -583,6 +705,10 @@ def aggregate_benchmark(
         One row per ``ModelResults.csv`` found, with its model and iteration counts. Read
         this first: a dataset missing models is a job that died, and it will otherwise show
         up as a confident classical win.
+    ``<tag>_missing_folds.csv``
+        Written only for ``split_mode: manifest`` results: the arms lacking a fold that
+        other arms of their dataset have (see :func:`missing_folds`). Empty when every
+        arm has the same folds.
     ``<tag>_kernel_diagnostics.csv``
         Written only when ``kernels_root`` is given: per-split kernel-target alignment,
         geometric separation ``g(K_c || K_q)`` over a lam sweep, and RKHS margins, read from
@@ -601,14 +727,16 @@ def aggregate_benchmark(
 
     ``epsilon`` is the equivalence bound only (``None`` derives it per metric from
     :func:`resolution_floor_epsilon`); wins are judged against ``margin`` and the
-    Benjamini-Hochberg level ``fdr``. ``margin``, ``fdr`` and ``controls`` are forwarded to
-    :func:`delta_metric_table`.
+    Benjamini-Hochberg level ``fdr``. ``margin``, ``fdr``, ``controls``, ``selection``,
+    ``validation_col`` and ``k`` are forwarded to :func:`delta_metric_table`. With
+    ``selection='validation'`` (``split_mode: manifest`` results) ``test_size`` may be
+    omitted: it is ``1/k``.
 
     Returns:
         dict: ``{'results', 'inventory', 'delta_metrics', 'reports', 'summary',
         'primary_metric', 'epsilon'}``.
     """
-    if test_size is None:
+    if test_size is None and selection != "validation":
         raise TypeError(
             "test_size is required: it is the 'test_size' of the run that produced these "
             "results, and the Nadeau-Bengio standard error s*sqrt(1/I + r) with "
@@ -646,6 +774,9 @@ def aggregate_benchmark(
         margin=margin,
         fdr=fdr,
         controls=controls,
+        selection=selection,
+        validation_col=validation_col,
+        k=k,
     )
 
     summary_rows = []
@@ -680,6 +811,10 @@ def aggregate_benchmark(
     summary = pd.DataFrame(summary_rows)
 
     inventory.to_csv(os.path.join(output_dir, f"{tag}_inventory.csv"), index=False)
+    if "split_mode" in results.columns and (results["split_mode"] == "manifest").any():
+        missing_folds(results[results["split_mode"] == "manifest"]).to_csv(
+            os.path.join(output_dir, f"{tag}_missing_folds.csv"), index=False
+        )
     wide.to_csv(os.path.join(output_dir, f"{tag}_delta_metrics.csv"), index=False)
     summary.to_csv(os.path.join(output_dir, f"{tag}_verdict_summary.csv"), index=False)
     if primary_metric in reports:

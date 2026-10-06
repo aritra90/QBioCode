@@ -161,3 +161,15 @@ requirements/requirements-lock.txt
 # changes, and the seconds in them describe one machine. The notebook re-measures
 # anything it does not find, so there is nothing here worth versioning.
 tutorial/mps_bench_cache.json
+
+# Embedding caches (python -m qbiocode.apps.qprofiler.embedding_cache). One .npz per
+# (dataset, embedding, split); the submit scripts rebuild them before submitting, and a
+# manifest-mode run keeps its own under <runs-dir>/<run-id>/embeddings/.
+experiments/*/embeddings/
+experiments/**/runs_cv/*/embeddings/
+
+# benchmark/curate.py and benchmark/make_splits.py write the curated datasets and their
+# split manifests beside themselves by default. Curated copies of third-party data are
+# not versioned here; the manifests are, once a frozen set is chosen (unignore it then).
+benchmark/datasets/
+benchmark/splits/

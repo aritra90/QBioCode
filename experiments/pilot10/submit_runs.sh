@@ -9,8 +9,15 @@
 #   HOSTS='cccxc4[0-9]+' ./submit_runs.sh ...    only these candidate hosts (anchored regex)
 #   DRY=1 ./submit_runs.sh                   print the bsub lines, submit nothing
 #   FORCE=1 ./submit_runs.sh ...             submit even configs that are done or live
+#   LIST_HOSTS=Intel_Platinum:128 ./submit_runs.sh   print a HOSTS= regex of every host of
+#                                            that lshosts model (and ncpus), minus
+#                                            advance-reserved (brsvs) hosts; submits nothing
 #
 # Generate the configs first: ./generate_pilot_configs.py --budget-hours 10.9 --layout split
+# A manifest-mode run (generate_pilot_configs.py --split-mode manifest --run-id ID) lives in
+# its own tree: RUNS=runs_cv/ID ./submit_runs.sh. Its jobs are named p10_ID_<config> (so two
+# runs trees never collide in bjobs), and each job's -W comes from the MANIFEST.tsv wall
+# column (per group, from --wall). An explicit WALL= overrides every job's wall.
 # Before submitting, this writes the embedded features the jobs read (step 4 below).
 # Watch: ./status.py      Merge: ./collate_results.py
 #
@@ -24,6 +31,9 @@
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 PY=/dccstor/boseukb/Q/envs/qbc/bin/python
+# The interpreter of the embedding-cache step (4) only; the jobs always run $PY. A stub
+# here lets a test drive DRY=1 without importing the package per call.
+CACHE_PY=${CACHE_PY:-$PY}
 RUNS=${RUNS:-$HERE/runs}
 MANIFEST=$RUNS/MANIFEST.tsv
 QUEUE=${QUEUE:-normal}
@@ -40,6 +50,9 @@ MEM=${MEM:-8}
 # ABS_RUNLIMIT=Y: wall-clock. The slowest arm is heart qsvc at 12.8 h expected and 21.9 h
 # frozen-winner bound (MANIFEST.tsv exp_h / bound_h; the generator prints the suggestion),
 # so 24:00 keeps a margin over the worst case. A kill ceiling, not a reservation.
+# Manifest-mode runs carry a per-job wall in MANIFEST.tsv; WALL= set here overrides it, and
+# 24:00 is the fallback for a job the manifest gives none.
+WALL_SET=${WALL:-}
 WALL=${WALL:-24:00}
 THREADS=${THREADS:-1}
 ENVV="OMP_NUM_THREADS=$THREADS MKL_NUM_THREADS=$THREADS OPENBLAS_NUM_THREADS=$THREADS NUMEXPR_NUM_THREADS=$THREADS VECLIB_MAXIMUM_THREADS=$THREADS"
@@ -101,7 +114,41 @@ candidate_hosts() {
   sort -k2,2n -k3,3gr -k4,4g | awk -v re="$HOSTS" 're == "" || $1 ~ ("^(" re ")$") {print $1}'
 }
 
+# LIST_HOSTS=MODEL[:NCPUS]: the hosts to pin a run to one CPU type, as a regex for HOSTS=.
+# lshosts' model alone is not a CPU type here -- Intel_Platinum covers both the 56- and the
+# 128-core nodes, at the same cpuf -- so give ncpus too. Same filters as candidate_hosts
+# (server, no gpu/mg, maxmem >= MEM), and hosts inside an advance reservation (brsvs
+# RSV_HOSTS, "host:used / total") are left out: jobs of ours cannot run there.
+list_hosts() {
+  local model=${LIST_HOSTS%%:*} ncpus="" reserved
+  case $LIST_HOSTS in *:*) ncpus=${LIST_HOSTS#*:} ;; esac
+  reserved=$(brsvs -w 2>/dev/null |
+             awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[^:\/]+:[0-9]+$/) {split($i, a, ":"); print a[1]}}' |
+             LC_ALL=C sort -u)
+  lshosts -w | awk -v mo="$model" -v nc="$ncpus" -v m="$MEM" -v rsv="$reserved" '
+    BEGIN { n = split(rsv, rv, /[[:space:]]+/); for (i = 1; i <= n; i++) if (rv[i] != "") R[rv[i]] = 1 }
+    NR > 1 && $8 == "Yes" && $3 == mo && (nc == "" || $5 == nc) {
+      r = ""; for (i = 9; i <= NF; i++) r = r $i
+      if (r ~ /gpu|mg/) next
+      u = substr($6, length($6)); x = substr($6, 1, length($6) - 1) + 0
+      g = (u == "T") ? x * 1024 : (u == "G") ? x : (u == "M") ? x / 1024 : 0
+      if (g < m) next
+      if ($1 in R) { nr++; next }
+      h[++k] = $1 }
+    END { for (i = 1; i <= k; i++) printf "%s%s", (i > 1 ? "|" : ""), h[i]
+          if (k) printf "\n"
+          printf "%d hosts of model %s%s (%d advance-reserved left out)\n", k, mo,
+                 (nc == "" ? "" : ", ncpus " nc), nr > "/dev/stderr"
+          exit (k ? 0 : 1) }'
+}
+if [ -n "${LIST_HOSTS:-}" ]; then list_hosts; exit; fi
+
 [ -f "$MANIFEST" ] || { echo "no $MANIFEST -- run generate_pilot_configs.py --layout split first"; exit 1; }
+# A manifest-mode tree names its run (MANIFEST.tsv run_id column): prefix the job names with
+# it, so this tree's jobs are told apart from another run's in bjobs and status.py.
+RUN_ID=$(awk -F'\t' 'NR == 1 {for (i = 1; i <= NF; i++) if ($i == "run_id") c = i; next}
+                     c && $c != "" {print $c; exit}' "$MANIFEST")
+[ -n "$RUN_ID" ] && JOB_PREFIX=p10_${RUN_ID}_
 [ -n "$HOSTS" ] && [ "$SPREAD" != "1" ] && { echo "HOSTS needs SPREAD=1 (it filters SPREAD's candidates)"; exit 1; }
 
 # 1. Candidates: the arguments, stdin ("-"), or every config.
@@ -128,21 +175,27 @@ if [ "${FORCE:-0}" != "1" ]; then
   [ ${#abs[@]} -eq 0 ] && { echo "nothing to submit: every selected config is done, running or pending"; exit 0; }
 fi
 
-# 3. Filter and order through the manifest. Output: yaml <TAB> config <TAB> dataset.
+# 3. Filter and order through the manifest. Output: yaml <TAB> config <TAB> dataset <TAB> wall.
+#    The wall is WALL= if set, else the manifest's wall column (manifest mode), else 24:00.
+#    Quantum jobs go by expected hours, or by their wall where the manifest has none.
 mapfile -t selected < <(
   printf '%s\n' "${abs[@]}" |
-  awk -F'\t' -v ds="${DATASET:-}" -v em="${EMB:-}" -v mo="${MODEL:-}" '
+  awk -F'\t' -v ds="${DATASET:-}" -v em="${EMB:-}" -v mo="${MODEL:-}" \
+      -v wset="$WALL_SET" -v wdef="$WALL" '
     BEGIN { split("tabpfn catboost mlp xgb rf svc lr dt nb", order, " ")
             for (i in order) rank[order[i]] = i }
     NR == FNR { want[$0] = 1; next }
-    FNR == 1  { next }                       # manifest header
+    FNR == 1  { for (i = 1; i <= NF; i++) if ($i == "wall") wc = i; next }   # manifest header
     !($13 in want) { next }
     ds != "" && $2 !~ ("^(" ds ")$") { next }
     em != "" && $3 !~ ("^(" em ")$") { next }
     mo != "" && $4 !~ ("^(" mo ")$") { next }
-    { key = ($5 == "quantum") ? sprintf("0 %012.3f", 1e6 - $11) \
+    { w = (wset != "") ? wset : (wc && $wc != "") ? $wc : wdef
+      h = $11
+      if (h == "") { split(w, hm, ":"); h = hm[1] + hm[2] / 60 }
+      key = ($5 == "quantum") ? sprintf("0 %012.3f", 1e6 - h) \
                               : sprintf("1 %012d", (($4 in rank) ? rank[$4] : 99))
-      print key "\t" $13 "\t" $1 "\t" $2 }
+      print key "\t" $13 "\t" $1 "\t" $2 "\t" w }
   ' - "$MANIFEST" | LC_ALL=C sort -t$'\t' -k1,1 -k3,3 | cut -f2-)
 [ ${#selected[@]} -eq 0 ] && { echo "no config matched the selection (DATASET='${DATASET:-}' EMB='${EMB:-}' MODEL='${MODEL:-}')"; exit 1; }
 
@@ -152,13 +205,19 @@ mapfile -t selected < <(
 #    differed between CPU types. Written here, once, on this host, for exactly the jobs
 #    selected. Files already current are kept, so a resubmit only reads them. A job whose
 #    files are missing stops before fitting anything, so this is not optional. DRY=1 only
-#    checks.
+#    lists what it would write and writes nothing. It runs --check, not --dry-run: both
+#    list the same, but only --check exits non-zero on a missing or stale file, which is
+#    what raises the WARNING. For split_mode: manifest configs the tool writes both stages
+#    (final and tuning) of each config's own splits, so a short run's --splits subset is
+#    all it builds.
 cfgs=()
 for s in "${selected[@]}"; do cfgs+=("${s%%$'\t'*}"); done
 if [ "${DRY:-0}" = "1" ]; then
-  env $ENVV NUMBA_NUM_THREADS=$THREADS "$PY" -m qbiocode.apps.qprofiler.embedding_cache --check "${cfgs[@]}" >&2 ||
+  echo "would precompute the embedding cache for ${#cfgs[@]} configs:" \
+       "env $ENVV NUMBA_NUM_THREADS=$THREADS $CACHE_PY -m qbiocode.apps.qprofiler.embedding_cache CONFIG..." >&2
+  env $ENVV NUMBA_NUM_THREADS=$THREADS "$CACHE_PY" -m qbiocode.apps.qprofiler.embedding_cache --check "${cfgs[@]}" >&2 ||
     echo "WARNING: the embedding cache cannot serve these jobs yet; a real submit writes it first" >&2
-elif ! env $ENVV NUMBA_NUM_THREADS=$THREADS "$PY" -m qbiocode.apps.qprofiler.embedding_cache "${cfgs[@]}" >&2; then
+elif ! env $ENVV NUMBA_NUM_THREADS=$THREADS "$CACHE_PY" -m qbiocode.apps.qprofiler.embedding_cache "${cfgs[@]}" >&2; then
   echo "!! the embedding cache could not be written (above), so nothing was submitted" >&2
   exit 1
 fi
@@ -174,9 +233,9 @@ H=${#hosts[@]}
 G=$SPREAD_GROUP; [ "$G" -gt "$H" ] && G=$H
 STRIDE=1; [ "$G" -gt 0 ] && [ $((H / G)) -gt 1 ] && STRIDE=$((H / G))
 
-n_sub=0; n_q=0; n_fail=0
+n_sub=0; n_q=0; n_fail=0; walls=""
 for k in "${!selected[@]}"; do
-  IFS=$'\t' read -r cfg name dataset <<< "${selected[$k]}"
+  IFS=$'\t' read -r cfg name dataset wall <<< "${selected[$k]}"
   dsdir=$(dirname "$cfg")
   mkdir -p "$dsdir/lsf_logs"
   payload="cd $dsdir && export $ENVV && $PY -m qbiocode.apps.qprofiler.cli --config-dir=$dsdir --config-name=$name"
@@ -193,7 +252,7 @@ for k in "${!selected[@]}"; do
   fi
 
   bsub_args=(-J "$JOB_PREFIX$name" -q "$QUEUE" -n "$SLOTS" -R "span[hosts=1] rusage[mem=$MEM]"
-             -W "$WALL" "${mopt[@]}"
+             -W "$wall" "${mopt[@]}"
              -o "$dsdir/lsf_logs/$name.%J.out" -e "$dsdir/lsf_logs/$name.%J.err"
              "$payload")
   if [ "${DRY:-0}" = "1" ]; then
@@ -211,10 +270,11 @@ for k in "${!selected[@]}"; do
     continue
   fi
   n_sub=$((n_sub + 1))
+  case " $walls " in *" $wall "*) ;; *) walls="${walls:+$walls }$wall" ;; esac
   grep -qP "^$name\t[^\t]*\t[^\t]*\t[^\t]*\tquantum\t" "$MANIFEST" && n_q=$((n_q + 1))
 done
 verb=$([ "${DRY:-0}" = "1" ] && echo "would submit" || echo "submitted")
-echo "$verb $n_sub jobs ($n_q quantum, $((n_sub - n_q)) classical) over $H candidate hosts; wall $WALL, $SLOTS slot, ${MEM} GB each" >&2
+echo "$verb $n_sub jobs ($n_q quantum, $((n_sub - n_q)) classical) over $H candidate hosts; wall ${walls:-$WALL}, $SLOTS slot, ${MEM} GB each" >&2
 [ "$n_fail" -gt 0 ] && echo "!! $n_fail bsub calls FAILED -- ./submit_runs.sh again resubmits exactly those" >&2
 [ "${DRY:-0}" != "1" ] && echo "watch: $HERE/status.py   (placement: bjobs -o 'jobid job_name stat first_host')" >&2
 [ "$n_fail" -eq 0 ]

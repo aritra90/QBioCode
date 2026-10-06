@@ -415,6 +415,79 @@ scaling: ['True']   # Standardize features
 Always use `stratify: ['y']` for imbalanced datasets to ensure both train and test sets have representative class distributions.
 ```
 
+#### Fold-based evaluation: `split_mode: manifest`
+
+By default (`split_mode: internal`) QProfiler draws `iter` random train/test splits
+itself, at `seed + iter`, with `test_size` and `stratify` above. With
+`split_mode: manifest` the outer splits come from a frozen per-dataset manifest written
+by `benchmark/make_splits.py`, and every model is tuned inside every fold on the same
+budget:
+
+```yaml
+split_mode: manifest            # internal (the default) | manifest
+split_dir: /abs/path/splits/v2  # one <dataset stem>.json per dataset; resolved like folder_path
+splits: all                     # 'all', one global iteration, or a list, e.g. [3]
+grid_search: True
+tuner: optuna                   # grid is refused: it ignores n_trials
+n_trials: 30                    # every arm, quantum included
+tune_quantum: True              # when any quantum model is listed
+freeze_quantum_params: False    # freezing is refused
+```
+
+**The protocol:**
+- **Outer splits:** stratified k-fold repeated R times (make_splits default 5 x 3, repeat
+  r shuffled with `seed + r`; repeat 0 is `splits/v1`). A split's global iteration is
+  `repeat * k + fold + 1` (1..15); it is the iteration in the `data_key`, so `splits: [i]`
+  runs one fold and a manifest can be sharded one job per fold.
+- **Validation rows ("next fold"):** for fold f, the validation rows are the test rows of
+  fold (f + 1) mod k; the fit rows are the rest of the training fold. With k = 5 that is
+  3/5 fit, 1/5 validation, 1/5 test.
+- **Tuning:** every arm runs exactly `n_trials` trials (`n_trials_quantum` is ignored,
+  with a warning if it differs). Trial 0 is the arm's default config (the `compute_<m>`
+  defaults under `<m>_args`). Each trial is one fit on the fit rows scored on the
+  validation rows with `tuning_metric`; there is no inner CV and no inner holdout. The
+  best-validation config is refit on the whole training fold and scored once on the test
+  fold. `tuning_score` is that trial's validation score. Every listed model needs an
+  `_opt` twin (`qensemble` has none).
+- **Features:** scaler and embedding are fitted on the fit rows for the trials and on the
+  training fold for the refit, both at `embed_seed = seed + iteration`; no validation row
+  reaches a trial. With `embedding_cache`, each pass has a second file,
+  `emb_<data_key>__tune.npz`, and a file of one split mode is refused as stale by the other.
+- **Checks:** the dataset CSV must be the file the manifest was computed from (sha256,
+  row count and labels are verified before anything is fitted); a dataset without a
+  manifest is an error. `iter`, `test_size`, `stratify`, `cross_validation` and
+  `validation_split` are not used.
+- **Output:** ModelResults rows gain the `PROTOCOL_COLUMNS` of
+  `qbiocode.evaluation.protocol`: `split_mode`, `repeat`, `fold`, `split_k`,
+  `split_repeats`, `split_validation`, `split_seed`, `manifest_sha256`, `dataset_sha256`,
+  `split_generator`, `n_fit`, `n_val`, `n_test`, `seed`, `q_seed`, `embed_seed`, `host`,
+  `cpu_model`, `lsf_jobid`. `results.pkl` also keeps `train_idx`, `fit_idx`, `val_idx`,
+  `test_idx` and each model's `trials_<model>` log. Each pass writes three sidecars
+  beside it: `oof/<data_key>.csv` (every model's test predictions with row ids),
+  `trials/<data_key>.csv` (every trial's params, validation score, state, duration,
+  `is_default`, `is_best`) and `val_predictions/<data_key>.csv` (each trial's
+  validation predictions). Internal-mode output is unchanged.
+- **RawDataEvaluation** (the dataset-level features) is still computed once, on all rows.
+- **Model-specific settings:** SVC fits (`svc`, and the PQK/QPL SVC heads) are capped at
+  `max_iter` = the configured value if > 0, else 10,000,000 (`pqk_args`/`qpl_args`
+  `head_max_iter`); a trial that stops at the cap is recorded as failed. The PQK/QPL
+  heads' own RandomizedSearchCV scores with `tuning_metric` (`head_scoring`) and counts
+  as part of one trial's fit. QPL heads get their own `trials_<model>_<head>` logs.
+  `compute_qnn` takes `readout: 'global'` (Z on every qubit, the default) or `'local'`
+  (Z on qubit 0); search it with `gridsearch_qnn_args: {readout: ['global', 'local']}`,
+  or fix it with `qnn_args: {readout: 'local'}`.
+- `validation`, `default_params` and `reseed` are reserved keys in `<model>_args` and
+  `gridsearch_<model>_args` blocks; they are dropped with a warning.
+
+Manifest results are analysed with `selection='validation'` in
+`qbiocode.utils.fair_selection.select_winners` (and `qc_winner_finder`): per
+(dataset, embedding, fold) and side the winner is the best validation score, and the
+correction uses `r = 1/(k-1)`, `n = kR` folds, `df = kR - 1`. Arms tied on the
+validation score are narrowed to the best validation AUC of the refit trial (`val_auc`, a
+column of manifest-mode rows; `tiebreak_col=None` turns this off), and a tie that remains
+averages the tied arms' test scores. `val_log_loss` is recorded too, but only models that
+output probabilities have one.
+
 ### Model Selection
 
 Specify which machine learning models to evaluate.

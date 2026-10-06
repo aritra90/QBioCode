@@ -40,6 +40,13 @@ from qbiocode.learning._tuning import (
     record_tuned_params,
     run_function_study,
     seed_from,
+    tuning_metric,
+)
+from qbiocode.learning.compute_fold import (
+    fold_fixed,
+    fold_svc_max_iter,
+    function_param_names,
+    head_scorer,
 )
 
 
@@ -141,6 +148,9 @@ def compute_pqk(
     entanglement="linear",
     reps=2,
     data_map="unit",
+    *,
+    head_scoring=None,
+    head_max_iter=None,
 ):
     """
     This function generates quantum circuits, computes projections of the data onto these circuits,
@@ -174,6 +184,13 @@ def compute_pqk(
             ``'qiskit'`` is qiskit's default map, ``phi(x_i, x_j) = (pi - x_i)(pi - x_j)``.
             ``True``/``False`` are accepted as ``'unit'``/``'qiskit'``, matching
             :func:`qbiocode.embeddings.embed.pqk`.
+        head_scoring (str or None): Metric the classical head's ``RandomizedSearchCV``
+            (40 candidates x 5 folds on the projections) picks its SVC by. None (the
+            default) is sklearn's, accuracy. ``compute_pqk_opt`` sets the run's tuning
+            metric under ``split_mode: manifest``. The head search is part of this one
+            fit -- one trial of an outer study -- not extra tuning budget.
+        head_max_iter (int or None): libsvm iteration cap of the head's SVC fits. None
+            (the default) is libsvm's -1, no cap.
 
     Returns:
         modeleval (pd.DataFrame): A DataFrame containing evaluation metrics and model parameters for all models.
@@ -616,7 +633,9 @@ def compute_pqk(
     # that `compute_pqk_opt` passing model="pqk_opt" had no effect, so a TUNED PQK run
     # produced `results_pqk` with model='pqk' -- byte-identical to an untuned one, leaving
     # no way to tell from ModelResults.csv whether a search had run.
-    estimator = create_svc_model(args["seed"])
+    estimator = create_svc_model(
+        args["seed"], scoring=head_scorer(head_scoring, args), max_iter=head_max_iter
+    )
 
     estimator.fit(projections_train, y_train)
     y_predicted = estimator.predict(projections_test)
@@ -638,6 +657,11 @@ def compute_pqk(
     # byte-identical to results written before `data_map` existed.
     if data_map != "unit":
         hyperparameters["data_map"] = data_map
+    # Likewise only when set, so internal-mode rows are unchanged.
+    if head_scoring is not None:
+        hyperparameters["head_scoring"] = head_scoring
+    if head_max_iter is not None:
+        hyperparameters["head_max_iter"] = head_max_iter
     model_params = hyperparameters
 
     _dump_pqk_projections(
@@ -685,7 +709,18 @@ def compute_pqk(
 _SEARCH_N_JOBS = 1
 
 
-def create_svc_model(seed):
+def create_svc_model(seed, scoring=None, max_iter=None):
+    """The PQK head: a ``RandomizedSearchCV`` over ``SVC`` (40 candidates, 5 folds).
+
+    Args:
+        seed (int): Seeds the SVC and the candidate draw.
+        scoring (callable or str or None): The search's ``scoring``; None is the SVC's
+            own ``score`` (accuracy), as before.
+        max_iter (int or None): The SVC's ``max_iter``; None leaves libsvm's -1.
+
+    Returns:
+        RandomizedSearchCV: Unfitted.
+    """
     svc_param_distributions = {
         "C": [0.1, 1, 10, 100],
         "gamma": [0.001, 0.01, 0.1, 1],
@@ -693,7 +728,7 @@ def create_svc_model(seed):
     }
 
     # Initialize the SVC
-    svc = SVC(random_state=seed)
+    svc = SVC(random_state=seed) if max_iter is None else SVC(random_state=seed, max_iter=max_iter)
 
     # Initialize RandomizedSearchCV
     svc_model = RandomizedSearchCV(
@@ -703,6 +738,7 @@ def create_svc_model(seed):
         cv=5,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
+        scoring=scoring,
     )
 
     return svc_model
@@ -729,6 +765,9 @@ def compute_pqk_opt(
     *,
     n_trials=10,
     validation_split=0.25,
+    validation=None,
+    default_params=None,
+    reseed=None,
 ):
     """Tune PQK's hyperparameters with Optuna, then run it at the best ones found.
 
@@ -766,6 +805,19 @@ def compute_pqk_opt(
             automatically when the configured values describe fewer combinations.
         validation_split (float): Fraction of the training data held out to score
             candidates on, default 0.25.
+        validation (ValidationSplit or None): ``split_mode: manifest``. Every trial is
+            then one fit on ``validation.X_fit`` scored on ``validation.X_val``
+            (``validation_split`` is ignored), trials write no kernel dumps, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the inner-holdout search, unchanged. The head's hidden 40 x 5
+            ``RandomizedSearchCV`` is then scored with the tuning metric and its SVC is
+            capped at ``FOLD_SVC_MAX_ITER`` libsvm iterations (``head_scoring``/
+            ``head_max_iter`` of :func:`compute_pqk`); it is part of one trial's fit, not
+            extra budget.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+        reseed (callable or None): Resets the global RNGs; called by the tuner before
+            every trial and before the refit.
 
     Returns:
         modeleval (dict): The evaluation of the model at the best hyperparameters found,
@@ -782,6 +834,17 @@ def compute_pqk_opt(
         "data_map": data_map,
     }
 
+    fixed = {}
+    if validation is not None:
+        fixed = fold_fixed("pqk", candidates, default_params,
+                           function_param_names(compute_pqk))
+        # The head's hidden 40 x 5 search picks by the tuning metric, not accuracy, and
+        # its libsvm fits are capped. Both are part of one trial's fit, not budget.
+        # tuning_metric's plain name, so the trial log and parameter column stay plain.
+        fixed.setdefault("head_scoring", tuning_metric(args))
+        # Assigned outright: a configured head_max_iter below 1 is libsvm's "no cap".
+        fixed["head_max_iter"] = fold_svc_max_iter(fixed.get("head_max_iter"))
+
     best_params = run_function_study(
         compute_pqk,
         build_search_space("pqk", candidates),
@@ -793,6 +856,10 @@ def compute_pqk_opt(
         seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
+        fixed=fixed,
+        validation=validation,
+        default_params=default_params,
+        reseed=reseed,
     )
 
     frame = compute_pqk(
@@ -805,5 +872,6 @@ def compute_pqk_opt(
         data_key=data_key,
         verbose=verbose,
         **best_params,
+        **fixed,
     )
     return record_tuned_params(frame, best_params, beg_time)

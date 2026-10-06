@@ -22,6 +22,7 @@ from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 # ====== Additional local imports ======
 from qbiocode.learning._grid import one_value, warn_ignored_hyperparameter
 from qbiocode.learning._tuning import search_hyperparameters, tuning_scorer
+from qbiocode.learning.compute_fold import estimator_param_names, fold_fixed
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Begin functions ======
@@ -218,6 +219,8 @@ def compute_xgb_opt(
     *,
     tuner="optuna",
     n_trials=50,
+    validation=None,
+    default_params=None,
 ):
     """
     This function generates a model using an Extreme Gradient Boositing (xgb) Classifier method as implemented in xgboost.
@@ -265,6 +268,13 @@ def compute_xgb_opt(
             automatically when the configured values describe fewer distinct
             combinations than that, so a small block does not re-evaluate the same
             models.
+        validation (ValidationSplit or None): ``split_mode: manifest``: every trial is
+            one fit on ``validation.X_fit`` scored on ``validation.X_val``, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the cross-validated search, unchanged.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+
     Returns:
         modeleval (dict): A dictionary containing the evaluation metrics of the model, including accuracy, AUC, F1 score, and the time taken for training and validation.
 
@@ -313,6 +323,9 @@ def compute_xgb_opt(
         **_thread_kwargs(n_jobs, nthread, "gridsearch_xgb_args"),
     }
 
+    if validation is not None:
+        fixed = fold_fixed("xgb", candidates, default_params,
+                           estimator_param_names(XGBClassifier), fixed)
     best_params = search_hyperparameters(
         "xgb",
         XGBClassifier,
@@ -325,6 +338,8 @@ def compute_xgb_opt(
         n_trials=n_trials,
         seed=random_state,
         fixed=fixed,
+        validation=validation,
+        default_params=default_params,
     )
     # `**fixed` rather than `random_state=random_state`: `search_hyperparameters` applies
     # `fixed` to every trial's estimator but returns only the searched parameters, so a

@@ -94,6 +94,7 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import squareform
 
 from qbiocode.evaluation.model_evaluation import TUNING_EVIDENCE_COLUMNS
+from qbiocode.evaluation.protocol import PROTOCOL_COLUMNS
 from qbiocode.utils.fair_selection import PARAMETER_COLUMNS, WinnerReport, select_winners
 
 logger = logging.getLogger(__name__)
@@ -126,10 +127,13 @@ def meta_feature_columns(results: pd.DataFrame) -> list[str]:
     """Numeric columns of a ModelResults frame that describe the data, not the model.
 
     The tuning evidence of tuned rows (``tuning_score``, ``tuning_reused``) is numeric
-    but label-dependent -- a validation score of the model -- so it is reserved too.
+    but label-dependent -- a validation score of the model -- so it is reserved too. So
+    are the ``split_mode: manifest`` provenance columns (``PROTOCOL_COLUMNS``: repeat,
+    fold, split sizes, seeds, host): they describe how a row was produced, and a numeric
+    ``fold`` or ``n_val`` would otherwise enter the screen as a dataset property.
     """
     reserved = (set(INSTANCE) | {"model"} | set(METRIC_COLUMNS) | set(PARAMETER_COLUMNS)
-                | set(TUNING_EVIDENCE_COLUMNS))
+                | set(TUNING_EVIDENCE_COLUMNS) | set(PROTOCOL_COLUMNS))
     return [c for c in results.columns
             if c not in reserved and pd.api.types.is_numeric_dtype(results[c])]
 
@@ -502,21 +506,27 @@ def _split_units(frame: pd.DataFrame) -> pd.DataFrame:
 def unit_report(results: pd.DataFrame, metric: str = "balanced_accuracy",
                 epsilon: float = 0.027, alpha: float = 0.05, test_size: float | None = None,
                 seed: int = 0, *, margin: float = 0.0, fdr: float = 0.10,
-                controls: str | Iterable[str] | None = None) -> WinnerReport:
+                controls: str | Iterable[str] | None = None, selection: str = "loio",
+                validation_col: str = "tuning_score",
+                k: int | None = None) -> WinnerReport:
     """:func:`select_winners` run once per ``(Dataset, embeddings)`` pass.
 
-    Each arm is then a model within one embedding, and the LOIO contrast exists per pass.
+    Each arm is then a model within one embedding, and the selected contrast exists per
+    pass: LOIO by default, or with ``selection='validation'`` (``split_mode: manifest``)
+    the arm with the best ``validation_col`` on each ``(Dataset, embeddings, iteration)``.
     That is the response a pass-level meta-feature can explain. The per-pass verdicts
     are descriptive. A dataset's ``pca`` and ``umap`` passes share their splits, so the
     corpus-level inference that :func:`select_winners` computes assumes independence it
     does not have here, and is replaced by a note. Take corpus claims from the
     per-dataset report.
 
-    The arguments are those of :func:`select_winners`. ``test_size`` is required
-    (``None`` raises there): it is the run's split fraction, 0.2 on the pilot, and
-    ModelResults.csv does not record it. ``controls`` name datasets, not passes; every
-    pass of a control dataset joins the control family, and the returned report's
-    ``controls`` holds those dataset names, matching its split-back ``Dataset`` column.
+    The arguments are those of :func:`select_winners`. ``test_size`` is required with
+    ``selection='loio'`` (``None`` raises there): it is the run's split fraction, 0.2 on
+    the pilot, and ModelResults.csv does not record it. With ``selection='validation'``
+    it is ``1/k``, ``k`` from the argument or the ``split_k`` column. ``controls`` name
+    datasets, not passes; every pass of a control dataset joins the control family, and
+    the returned report's ``controls`` holds those dataset names, matching its split-back
+    ``Dataset`` column.
     """
     units = _as_units(results)
     if controls is not None:
@@ -527,7 +537,8 @@ def unit_report(results: pd.DataFrame, metric: str = "balanced_accuracy",
                            if d in wanted} | (wanted - present))
     report = select_winners(units, metric=metric, epsilon=epsilon, alpha=alpha,
                             test_size=test_size, seed=seed, margin=margin, fdr=fdr,
-                            controls=controls)
+                            controls=controls, selection=selection,
+                            validation_col=validation_col, k=k)
     note = ("per-pass report: passes of one dataset share their splits, so corpus-level "
             "inference must come from select_winners on the per-dataset frame")
     return dataclasses.replace(report, per_dataset=_split_units(report.per_dataset),
@@ -543,8 +554,11 @@ def loio_contrast(report: WinnerReport) -> pd.DataFrame:
 
     Positive means quantum ahead. That is the opposite sign to ``delta`` in
     :func:`select_winners`, chosen so that a positive coefficient reads as "this property
-    favours quantum". Both scores are of arms chosen on the *other* iterations, so the
-    contrast carries no winner's curse.
+    favours quantum". Both scores are of arms chosen on the *other* iterations (LOIO) or
+    on the fold's own validation rows (``unit_report(..., selection='validation')``), so
+    the contrast carries no winner's curse. The selection mode is the report's; the
+    trace columns ``repeat``, ``fold``, ``classical_val`` and ``quantum_val`` pass through
+    when present.
     """
     sel = report.selection
     need = set(INSTANCE) | {"classical_score", "quantum_score"}
@@ -1073,6 +1087,12 @@ def marginal_tests(design: MetaDesign, features: Sequence[str] | None = None, *,
     passed in. The interval is the CV3 t-interval on ``G - 1`` df. ``p_ols_iid`` treats
     rows as independent. It is wrong by construction, and is kept only to show the size
     of the error.
+
+    Cluster-robust inference needs more clusters than coefficients. When ``G`` does not
+    exceed them (intercept, nuisance and the feature), or the fit is exact so the CR1
+    standard error is zero, the cluster-robust columns (``se_*``, interval, ``t``,
+    ``p_cr1``, ``p_cv3``, ``p_wcr`` and the q-values) are NaN and a warning is logged,
+    instead of a near-zero standard error turning into ``p = 0``.
     """
     feats = list(design.features.columns) if features is None else list(features)
     boot_seed, perm_seed = np.random.SeedSequence(seed).spawn(2)
@@ -1081,13 +1101,23 @@ def marginal_tests(design: MetaDesign, features: Sequence[str] | None = None, *,
             if n_perm else None)
     df = design.G - 1
     tcrit = stats.t.ppf(1.0 - alpha / 2.0, df)
-    rows = []
+    rows, unidentified = [], []
     for f in feats:
         ols = ClusteredOLS(design.matrix([f]), design.codes, design.G)
         j = ols.K - 1
         beta = float(ols.H[j] @ design.y)
         t_i, _ = ols.t_iid(design.y, j)
         t_1, se_1 = ols.t_cr1(design.y, j)
+        if design.G <= ols.K or not float(se_1[0]) > 1e-12 * (abs(beta) + 1.0):
+            unidentified.append(f)
+            rows.append(dict(
+                feature=f, beta=beta, se_cr1=np.nan, se_cv3=np.nan, ci_lo=np.nan,
+                ci_hi=np.nan, t=np.nan,
+                p_ols_iid=float(2 * stats.t.sf(abs(t_i[0]), ols.N - ols.K)),
+                p_cr1=np.nan, p_cv3=np.nan, p_wcr=np.nan,
+                p_perm=ols.permutation_p(design.y, j, perm) if perm is not None else np.nan,
+            ))
+            continue
         t_3, se_3 = ols.t_cv3(design.y, j)
         _, p_wcr = ols.wild_restricted(design.y, j, n_boot, boot_rng, weights)
         rows.append(dict(
@@ -1100,6 +1130,11 @@ def marginal_tests(design: MetaDesign, features: Sequence[str] | None = None, *,
             p_wcr=float(p_wcr[0]),
             p_perm=ols.permutation_p(design.y, j, perm) if perm is not None else np.nan,
         ))
+    if unidentified:
+        logger.warning("cluster-robust inference is not identified for %d of %d features with "
+                       "G = %d clusters (an exact fit, or no more clusters than the intercept, "
+                       "nuisance and feature coefficients); their cluster-robust p-values are NaN: %s",
+                       len(unidentified), len(feats), design.G, ", ".join(unidentified))
     out = pd.DataFrame(rows)
     if len(out):
         out["q_bh"] = fdr_adjust(out["p_wcr"], "bh")
@@ -1144,7 +1179,12 @@ def joint_tests(design: MetaDesign, features: Sequence[str] | None = None, *,
 
 
 def lodo_influence(design: MetaDesign, features: Sequence[str] | None = None) -> pd.DataFrame:
-    """How far each marginal coefficient moves when one cluster is left out."""
+    """How far each marginal coefficient moves when one cluster is left out.
+
+    Every row has the same columns. When dropping some cluster leaves the model
+    unidentified (too few clusters for the nuisance and the feature), the
+    leave-one-out columns are NaN (``most_influential`` None) rather than missing.
+    """
     feats = list(design.features.columns) if features is None else list(features)
     rows = []
     for f in feats:
@@ -1153,7 +1193,9 @@ def lodo_influence(design: MetaDesign, features: Sequence[str] | None = None) ->
         beta = float(ols.H[j] @ design.y)
         jk = ols.jackknife(design.y, j)
         if jk is None:
-            rows.append(dict(feature=f, beta=beta))
+            rows.append(dict(feature=f, beta=beta, beta_min=np.nan, beta_max=np.nan,
+                             sign_flips=np.nan, most_influential=None,
+                             beta_without_it=np.nan))
             continue
         jk = jk[:, 0]
         worst = int(np.argmax(np.abs(jk - beta)))
@@ -1161,7 +1203,8 @@ def lodo_influence(design: MetaDesign, features: Sequence[str] | None = None) ->
                          sign_flips=int(np.sum(np.sign(jk) != np.sign(beta))),
                          most_influential=design.clusters[worst],
                          beta_without_it=float(jk[worst])))
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["feature", "beta", "beta_min", "beta_max", "sign_flips",
+                                       "most_influential", "beta_without_it"])
 
 
 def within_unit_test(design: MetaDesign, x, *, n_boot: int = 9999, weights: str = "webb",

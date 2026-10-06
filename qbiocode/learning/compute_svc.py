@@ -6,7 +6,8 @@ from sklearn.multiclass import OneVsOneClassifier, OneVsRestClassifier
 from sklearn.svm import SVC
 
 # ====== Additional local imports ======
-from qbiocode.learning._tuning import search_hyperparameters, tuning_scorer
+from qbiocode.learning._tuning import check_fit_status, search_hyperparameters, tuning_scorer
+from qbiocode.learning.compute_fold import estimator_param_names, fold_fixed, fold_svc_max_iter
 from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
 
 # ====== Scikit-learn imports ======
@@ -138,6 +139,8 @@ def compute_svc_opt(
     *,
     tuner="optuna",
     n_trials=50,
+    validation=None,
+    default_params=None,
 ):
     """This function generates a model using a Support Vector Classifier (SVC) method as implemented in
     `scikit-learn <https://scikit-learn.org/stable/modules/generated/sklearn.svm.SVC.html>`__.
@@ -161,7 +164,14 @@ def compute_svc_opt(
         gamma (list or str): Kernel coefficient(s) for 'rbf', 'poly', and 'sigmoid', default is an empty list.
         kernel (list or str): Specifies the kernel type(s) to be used in the algorithm, default is an empty list.
         random_state (int or None): Seed for the estimator's own randomness. QProfiler fills this in from the run's ``seed`` so two runs at one seed agree; None leaves the estimator drawing from the global RNG.
-     Returns:
+        validation (ValidationSplit or None): ``split_mode: manifest``: every trial is
+            one fit on ``validation.X_fit`` scored on ``validation.X_val``, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the cross-validated search, unchanged.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+
+    Returns:
         modeleval (dict): A dictionary containing the evaluation metrics of the model, including accuracy, AUC, F1 score, and the time taken to train and validate the model across the search.
     """
 
@@ -174,6 +184,14 @@ def compute_svc_opt(
         "gamma": gamma,
         "kernel": kernel,
     }
+    fixed = {"random_state": random_state}
+    if validation is not None:
+        fixed = fold_fixed("svc", candidates, default_params,
+                           estimator_param_names(SVC), fixed)
+        # libsvm's default max_iter=-1 has no cap: one poly-kernel fit of a pilot job
+        # ran for 24 hours. Capped for every trial and the refit; a trial that hits
+        # the cap is recorded as FAIL by the tuner (fit_status_ != 0).
+        fixed["max_iter"] = fold_svc_max_iter((default_params or {}).get("max_iter"))
     best_params = search_hyperparameters(
         "svc",
         SVC,
@@ -185,10 +203,15 @@ def compute_svc_opt(
         scoring=tuning_scorer(args),
         n_trials=n_trials,
         seed=random_state,
-        fixed={"random_state": random_state},
+        fixed=fixed,
+        validation=validation,
+        default_params=default_params,
     )
-    best_svc = SVC(**best_params, random_state=random_state)
+    best_svc = SVC(**best_params, **fixed)
     best_svc.fit(X_train, y_train)
+    if validation is not None:
+        # Kept and reported all the same; the warning says the refit is not converged.
+        check_fit_status(best_svc, "svc_opt", best_params)
 
     # Make predictions and calculate accuracy
     y_predicted = best_svc.predict(X_test)

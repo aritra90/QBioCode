@@ -21,6 +21,7 @@ import pickle
 import os
 import re
 import csv
+import socket
 import time
 # ====== Hydra imports ======
 import hydra
@@ -88,12 +89,14 @@ def _resolve_input_folder(folder_path):
 from qbiocode import scale_train_test, feature_encoding
 from qbiocode import get_embeddings, resolve_embeddings
 from qbiocode.embeddings import DEFAULT_EMBEDDING_MIN_FEATURES
-from qbiocode.embeddings import check_embedding_name
+from qbiocode.embeddings import check_embedding_name, is_transductive
 # ====== Evaluation functions imports ====
 #from qmlbench.evaluation.dataset_evaluation_no_var_threshold import evaluate2 # use this for moons/circles data, otherwise you'll run into an error with finding no features with minimum variance threshold
 from qbiocode import evaluate
 from qbiocode import model_run
 from qbiocode.apps.qprofiler import embedding_cache as emb_cache
+from qbiocode.apps.qprofiler import split_manifest
+from qbiocode.evaluation import protocol
 
 #: Config keys ``main`` reads unconditionally. Reported together rather than one
 #: KeyError at a time, so a hand-written config can be fixed in a single pass.
@@ -101,6 +104,15 @@ _REQUIRED_CONFIG_KEYS = (
     "folder_path", "file_dataset", "embeddings", "n_components", "model",
     "seed", "q_seed", "test_size", "iter", "scaling", "backend", "n_jobs",
 )
+
+#: The keys of ``_REQUIRED_CONFIG_KEYS`` that only ``split_mode: internal`` reads. Under
+#: ``split_mode: manifest`` the splits come from the manifest, so neither is required.
+_INTERNAL_SPLIT_KEYS = ("test_size", "iter")
+
+#: The row ids of one manifest-mode pass, stored in its results.pkl summary. They are
+#: cleared with the per-model keys before each pass, so a pass never carries another
+#: pass's rows.
+_SPLIT_INDEX_KEYS = ("train_idx", "fit_idx", "val_idx", "test_idx")
 
 
 def _resolve_scaling(scaling):
@@ -321,7 +333,12 @@ def _validate_config(args, log):
         ValueError: naming the offending key, the value received, and what is
             accepted.
     """
-    missing = [k for k in _REQUIRED_CONFIG_KEYS if k not in args]
+    split_mode = _split_mode(args)
+    required = [
+        k for k in _REQUIRED_CONFIG_KEYS
+        if split_mode == "internal" or k not in _INTERNAL_SPLIT_KEYS
+    ]
+    missing = [k for k in required if k not in args]
     if missing:
         raise ValueError(
             f"Config is missing required key(s): {missing}. Start from the "
@@ -329,17 +346,20 @@ def _validate_config(args, log):
             f"{list(_REQUIRED_CONFIG_KEYS)}."
         )
 
-    if not isinstance(args["iter"], int) or isinstance(args["iter"], bool) or args["iter"] < 1:
-        raise ValueError(
-            f"iter is the number of train/test splits and must be a positive "
-            f"integer; got {args['iter']!r}. A value of 0 produces no results at "
-            f"all while still exiting successfully."
-        )
-    if not 0.0 < float(args["test_size"]) < 1.0:
-        raise ValueError(
-            f"test_size is a proportion and must be strictly between 0 and 1; "
-            f"got {args['test_size']!r}."
-        )
+    if split_mode == "internal":
+        if not isinstance(args["iter"], int) or isinstance(args["iter"], bool) or args["iter"] < 1:
+            raise ValueError(
+                f"iter is the number of train/test splits and must be a positive "
+                f"integer; got {args['iter']!r}. A value of 0 produces no results at "
+                f"all while still exiting successfully."
+            )
+        if not 0.0 < float(args["test_size"]) < 1.0:
+            raise ValueError(
+                f"test_size is a proportion and must be strictly between 0 and 1; "
+                f"got {args['test_size']!r}."
+            )
+    else:
+        _validate_manifest_mode(args)
     n_components = args["n_components"]
     if (
         not isinstance(n_components, int)
@@ -396,6 +416,138 @@ def _validate_config(args, log):
     scaler_name = _resolve_scaling(args["scaling"])
     log.info(f"Feature scaling resolved to: {scaler_name}")
     return scaler_name
+
+
+def _split_mode(args):
+    """``args['split_mode']``: ``'internal'`` (the default) or ``'manifest'``.
+
+    ``internal`` draws ``iter`` stratified train/test splits itself, at ``seed + iter``.
+    ``manifest`` reads the outer folds, and the validation rows of each, from the frozen
+    manifest of every dataset (:mod:`qbiocode.apps.qprofiler.split_manifest`).
+
+    Raises:
+        ValueError: if the value is neither.
+    """
+    value = args.get("split_mode")
+    if value is None:
+        return "internal"
+    mode = str(value).strip().lower()
+    if mode not in protocol.SPLIT_MODES:
+        raise ValueError(
+            f"split_mode must be one of {list(protocol.SPLIT_MODES)}; got {value!r}."
+        )
+    return mode
+
+
+def _split_selection(args):
+    """The ``splits`` config key as :meth:`SplitManifest.select` takes it.
+
+    ``'all'`` (the default, also when the key is absent or null), one global iteration,
+    or a list of them. Iterations are 1-based: ``repeat * k + fold + 1``.
+
+    Raises:
+        ValueError: if the value is none of these.
+    """
+    value = args.get("splits", "all")
+    if value is None or (isinstance(value, str) and value.strip().lower() == "all"):
+        return "all"
+    if isinstance(value, bool):
+        raise ValueError(f"splits must be 'all', an iteration or a list of them; got {value!r}.")
+    if isinstance(value, (int, np.integer)):
+        values = [value]
+    elif isinstance(value, str):
+        try:
+            values = [int(token) for token in value.replace(",", " ").split()]
+        except ValueError:
+            values = None
+    elif isinstance(value, Sequence):
+        values = list(value)
+    else:
+        values = None
+    if (
+        not values
+        or any(isinstance(v, bool) or not isinstance(v, (int, np.integer)) for v in values)
+        or any(int(v) < 1 for v in values)
+    ):
+        raise ValueError(
+            f"splits must be 'all', a 1-based global iteration (repeat * k + fold + 1) "
+            f"or a list of them; got {value!r}."
+        )
+    return [int(v) for v in values]
+
+
+def _split_dir(args):
+    """The directory ``split_dir`` resolves to, found the way ``folder_path`` is.
+
+    Raises:
+        ValueError: if the key is unset or names no directory.
+    """
+    value = args.get("split_dir")
+    if value is None or not str(value).strip():
+        raise ValueError(
+            "split_mode: manifest needs split_dir, the directory holding one "
+            "<dataset stem>.json manifest per dataset (benchmark/make_splits.py writes it)."
+        )
+    folder = os.path.expanduser(str(value).strip()).replace('/', os.sep).replace('\\', os.sep)
+    resolved = _resolve_input_folder(folder)
+    if resolved is None:
+        raise ValueError(
+            f"split_dir {value!r} is not a directory. It was looked for as given and "
+            f"under every parent of the current directory ({os.getcwd()!r})."
+        )
+    return resolved
+
+
+def _validate_manifest_mode(args):
+    """The settings ``split_mode: manifest`` requires, checked before any data is read.
+
+    The protocol tunes every arm inside every outer fold, with the same trial budget,
+    scored on the manifest's validation rows. So tuning must be on for both sides, no
+    tuned configuration may be reused across folds, and the search must be one that
+    honours ``n_trials`` (``tuner: grid`` fits every combination instead). No validation
+    row may reach a trial, so every embedding must be inductive.
+
+    Raises:
+        ValueError: naming the key that breaks the protocol.
+    """
+    from qbiocode.evaluation.model_run import QUANTUM_MODELS
+
+    _split_dir(args)
+    _split_selection(args)
+    if args.get("grid_search") is not True:
+        raise ValueError(
+            f"split_mode: manifest tunes every model inside every outer fold, so it needs "
+            f"grid_search: True; got {args.get('grid_search')!r}."
+        )
+    quantum = [m for m in args["model"] if m in QUANTUM_MODELS]
+    if quantum and args.get("tune_quantum") is not True:
+        raise ValueError(
+            f"split_mode: manifest gives every arm the same tuning budget, so the quantum "
+            f"model(s) {quantum} need tune_quantum: True; got {args.get('tune_quantum')!r}."
+        )
+    if args.get("freeze_quantum_params"):
+        raise ValueError(
+            "split_mode: manifest tunes every fold on its own validation rows, so "
+            "freeze_quantum_params must be False: a configuration frozen on one fold "
+            "would be reused on folds whose test rows it was tuned on."
+        )
+    tuner = str(args.get("tuner", "optuna")).strip().lower()
+    if tuner == "grid":
+        raise ValueError(
+            "split_mode: manifest needs tuner: optuna. tuner: grid fits every "
+            "combination and ignores n_trials, so the arms' budgets could not be equal."
+        )
+    # A transductive embedding is fit on the stacked train and test rows; at the tuning
+    # stage those are the fit and validation rows, so validation features would shape
+    # the features every trial is fit on.
+    transductive = [e for e in args["embeddings"] if is_transductive(e)]
+    if transductive:
+        raise ValueError(
+            f"split_mode: manifest keeps the validation rows out of every trial, even out "
+            f"of preprocessing, so it needs inductive embeddings; {transductive} "
+            f"{'is' if len(transductive) == 1 else 'are'} transductive (fit on the "
+            f"stacked train and test rows). See qbiocode.embeddings.is_transductive."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +613,13 @@ def _input_files(args, path_to_input):
     if args['file_dataset'] == 'ALL':
         input_files = [file for file in os.listdir(path_to_input) if file.endswith('csv')]
     else:
-        input_files = [file for file in os.listdir(path_to_input) if file in args['file_dataset'] and file.endswith('csv')]
+        # A single name given as a string (qprofiler_batchmode, a command-line override)
+        # is matched exactly. `file in <str>` was a substring test, so 'art.csv' was also
+        # run by a job that named 'heart.csv'.
+        wanted = args['file_dataset']
+        if isinstance(wanted, str):
+            wanted = [wanted]
+        input_files = [file for file in os.listdir(path_to_input) if file in wanted and file.endswith('csv')]
     if not input_files:
         # Previously this produced a successful run with no output whatsoever,
         # which reads exactly like a run whose models all silently failed.
@@ -514,12 +672,16 @@ def _split_seed(args, iter):
     Distinct-but-reproducible split per iteration: random_state = seed + iter makes every
     split different from the others, yet deterministic across reruns and independent of
     any other RNG consumers (embeddings etc.) that run before it.
+
+    Under ``split_mode: manifest`` the split comes from the manifest and this is only the
+    embedding's seed (``embed_seed``), with ``iter`` the global iteration. Both stages of
+    a pass, the tuning stage and the final one, embed with it.
     """
     split_seed = args['seed'] + iter
     return split_seed
 
 
-def _split_and_scale(X, y_encoded, args, iter, scaler_name):
+def _split_and_scale(X, y_encoded, args, iter, scaler_name, split=None, stage="final"):
     """Split ``iter`` of one dataset, scaled.
 
     Returns ``(X_train, X_test, y_train, y_test, train_idx, test_idx)``. The last two are
@@ -527,13 +689,31 @@ def _split_and_scale(X, y_encoded, args, iter, scaler_name):
     to this split. They are passed through ``train_test_split`` as a third array, and that
     does not move any row: its permutation depends only on the row count, the labels
     (when stratified) and the seed, and each array is then indexed with it.
+
+    With ``split`` (a manifest's :class:`~qbiocode.apps.qprofiler.split_manifest.OuterSplit`)
+    the rows are the manifest's, in sorted order, and nothing is drawn: ``stage='final'``
+    gives the outer training fold and the test fold, ``stage='tune'`` the fit rows and
+    the validation rows of that training fold. Either way the scaler is fitted on the
+    first side only, so a validation row never informs the features a trial is fit on.
     """
-    X_train, X_test, y_train, y_test, train_idx, test_idx = train_test_split(
-        X, y_encoded, np.arange(len(y_encoded)),
-        stratify=y_encoded if _is_stratified(args) else None,
-        test_size=args['test_size'],
-        random_state=_split_seed(args, iter),
-    )
+    if split is None:
+        X_train, X_test, y_train, y_test, train_idx, test_idx = train_test_split(
+            X, y_encoded, np.arange(len(y_encoded)),
+            stratify=y_encoded if _is_stratified(args) else None,
+            test_size=args['test_size'],
+            random_state=_split_seed(args, iter),
+        )
+    else:
+        if stage == "final":
+            train_idx, test_idx = split.train_idx, split.test_idx
+        elif stage == "tune":
+            train_idx, test_idx = split.fit_idx, split.val_idx
+        else:
+            raise ValueError(f"stage must be 'final' or 'tune'; got {stage!r}")
+        train_idx = np.sort(np.asarray(train_idx, dtype=np.int64))
+        test_idx = np.sort(np.asarray(test_idx, dtype=np.int64))
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
     # Scale the features: fit one scaler on TRAIN and apply it to TEST (never fit a
     # separate scaler on the test set -- that would use test-set statistics).
     if scaler_name != 'None':
@@ -593,6 +773,102 @@ def _embed(embed, X_train, X_test, args, split_seed):
         # features read them from embedding_cache instead.
         random_state=split_seed,
     )
+
+
+def _dataset_manifest(args, dataset_path, n_rows, y_encoded, dataset_sha256=None):
+    """The verified split manifest of one dataset CSV, under ``split_mode: manifest``.
+
+    The CSV must be byte for byte the file the manifest was computed from, hold as many
+    rows as it indexes, and keep both classes on every fit, validation and test side.
+    ``splits`` must name iterations the manifest has.
+
+    Raises:
+        ManifestError: if the dataset has no manifest in ``split_dir``, or does not match it.
+    """
+    path = split_manifest.manifest_path(_split_dir(args), dataset_path)
+    if not path.is_file():
+        raise split_manifest.ManifestError(
+            f"{os.path.basename(dataset_path)} has no split manifest: {path} does not "
+            f"exist. split_mode: manifest runs only datasets whose splits were frozen "
+            f"with benchmark/make_splits.py."
+        )
+    manifest = split_manifest.load_manifest(path)
+    split_manifest.verify_dataset(
+        manifest,
+        dataset_file=dataset_path,
+        sha256=dataset_sha256 or emb_cache.file_sha256(dataset_path),
+        n_rows=n_rows,
+        y=y_encoded,
+    )
+    manifest.select(_split_selection(args))
+    return manifest
+
+
+def _host_fields():
+    """The HOST_COLUMNS of every row this process writes: UMAP, tabpfn and vqc results
+    vary with the CPU type, so a row records where it was computed."""
+    return {
+        "host": socket.gethostname(),
+        "cpu_model": emb_cache._cpu_model() or "",
+        "lsf_jobid": os.environ.get("LSB_JOBID", ""),
+    }
+
+
+def _protocol_fields(manifest, split, args, embed_seed, host_fields):
+    """The PROTOCOL_COLUMNS of one manifest-mode pass, in their contract order."""
+    fields = {
+        **manifest.row_fields(split),
+        "seed": args["seed"],
+        "q_seed": args["q_seed"],
+        "embed_seed": int(embed_seed),
+        **host_fields,
+    }
+    return {column: fields[column] for column in protocol.PROTOCOL_COLUMNS}
+
+
+def _pass_features(cache_dir, cache_key, spec, embed, X_a, X_b, idx_a, idx_b, args, seed):
+    """``(A_emb, B_emb, source)``: one stage of a pass embedded, from the cache or here.
+
+    Every embedding but 'none' is read from ``embedding_cache`` when it is set, checked
+    against ``spec`` and the rows on each side; otherwise it is computed in this process.
+    """
+    if cache_dir and embed != 'none':
+        A_emb, B_emb = emb_cache.load(cache_dir, cache_key, spec, idx_a, idx_b)
+        return A_emb, B_emb, f"read from {emb_cache.cache_file(cache_dir, cache_key)}"
+    A_emb, B_emb = _embed(embed, X_a, X_b, args, seed)
+    return A_emb, B_emb, "computed in this run"
+
+
+def _write_frame_atomic(frame, path):
+    """Write ``frame`` to the CSV ``path`` through a temporary file and a rename, so a
+    reader (or a job killed mid-write) never leaves a partial sidecar in place."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = f"{path}.{socket.gethostname()}.{os.getpid()}.tmp"
+    try:
+        frame.to_csv(tmp, index=False)
+        with open(tmp, 'rb') as handle:
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _write_sidecars(summary, test_idx, data_key):
+    """The per-pass sidecars of manifest mode, under the run directory.
+
+    ``oof/<data_key>.csv`` holds every model's outer-test predictions with their row ids,
+    ``trials/<data_key>.csv`` every tuning trial of every model, and
+    ``val_predictions/<data_key>.csv`` each trial's validation predictions
+    (see :mod:`qbiocode.evaluation.protocol` for the columns).
+    """
+    trials, val_predictions = protocol.trial_frames(summary, data_key)
+    for directory, frame in (
+        (protocol.OOF_DIR, protocol.oof_frame(summary, test_idx, data_key)),
+        (protocol.TRIALS_DIR, trials),
+        (protocol.VAL_PREDICTIONS_DIR, val_predictions),
+    ):
+        _write_frame_atomic(frame, os.path.join(directory, f"{data_key}.csv"))
 
 
 # Begin the main function and instatiate Hydra class
@@ -735,20 +1011,35 @@ def main(args):
     # Set: every embedding but 'none' is read from here, and none is computed in this
     # run. See embedding_cache.py for why, and for how the files are written.
     cache_dir = _embedding_cache_dir(args)
+    split_mode = _split_mode(args)
+    if split_mode == "manifest":
+        log.info(
+            f"Outer splits read from the manifests in {_split_dir(args)} "
+            f"(splits: {_split_selection(args)})"
+        )
     if cache_dir:
         log.info(f"Embedded features are read from embedding_cache {cache_dir}")
+    if cache_dir or split_mode == "manifest":
         # Every cached embedding the run reads, for every dataset, is checked before
-        # anything is fitted. A run whose cache is missing a file, or holds one written
-        # under other settings, stops here, not hours in at the dataset or split that
-        # first needs it.
+        # anything is fitted, and so is every dataset's manifest. A run whose cache is
+        # missing a file, or holds one written under other settings, or whose dataset
+        # no longer matches its frozen splits, stops here, not hours in at the dataset
+        # or split that first needs it.
         entries = []
         for name in input_files:
             path = os.path.join(path_to_input, name)
-            X_raw, _, _ = _read_dataset(path, args)
-            entries += emb_cache.plan(
-                name, emb_cache.file_sha256(path), X_raw.shape[1], args, scaler_name
-            )
-        emb_cache.require(cache_dir, entries)
+            X_raw, _, y_raw = _read_dataset(path, args)
+            sha256 = emb_cache.file_sha256(path)
+            manifest = None
+            if split_mode == "manifest":
+                manifest = _dataset_manifest(args, path, len(X_raw), y_raw, sha256)
+            if cache_dir:
+                entries += emb_cache.plan(
+                    name, sha256, X_raw.shape[1], args, scaler_name, manifest=manifest
+                )
+        if cache_dir:
+            emb_cache.require(cache_dir, entries)
+    host_fields = _host_fields() if split_mode == "manifest" else None
 
     # need to populate raw data evaluation for each file, so start an empty list
     appended_raw_data_eval = []
@@ -803,8 +1094,13 @@ def main(args):
 
         # Hashed again rather than kept from the check above: a file edited since then
         # no longer matches the specs it was checked against, and emb_cache.load refuses it.
-        if cache_dir:
+        # Under split_mode: manifest it is hashed whatever the cache, and checked against
+        # the manifest again for the same reason.
+        manifest = None
+        if cache_dir or split_mode == "manifest":
             dataset_sha256 = emb_cache.file_sha256(dataset_path)
+        if split_mode == "manifest":
+            manifest = _dataset_manifest(args, dataset_path, len(X), y_encoded, dataset_sha256)
 
         # call and run evaluation functions
         df_dataset = pd.DataFrame(X)
@@ -819,22 +1115,40 @@ def main(args):
         log.info(f"Started processing data set {file}")
         log.info(f"Dataset has {n_classes} classes: {np.unique(y_encoded).tolist()}")
         
-        iter = 0
-        # makes number of iterations an argument from config
-        for iter in range(args['iter']):
+        # The passes over this dataset: (global iteration, manifest split or None).
+        # Internal mode draws iterations 1..iter itself; manifest mode runs the outer
+        # splits `splits` selects, keeping their global iteration as the pass's number.
+        if manifest is None:
+            passes = [(it, None) for it in range(1, args['iter'] + 1)]
+        else:
+            passes = [(split.iteration, split) for split in manifest.select(_split_selection(args))]
+        first_pass = True
+        for iter, split in passes:
         ## run all this in a loop N_times, while leaving the seed fixed above. The train_test_split will change at each iteration, but will be based on the seed.
-            iter=iter+1
             # track iteration time
             iter_start_time = time.time()
 
             split_seed = _split_seed(args, iter)
             X_train, X_test, y_train, y_test, train_idx, test_idx = _split_and_scale(
-                X, y_encoded, args, iter, scaler_name
+                X, y_encoded, args, iter, scaler_name, split=split
             )
-            log.info(
-                f"Begin processing iteration (split) {iter} of {args['iter']} "
-                + ("with stratified sampling" if _is_stratified(args) else "without stratification")
-            )
+            if split is None:
+                log.info(
+                    f"Begin processing iteration (split) {iter} of {args['iter']} "
+                    + ("with stratified sampling" if _is_stratified(args) else "without stratification")
+                )
+            else:
+                # The tuning stage of this split: the scaler (and below, the embedding)
+                # fitted on the fit rows alone, applied to the validation rows.
+                X_fit, X_val, y_fit, y_val, fit_idx, val_idx = _split_and_scale(
+                    X, y_encoded, args, iter, scaler_name, split=split, stage="tune"
+                )
+                pass_fields = _protocol_fields(manifest, split, args, split_seed, host_fields)
+                log.info(
+                    f"Begin processing iteration (split) {iter} (repeat {split.repeat}, "
+                    f"fold {split.fold}) of {len(passes)} selected from the manifest: "
+                    f"{split.n_fit} fit + {split.n_val} validation + {split.n_test} test rows"
+                )
 
             # Skip feature reduction on a dataset too narrow to justify it.
             #
@@ -849,7 +1163,7 @@ def main(args):
                     'embedding_min_features', DEFAULT_EMBEDDING_MIN_FEATURES
                 ),
             )
-            if skipped_embeddings and iter == 1:
+            if skipped_embeddings and first_pass:
                 # Once per dataset, not once per split: the decision cannot change
                 # between splits of one file, and repeating it `iter` times reads like
                 # a recurring problem rather than a stated policy.
@@ -871,20 +1185,35 @@ def main(args):
                 else:
                     log.info(f"Feature reduction (embedding) applied with {embed}")
                 data_key = _data_key(file, embed, args["n_components"], iter)
-                if cache_dir and embed != 'none':
-                    X_train_emb, X_test_emb = emb_cache.load(
+                X_train_emb, X_test_emb, source = _pass_features(
+                    cache_dir,
+                    data_key,
+                    emb_cache.embedding_spec(
+                        args, file, dataset_sha256, embed, iter, scaler_name,
+                        manifest=manifest,
+                    ) if cache_dir and embed != 'none' else None,
+                    embed, X_train, X_test, train_idx, test_idx, args, split_seed,
+                )
+                run_kwargs = {}
+                if split is not None:
+                    # The tuning stage's features, embedded from the fit rows alone with
+                    # the same seed, so no validation row shapes what a trial is fit on.
+                    X_fit_emb, X_val_emb, tune_source = _pass_features(
                         cache_dir,
-                        data_key,
+                        emb_cache.tune_key(data_key),
                         emb_cache.embedding_spec(
-                            args, file, dataset_sha256, embed, iter, scaler_name
-                        ),
-                        train_idx,
-                        test_idx,
+                            args, file, dataset_sha256, embed, iter, scaler_name,
+                            manifest=manifest, stage="tune",
+                        ) if cache_dir and embed != 'none' else None,
+                        embed, X_fit, X_val, fit_idx, val_idx, args, split_seed,
                     )
-                    source = f"read from {emb_cache.cache_file(cache_dir, data_key)}"
-                else:
-                    X_train_emb, X_test_emb = _embed(embed, X_train, X_test, args, split_seed)
-                    source = "computed in this run"
+                    log.info(
+                        f"Tuning features of {data_key}: {X_fit_emb.shape[1]} columns, "
+                        f"sha256 {emb_cache.features_digest(X_fit_emb, X_val_emb)}, {tune_source}"
+                    )
+                    run_kwargs["validation"] = protocol.ValidationSplit(
+                        X_fit_emb, X_val_emb, y_fit, y_val, fit_idx=fit_idx, val_idx=val_idx
+                    )
                 # The digest is what makes two jobs' features comparable after the fact:
                 # jobs that used the same features log the same one.
                 log.info(
@@ -906,6 +1235,11 @@ def main(args):
                 #log.info(f"\nThe characteristics of the embedding train dataset are: \n{evaluate_data}")
                 summary.update({'iteration': iter})
                 model_results.update({'iteration': iter})
+                if split is not None:
+                    # The PROTOCOL_COLUMNS: which outer split, from which manifest and
+                    # dataset bytes, with which seeds, computed where. Internal mode
+                    # writes none of them, so its rows keep their columns.
+                    model_results.update(pass_fields)
                 # `summary` is created ONCE per dataset (line 396), above both the
                 # iteration and the embedding loop, and is only ever updated in place --
                 # so any key a pass does not itself write survives from the previous
@@ -925,16 +1259,27 @@ def main(args):
                 # `summary` -> results.pkl side was never fixed. All four per-model
                 # prefixes are cleared, not just y_score: that also stops a stale
                 # `results_<model>` from being re-written to the CSV under the current
-                # pass's iteration and embedding.
+                # pass's iteration and embedding. The trial logs (TRIALS_PREFIX) and the
+                # manifest-mode row ids go with them, for the same reason.
                 for stale in [
                     key
                     for key in summary
                     if key.startswith(
-                        ("results_", "y_test_", "y_predicted_", "y_score_")
+                        ("results_", "y_test_", "y_predicted_", "y_score_",
+                         protocol.TRIALS_PREFIX, *_SPLIT_INDEX_KEYS)
                     )
                 ]:
                     del summary[stale]
-                summary.update(model_run(X_train_emb, X_test_emb, y_train, y_test, data_key, args))
+                summary.update(model_run(X_train_emb, X_test_emb, y_train, y_test, data_key, args, **run_kwargs))
+                if split is not None:
+                    summary.update({
+                        'train_idx': train_idx, 'fit_idx': fit_idx,
+                        'val_idx': val_idx, 'test_idx': test_idx,
+                        **pass_fields,
+                    })
+                    # Before the CSV rows and results.pkl, so a pass whose rows exist
+                    # always has its predictions and trials on disk as well.
+                    _write_sidecars(summary, test_idx, data_key)
                 # print(summary)
                 # Snapshot the per-(dataset, iteration, embedding) part ONCE, then build
                 # each model's row from a fresh copy of it. Merging each model's results
@@ -947,9 +1292,13 @@ def main(args):
                 row_base = dict(model_results)
                 for outerkey, outervalue in summary.items():
                     if outerkey.startswith("results_"):
-                        _append_model_row(
-                            'ModelResults.csv', {**row_base, **outervalue[0]}
-                        )
+                        row = {**row_base, **outervalue[0]}
+                        if split is not None:
+                            # Continuous validation scores of the refit trial, which
+                            # fair_selection breaks validation-accuracy ties on.
+                            row.update(protocol.validation_tiebreak(
+                                summary.get(protocol.TRIALS_PREFIX + outerkey[len("results_"):])))
+                        _append_model_row('ModelResults.csv', row)
                 # Read existing summary data from the file, if any
                 try:
                     with open("results.pkl", "rb") as pklfile:
@@ -979,6 +1328,7 @@ def main(args):
                     os.fsync(pklfile.fileno())
                 os.replace(tmp_pkl, 'results.pkl')
             iter_run_time = time.time() - iter_start_time
+            first_pass = False
             
         # start logging times
             log.info(f"The run time for iteration (split) {iter} is: {iter_run_time}")

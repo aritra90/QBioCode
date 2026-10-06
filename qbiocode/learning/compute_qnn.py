@@ -24,6 +24,25 @@ from qbiocode.learning._tuning import (
     run_function_study,
     seed_from,
 )
+from qbiocode.learning.compute_fold import fold_fixed, function_param_names
+
+
+#: The values of compute_qnn's ``readout``.
+_READOUTS = ("global", "local")
+
+
+def _readout_label(readout, num_qubits):
+    """The Pauli label of the estimator's observable: Z...Z, or Z on qubit 0 only."""
+    if readout == "global":
+        return "Z" * num_qubits
+    return "I" * (num_qubits - 1) + "Z"
+
+
+def _local_bit(qc):
+    """The measured bit of virtual qubit 0 in a transpiled circuit (its physical index)."""
+    if qc.layout is None:
+        return 0
+    return qc.layout.final_index_layout()[0]
 
 
 def compute_qnn(
@@ -42,6 +61,7 @@ def compute_qnn(
     entanglement="linear",
     reps=2,
     ansatz_type="amp",
+    readout: Literal["global", "local"] = "global",
 ):
     """
     This function computes a Quantum Neural Network (QNN) model on the provided training data and evaluates it on the test data.
@@ -82,14 +102,28 @@ def compute_qnn(
         entanglement (str, optional): Entanglement strategy for the circuit. Defaults to 'linear'.
         reps (int, optional): Number of repetitions for the feature map and ansatz. Defaults to 2.
         ansatz_type (str, optional): Type of ansatz to use. Defaults to 'amp'.
+        readout (Literal['global', 'local'], optional): What the class is read from.
+            'global' (the default) is Z on every qubit -- the estimator's Z...Z
+            expectation, the sampler's parity of the whole bitstring. 'local' is Z on
+            qubit 0 only -- the estimator's <Z_0>, the sampler's bit of qubit 0. Both are placed
+            through the transpiled circuit's layout. Neither has a bias term: with the
+            Z feature map and a one-rep RealAmplitudes, for instance, <Z_0> sees x_0
+            only through cos(2 * x_0), so 'local' separates classes only across a sign
+            change of it.
 
     Returns:
         modeleval (dict): A dictionary containing the evaluation results, including accuracy, runtime, model parameters, and other relevant metrics.
 
     Raises:
-        ValueError: If ``y_train`` does not hold exactly two classes.
+        ValueError: If ``y_train`` does not hold exactly two classes, or ``readout``
+            is not 'global' or 'local'.
     """
     beg_time = time.time()
+    if readout not in _READOUTS:
+        raise ValueError(
+            f"compute_qnn readout must be one of {list(_READOUTS)}, got {readout!r}: "
+            f"'global' reads Z on every qubit, 'local' Z on qubit 0 only."
+        )
 
     # NeuralNetworkClassifier does not encode integer labels: it trains against y as
     # given and returns the network's own output space from predict() -- sign(raw) in
@@ -158,8 +192,9 @@ def compute_qnn(
         # Z on every qubit, which is EstimatorQNN's own default -- built here because the
         # default is placed on physical qubits 0..n-1 of the transpiled circuit without
         # applying its layout, so on a device with a non-trivial layout it would measure
-        # the wrong qubits.
-        observable = SparsePauliOp("Z" * qc.num_qubits)
+        # the wrong qubits. 'local' is Z on virtual qubit 0 (the rightmost label
+        # character), mapped through the same layout.
+        observable = SparsePauliOp(_readout_label(readout, qc.num_qubits))
         if pm is not None:
             qc = pm.run(qc)
             observable = observable.apply_layout(qc.layout)
@@ -185,9 +220,23 @@ def compute_qnn(
         # The network's range: classes[0] -> -1, classes[1] -> +1.
         y_fit = 2 * y_index - 1
     else:
-        # parity maps bitstrings to 0 or 1
-        def parity(x):
-            return "{:b}".format(x).count("1") % 2
+        # parity maps bitstrings to 0 or 1; 'local' reads virtual qubit 0's bit alone,
+        # the sampler's counterpart of <Z_0>. SamplerQNN transpiles first and only then
+        # measures every physical qubit, so bit k is physical qubit k. The global parity
+        # needs no layout (idle ancillas stay |0> and add nothing to it); the local bit
+        # is found through the layout of a circuit transpiled here, which SamplerQNN
+        # then keeps as it stands.
+        if readout == "global":
+            def parity(x):
+                return "{:b}".format(x).count("1") % 2
+        else:
+            bit = 0
+            if pm is not None:
+                qc = pm.run(qc)
+                bit = _local_bit(qc)
+
+            def parity(x):
+                return (x >> bit) & 1
 
         output_shape = (
             2  # corresponds to the number of classes, possible outcomes of the (parity) mapping
@@ -216,6 +265,9 @@ def compute_qnn(
         "optimizer_params": optimizer.settings,
         # Add other hyperparameters as needed
     }
+    # Only when not the default, so 'global' rows stay identical to earlier results.
+    if readout != "global":
+        hyperparameters["readout"] = readout
     model_params = hyperparameters
     # Decoded back to the caller's labels, in their own dtype: raw > 0 (estimator) or
     # parity 1 (sampler) is classes[1], anything else classes[0].
@@ -274,6 +326,10 @@ def compute_qnn_opt(
     *,
     n_trials=10,
     validation_split=0.25,
+    readout=None,
+    validation=None,
+    default_params=None,
+    reseed=None,
 ):
     """Tune QNN's hyperparameters with Optuna, then run it at the best ones found.
 
@@ -312,6 +368,17 @@ def compute_qnn_opt(
             automatically when the configured values describe fewer combinations.
         validation_split (float): Fraction of the training data held out to score
             candidates on, default 0.25.
+        readout (list or dict): Readouts to search ('global', 'local'; see
+            :func:`compute_qnn`). None leaves it at the default.
+        validation (ValidationSplit or None): ``split_mode: manifest``. Every trial is
+            then one fit on ``validation.X_fit`` scored on ``validation.X_val``
+            (``validation_split`` is ignored), trials write no kernel dumps, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the inner-holdout search, unchanged.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+        reseed (callable or None): Resets the global RNGs; called by the tuner before
+            every trial and before the refit.
 
     Returns:
         modeleval (dict): The evaluation of the model at the best hyperparameters found,
@@ -328,8 +395,13 @@ def compute_qnn_opt(
         "entanglement": entanglement,
         "reps": reps,
         "ansatz_type": ansatz_type,
+        "readout": readout,
     }
 
+    fixed = {}
+    if validation is not None:
+        fixed = fold_fixed("qnn", candidates, default_params,
+                           function_param_names(compute_qnn))
     best_params = run_function_study(
         compute_qnn,
         build_search_space("qnn", candidates),
@@ -341,6 +413,10 @@ def compute_qnn_opt(
         seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
+        fixed=fixed,
+        validation=validation,
+        default_params=default_params,
+        reseed=reseed,
     )
 
     frame = compute_qnn(
@@ -353,5 +429,6 @@ def compute_qnn_opt(
         data_key=data_key,
         verbose=verbose,
         **best_params,
+        **fixed,
     )
     return record_tuned_params(frame, best_params, beg_time)

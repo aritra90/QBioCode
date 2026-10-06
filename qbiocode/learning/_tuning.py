@@ -39,18 +39,23 @@ tuned" so switching ``tuner`` cannot change *which* hyperparameters are searched
 """
 
 import contextlib
+import contextvars
 import io
 import logging
 import math
+import numbers
 import tempfile
 import time
 import warnings
 from collections.abc import Mapping, Sequence
 
+import numpy as np
 import optuna
 from sklearn.metrics import f1_score, get_scorer, make_scorer
 from sklearn.model_selection import GridSearchCV, cross_val_score
 
+from qbiocode.evaluation.protocol import TRIALS_PREFIX, TrialRecord
+from qbiocode.evaluation.protocol import trial_log as protocol_trial_log
 from qbiocode.learning._grid import build_param_grid, to_plain
 
 # Optuna logs one INFO line per trial. With the default budget across seven models,
@@ -196,15 +201,43 @@ class TunedParams(dict):
         n_trials (int or None): Configurations evaluated, where cheaply known.
         reused (bool): True when the parameters came from the frozen cache of an
             earlier resample rather than a search on this one.
+        trials (list of TrialRecord or None): Every trial of a search scored on a
+            :class:`~qbiocode.evaluation.protocol.ValidationSplit` (``split_mode:
+            manifest``), in trial order; ``None`` for every other search, which keeps
+            only its winner.
+        best_trial (int or None): ``number`` of the trial whose parameters these are.
+        val_idx (array-like or None): Row ids of the validation rows the trials' ``y_pred``
+            and ``y_score`` are aligned with.
+        y_val (array-like or None): Labels of those rows.
+        fixed (dict or None): The non-searched params every trial was fitted with (the
+            trials' ``params`` hold only the searched names); ``None`` without trials.
     """
 
     def __init__(self, params=(), *, metric=None, score=float("nan"), n_trials=None,
-                 reused=False):
+                 reused=False, trials=None, best_trial=None, val_idx=None, y_val=None,
+                 fixed=None):
         super().__init__(params)
         self.metric = metric
         self.score = float(score) if score is not None else float("nan")
         self.n_trials = n_trials
         self.reused = bool(reused)
+        self.trials = None if trials is None else list(trials)
+        self.best_trial = None if best_trial is None else int(best_trial)
+        self.val_idx = val_idx
+        self.y_val = y_val
+        self.fixed = None if fixed is None else dict(fixed)
+
+    def trial_log(self):
+        """The ``trials_<model>`` cell for these trials (see
+        :func:`qbiocode.evaluation.protocol.trial_log`), or ``None`` without trials."""
+        if not self.trials:
+            return None
+        return protocol_trial_log(
+            self.trials, metric=self.metric, best=self.best_trial,
+            val_idx=self.val_idx, y_val=self.y_val,
+            # getattr: a TunedParams pickled before the field existed has no attribute.
+            fixed=getattr(self, "fixed", None),
+        )
 
     def evidence(self):
         """The three results-row fields this search reports alongside its parameters."""
@@ -433,9 +466,340 @@ def _finite_size(space):
     return total
 
 
+def _plain_scalar(value):
+    """A numpy scalar as the Python number it holds; anything else unchanged.
+
+    A config built in code can carry ``np.int64(8)``, which is no ``int`` to an
+    ``isinstance`` test yet is the same default as ``8``.
+    """
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _is_number(value):
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
+
+def _extend_range(spec, value):
+    """``spec`` widened just enough to hold ``value``, or ``None`` if no range can.
+
+    A range holds numbers only: ``None``, a string or a bool default has no place in it,
+    nor has a fractional value in an int range, a non-positive one on a log scale, or one
+    off the ``step`` lattice.
+    """
+    value = _plain_scalar(value)
+    if not _is_number(value):
+        return None
+    if not math.isfinite(value):
+        return None
+    if spec.is_int:
+        if float(value) != int(value):
+            return None
+        value = int(value)
+    else:
+        value = float(value)
+    if spec.log and value <= 0:
+        return None
+    if spec.step is not None:
+        offset = (value - spec.low) / spec.step
+        if not math.isclose(offset, round(offset), abs_tol=1e-9):
+            return None
+    low, high = min(spec.low, value), max(spec.high, value)
+    if not spec.is_int:
+        low, high = float(low), float(high)
+    return _Range(low, high, log=spec.log, step=spec.step)
+
+
+def _range_holds(spec, value):
+    value = _plain_scalar(value)
+    if not _is_number(value):
+        return False
+    if spec.is_int and float(value) != int(value):
+        return False
+    return spec.low <= value <= spec.high
+
+
+def _as_layers(value):
+    """``value`` as a tuple of layer widths when it spells one, else ``None``.
+
+    ``hidden_layer_sizes=100`` and ``[100]`` (or ``(100,)``) build the same network;
+    sklearn reads a bare int as one hidden layer.
+    """
+    value = _plain_scalar(value)
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+        return (int(value),)
+    if isinstance(value, (list, tuple)) and value and all(
+        isinstance(_plain_scalar(v), numbers.Integral)
+        and not isinstance(_plain_scalar(v), bool) for v in value
+    ):
+        return tuple(int(_plain_scalar(v)) for v in value)
+    return None
+
+
+def _matching_choice(values, value):
+    """The configured choice equal to ``value``, or equivalent to it, else a sentinel.
+
+    Equal first; then, for a list or tuple choice, the same layer widths (so a default
+    ``100`` finds a configured ``[100]`` rather than being added beside it as a second
+    spelling of one network).
+    """
+    for choice in values:
+        try:
+            if bool(choice == value):
+                return choice
+        except (TypeError, ValueError):
+            continue
+    layers = _as_layers(value)
+    if layers is not None:
+        for choice in values:
+            if isinstance(choice, (list, tuple)) and _as_layers(choice) == layers:
+                return choice
+    return _NO_CHOICE
+
+
+#: Returned by :func:`_matching_choice` when no configured choice matches.
+_NO_CHOICE = object()
+
+
+def _default_trial(model, space, default_params):
+    """The trial-0 config, the space it needs, and whether it is the whole default.
+
+    Restricts ``default_params`` to the searched names -- the rest are not the tuner's
+    business; a caller that wants them honoured passes them as ``fixed``. A default the
+    space cannot represent makes Optuna refuse the enqueued trial (a categorical value
+    outside the choices raises in ``to_internal_repr``) or report a point outside the
+    distribution, so the space is widened by exactly that value, and the widening is
+    logged: the search is then over what the config asked for plus the default. A
+    categorical default equivalent to a configured choice (``100`` beside ``[100]``)
+    enqueues that choice instead.
+
+    A range default no range can hold (``gamma='scale'`` against a numeric range,
+    ``max_depth=None``) is not enqueued, nor is a searched name with no default; trial
+    0 samples those names, and the third return value is False so the trial is not
+    recorded as the default config.
+
+    Args:
+        model (str): Model name, for the log.
+        space (dict): From :func:`build_search_space`. Not modified.
+        default_params (Mapping or None): The arm's default config.
+
+    Returns:
+        tuple: ``(enqueue, space, complete)`` -- the values to enqueue (empty when no
+        searched name has a usable default), the possibly widened copy of ``space``,
+        and True when every searched name was enqueued (trial 0 is then the whole
+        default config).
+    """
+    space = dict(space)
+    enqueue = {}
+    for name, value in dict(to_plain(dict(default_params or {}))).items():
+        if name not in space:
+            continue
+        value = _plain_scalar(value)
+        spec = space[name]
+        if isinstance(spec, _Categorical):
+            choice = _matching_choice(spec.values, value)
+            if choice is _NO_CHOICE:
+                space[name] = _Categorical(spec.values + [value])
+                logger.info(
+                    "tuning %r: default %s=%r is not among the configured choices %r; "
+                    "added it so the default config can be trial 0.",
+                    model, name, value, spec.values,
+                )
+                choice = value
+            enqueue[name] = choice
+            continue
+        if _range_holds(spec, value):
+            enqueue[name] = value
+            continue
+        widened = _extend_range(spec, value)
+        if widened is None:
+            logger.info(
+                "tuning %r: default %s=%r cannot be represented in the range "
+                "[%r, %r]; trial 0 samples %s instead.",
+                model, name, value, spec.low, spec.high, name,
+            )
+            continue
+        space[name] = widened
+        enqueue[name] = int(value) if widened.is_int else float(value)
+        logger.info(
+            "tuning %r: default %s=%r is outside the configured range [%r, %r]; "
+            "widened it to [%r, %r] so the default config can be trial 0.",
+            model, name, value, spec.low, spec.high, widened.low, widened.high,
+        )
+    sampled = [name for name in space if name not in enqueue]
+    if enqueue and sampled:
+        logger.info(
+            "tuning %r: trial 0 samples %s, so it is not the default config and is not "
+            "recorded as one.", model, ", ".join(sampled),
+        )
+    return enqueue, space, not sampled
+
+
+def _predictions_score(scoring, estimator, X_val, y_val, y_pred):
+    """One validation score, from predictions already made where the metric allows.
+
+    A :class:`TuningScorer` names a label metric, which is a function of ``y_pred``
+    alone -- the same function sklearn's scorer would reach after predicting again.
+    Anything else goes through sklearn's own scorer resolution.
+    """
+    if isinstance(scoring, TuningScorer):
+        from sklearn.metrics import (
+            accuracy_score, balanced_accuracy_score, matthews_corrcoef,
+        )
+
+        if scoring.metric == "accuracy":
+            return float(accuracy_score(y_val, y_pred))
+        if scoring.metric == "balanced_accuracy":
+            return float(balanced_accuracy_score(y_val, y_pred))
+        if scoring.metric == "mcc":
+            return float(matthews_corrcoef(y_val, y_pred))
+        return float(f1_score(y_val, y_pred, average=scoring.average, zero_division=0))
+    from sklearn.metrics import check_scoring
+
+    return float(check_scoring(estimator, scoring=scoring)(estimator, X_val, y_val))
+
+
+def check_fit_status(estimator, model, params=None, *, level=logging.WARNING):
+    """Log, and report, a fit that libsvm stopped before it converged.
+
+    ``SVC`` (and anything else built on libsvm) sets ``fit_status_`` to 1 when the
+    solver hit ``max_iter`` rather than its tolerance. The fitted model is usable but it
+    is not the optimum of its own objective, so a validation score earned by it measures
+    the cap, not the config. :func:`run_study` fails such a trial; a ``compute_*_opt``
+    wrapper calls this after its refit, which is kept and returned all the same.
+
+    Args:
+        estimator: A fitted estimator. One without ``fit_status_`` counts as converged.
+        model (str): Model name, for the message.
+        params (Mapping or None): The config fitted, for the message.
+        level (int): Logging level of the message.
+
+    Returns:
+        bool: True when the fit converged (or reports nothing).
+    """
+    status = getattr(estimator, "fit_status_", 0)
+    if status == 0:
+        return True
+    logger.log(
+        level,
+        "%r did not converge (fit_status_=%r: the solver stopped at max_iter) "
+        "with params %r.", model, status, dict(params or {}),
+    )
+    return False
+
+
+def _validation_study(estimator_cls, space, validation, *, n_trials, model, seed, fixed,
+                      scoring, metric, default_params):
+    """:func:`run_study` on a fixed validation split: one fit per trial, every trial kept."""
+    from qbiocode.evaluation.model_evaluation import extract_binary_scores
+
+    enqueue, space, whole = _default_trial(model, space, default_params)
+    # Trial 0 is the default config only when every searched default was enqueued.
+    is_default = bool(enqueue) and whole
+    size = _finite_size(space)
+    if size is not None:
+        n_trials = min(n_trials, size)
+    records = {}
+    unconverged = set()
+
+    def objective(trial):
+        params = {name: spec.suggest(trial, name) for name, spec in space.items()}
+        start = time.perf_counter()
+        record = TrialRecord(
+            number=trial.number, params=params, value=math.nan, state="FAIL",
+            is_default=is_default and trial.number == 0,
+        )
+        records[trial.number] = record
+        try:
+            estimator = estimator_cls(**params, **fixed)
+            with warnings.catch_warnings():
+                # Same reading as the cross-validated objective: a non-converging corner
+                # is information for the sampler, not something to print.
+                warnings.simplefilter("ignore")
+                estimator.fit(validation.X_fit, validation.y_fit)
+                if not check_fit_status(estimator, model, params, level=logging.INFO):
+                    unconverged.add(trial.number)
+                    return float("nan")
+                y_pred = estimator.predict(validation.X_val)
+                y_score = extract_binary_scores(estimator, validation.X_val)
+                score = _predictions_score(
+                    scoring, estimator, validation.X_val, validation.y_val, y_pred
+                )
+        except Exception as error:  # noqa: BLE001 -- an unfittable corner costs a trial
+            logger.info("tuning %r: trial %d with params %r failed: %s: %s",
+                        model, trial.number, params, type(error).__name__, error)
+            return float("nan")
+        finally:
+            record.duration_s = time.perf_counter() - start
+        value = score if math.isfinite(score) else float("-inf")
+        record.value, record.state = value, "COMPLETE"
+        record.y_pred, record.y_score = y_pred, y_score
+        return value
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+    )
+    if enqueue:
+        study.enqueue_trial(enqueue)
+    # A NaN return is how a trial is marked FAIL without stopping the study: Optuna
+    # records it as failed, TPE ignores it, and the next trial runs.
+    with _suppress_unstorable_choice_warning():
+        study.optimize(objective, n_trials=n_trials, n_jobs=1)
+    return _tuned_from_study(study, records, model, metric, validation, fixed=fixed,
+                             unconverged=unconverged)
+
+
+def _tuned_from_study(study, records, model, metric, validation, *, fixed=None,
+                      unconverged=()):
+    """The :class:`TunedParams` of a validation-scored study, trials attached.
+
+    ``unconverged`` names the trials that failed only because libsvm stopped at
+    ``max_iter``. When every trial failed that way the arm is not lost: trial 0 (the
+    default config where one was enqueued) is returned with a NaN score and a warning,
+    and the caller's refit -- which :func:`check_fit_status` warns about in turn -- runs
+    on it. Any other all-failed study raises.
+    """
+    complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    trials = [records[t.number] for t in study.trials if t.number in records]
+    numbers = {t.number for t in study.trials}
+    if not complete and numbers and numbers <= set(unconverged):
+        first = records[min(numbers)]
+        logger.warning(
+            "Every one of the %d tuning trials for %r stopped at max_iter without "
+            "converging (fit_status_ != 0), so none has a validation score; falling "
+            "back to trial %d's params %r, with tuning_score NaN.",
+            len(numbers), model, first.number, dict(first.params),
+        )
+        return TunedParams(
+            first.params, metric=metric, score=float("nan"), n_trials=len(study.trials),
+            trials=trials, best_trial=first.number, val_idx=validation.val_idx,
+            y_val=validation.y_val, fixed=fixed,
+        )
+    if not complete:
+        raise ValueError(
+            f"Every tuning trial for {model!r} failed on the validation split, so there "
+            f"is no best configuration to report. The trial log (level INFO) names the "
+            f"params and error of each; check the 'gridsearch_{model}_args' block."
+        )
+    failed = len(study.trials) - len(complete)
+    if failed:
+        logger.warning(
+            "%d of %d tuning trials for %r failed and were recorded as FAIL; the best "
+            "of the %d that ran was used.", failed, len(study.trials), model,
+            len(complete),
+        )
+    return TunedParams(
+        study.best_params, metric=metric, score=study.best_value,
+        n_trials=len(study.trials), trials=trials, best_trial=study.best_trial.number,
+        val_idx=validation.val_idx, y_val=validation.y_val, fixed=fixed,
+    )
+
+
 def run_study(
     estimator_cls, space, X, y, *, cv, n_trials, model=None, seed=None, fixed=None,
-    scoring=None,
+    scoring=None, validation=None, default_params=None,
 ):
     """Search ``space`` with Optuna and return the best hyperparameters found.
 
@@ -465,11 +829,30 @@ def run_study(
             :class:`TuningScorer` (see :func:`tuning_scorer`) or a tuning-metric name;
             any other sklearn ``scoring`` is passed through. ``None`` means balanced
             accuracy.
+        validation (ValidationSplit or None): ``split_mode: manifest``. Each trial is
+            then ONE fit on ``validation.X_fit`` scored on ``validation.X_val`` -- no
+            cross-validation, and ``X``, ``y`` and ``cv`` are not used by the search
+            (the caller refits the winner on its full ``X_train``). A trial that raises,
+            or whose fit reports ``fit_status_ != 0`` (libsvm stopped at ``max_iter``),
+            is recorded as FAIL with a NaN value and the study goes on. Every trial is
+            returned as a :class:`~qbiocode.evaluation.protocol.TrialRecord` with its
+            validation predictions. ``None`` (the default) is the cross-validated search
+            above, unchanged.
+        default_params (Mapping or None): The arm's default config. Its searched names
+            are enqueued as trial 0, which counts inside ``n_trials``; a default the
+            space cannot hold widens the space by that value (logged). ``None``
+            enqueues nothing.
 
     Returns:
         TunedParams: The best trial's hyperparameters, in the same shape
         ``GridSearchCV.best_params_`` returned, so callers refit unchanged -- with the
-        metric, its best mean CV score and the number of trials run as attributes.
+        metric, its best mean CV score (the validation score with ``validation``) and
+        the number of trials run as attributes, and with ``validation`` every trial.
+
+    Raises:
+        ValueError: With ``validation``, if every trial failed -- unless every one
+            failed only by stopping at ``max_iter``, when trial 0's params come back
+            with a NaN score and a warning.
     """
     fixed = dict(fixed or {})
     metric, scoring = _scoring_parts(scoring)
@@ -478,6 +861,17 @@ def run_study(
     # is what makes "gridsearch_rf_args" findable. 'RandomForestClassifier' appears in no
     # config, so it left the one message that rejects a budget unable to point anywhere.
     _validate_budget(model or estimator_cls.__name__, n_trials)
+
+    if validation is not None:
+        return _validation_study(
+            estimator_cls, space, validation, n_trials=n_trials,
+            model=model or estimator_cls.__name__, seed=seed, fixed=fixed,
+            scoring=scoring, metric=metric, default_params=default_params,
+        )
+    enqueue = {}
+    if default_params is not None:
+        enqueue, space, _ = _default_trial(model or estimator_cls.__name__, space,
+                                        default_params)
 
     size = _finite_size(space)
     if size is not None:
@@ -499,6 +893,8 @@ def run_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
+    if enqueue:
+        study.enqueue_trial(enqueue)
     # n_jobs=1 on purpose. model_run.py already fans the models out over joblib
     # workers, and on macOS a QBioCode process has three LLVM OpenMP runtimes mapped
     # in under one install name (torch, qiskit-aer, xgboost); adding another layer of
@@ -524,6 +920,8 @@ def search_hyperparameters(
     seed=None,
     fixed=None,
     scoring=None,
+    validation=None,
+    default_params=None,
 ):
     """Run whichever search ``tuner`` names, and return the best hyperparameters.
 
@@ -560,14 +958,30 @@ def search_hyperparameters(
             ``cross_val_score(scoring=...)`` for Optuna, ``GridSearchCV(scoring=...)``
             for the grid. Each ``compute_*_opt`` passes ``tuning_scorer(args)``. ``None``
             means balanced accuracy; ``'accuracy'`` restores the old default.
+        validation (ValidationSplit or None): Score every trial on this fixed split
+            instead of by cross-validation (``split_mode: manifest``); forwarded to
+            :func:`run_study`. Optuna engine only.
+        default_params (Mapping or None): The arm's default config, enqueued as trial 0;
+            forwarded to :func:`run_study`. Optuna engine only.
 
     Returns:
         TunedParams: The best hyperparameters found, in the shape
         ``GridSearchCV.best_params_`` returned, so callers refit unchanged, carrying
         the metric and the best mean cross-validated score as attributes.
+
+    Raises:
+        ValueError: If ``tuner='grid'`` is combined with ``validation``: the grid fits
+            every point whatever ``n_trials`` says, so the arms could not be given one
+            equal budget.
     """
     fixed = dict(fixed or {})
     metric, scoring = _scoring_parts(scoring)
+    if tuner == "grid" and validation is not None:
+        raise ValueError(
+            f"tuner: 'grid' cannot tune {model!r} on a validation split: the exhaustive "
+            f"grid ignores n_trials, so the equal per-arm trial budget of split_mode: "
+            f"manifest cannot hold. Use tuner: optuna."
+        )
     # Optuna by default; the exhaustive grid stays reachable so a number published
     # against it can still be reproduced. Both engines are handed the same `candidates`,
     # so switching `tuner` never changes *which* hyperparameters are searched -- only how
@@ -597,6 +1011,8 @@ def search_hyperparameters(
         seed=seed,
         fixed=fixed,
         scoring=scoring,
+        validation=validation,
+        default_params=default_params,
     )
 
 
@@ -721,6 +1137,9 @@ def run_function_study(
     validation_split=0.25,
     fixed=None,
     data_key=None,
+    validation=None,
+    default_params=None,
+    reseed=None,
 ):
     """Tune a ``compute_*`` function by scoring it on an inner validation split.
 
@@ -745,18 +1164,40 @@ def run_function_study(
             freeze and reuse the search across resamples when the config sets
             ``freeze_quantum_params: True``; ``None`` disables that entirely, so a
             caller that does not pass it behaves exactly as before.
+        validation (ValidationSplit or None): ``split_mode: manifest``. Every trial
+            is then ``compute_fn(X_fit, X_val, y_fit, y_val, ...)`` on this split: no
+            inner ``train_test_split`` (``validation_split`` is ignored), no frozen
+            parameters loaded or saved, and no ``kernel_dump_dir`` in the trial's args,
+            so trials cannot overwrite the refit's kernel dumps. A trial that raises is
+            recorded as FAIL with a NaN value and the study goes on. Every trial is
+            returned as a :class:`~qbiocode.evaluation.protocol.TrialRecord`, with the
+            validation predictions read from the frame's single ``y_predicted_*`` /
+            ``y_score_*`` pair (None when the frame has several, as QPL's heads do).
+        default_params (Mapping or None): The arm's default config; its searched names
+            are enqueued as trial 0 (see :func:`run_study`).
+        reseed (callable or None): Called with no arguments before every trial and once
+            more just before returning, i.e. before the caller's refit. model_run passes
+            one that resets the global RNGs to the run's seeds, so a model whose initial
+            point comes from a global stream (qnn, vqc) starts every trial -- and the
+            refit -- from the same state, whatever ran before it.
 
     Returns:
         TunedParams: The best trial's hyperparameters -- from a fresh search, or from
         the frozen file written by the first resample when freezing is on
         (``.reused`` is then True and ``.score`` is the score recorded when the file
-        was written, NaN for a file from before scores were recorded).
+        was written, NaN for a file from before scores were recorded). With
+        ``validation`` it also carries every trial.
 
     Raises:
         ValueError: If ``tuning_metric`` is unknown, if tuning would run against real
             hardware without ``allow_hardware_tuning``, if the data cannot be split so
             that both sides carry every class, or if every trial failed.
     """
+    if validation is not None:
+        return _validation_function_study(
+            compute_fn, space, args, validation, model=model, n_trials=n_trials,
+            seed=seed, fixed=fixed, default_params=default_params, reseed=reseed,
+        )
     import numpy as np
     from sklearn.model_selection import train_test_split
 
@@ -803,6 +1244,9 @@ def run_function_study(
     # score only needs the metrics row, so take the cheaper branch.
     scoring_args = {**args, "grid_search": False}
 
+    enqueue = {}
+    if default_params is not None:
+        enqueue, space, _ = _default_trial(model, space, default_params)
     size = _finite_size(space)
     if size is not None:
         n_trials = min(n_trials, size)
@@ -833,6 +1277,8 @@ def run_function_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
+    if enqueue:
+        study.enqueue_trial(enqueue)
     # Serial for the same reason as run_study: model_run already parallelises over
     # models, and the quantum stack maps its own OpenMP runtime in alongside torch's.
     #
@@ -877,6 +1323,129 @@ def run_function_study(
     return best
 
 
+def _frame_predictions(frame):
+    """``(y_pred, y_score)`` of a one-model ``modeleval`` frame, or ``(None, None)``.
+
+    Read from the single ``y_predicted_<label>`` column; a frame carrying several (QPL,
+    one per classical head) has no one prediction per row to report.
+    """
+    import numpy as np
+
+    columns = [c for c in frame.columns if c.startswith("y_predicted_")]
+    if len(columns) != 1:
+        return None, None
+    label = columns[0][len("y_predicted_"):]
+    values = [v for v in frame[columns[0]] if v is not None]
+    if not values:
+        return None, None
+    y_pred = np.asarray(values[0])
+    y_score = None
+    score_column = "y_score_" + label
+    if score_column in frame.columns:
+        scores = [v for v in frame[score_column] if v is not None]
+        if scores and np.ndim(scores[0]) == 1:
+            y_score = np.asarray(scores[0])
+    return y_pred, y_score
+
+
+#: The number of the validation-study trial whose ``compute_fn`` call is running, else
+#: None. A wrapper that keeps something of each trial's call (QPL's per-head frames)
+#: keys it by this, so a trial that never reached the call costs only its own entry.
+_CURRENT_TRIAL = contextvars.ContextVar("qbiocode_tuning_trial", default=None)
+
+
+def current_trial_number():
+    """The number of the validation-study trial now calling ``compute_fn``, or None."""
+    return _CURRENT_TRIAL.get()
+
+
+def _validation_function_study(compute_fn, space, args, validation, *, model, n_trials,
+                               seed, fixed, default_params, reseed):
+    """:func:`run_function_study` on a fixed validation split, every trial kept."""
+    from qbiocode.learning._param_cache import freezing_enabled
+
+    metric = tuning_metric(args)
+    # Params frozen on one fold and reused on the next would be tuned on rows that are
+    # the next fold's test rows; the protocol forbids it, so no freeze load or save.
+    if freezing_enabled(args):
+        raise ValueError(
+            f"freeze_quantum_params cannot be combined with a validation split "
+            f"(split_mode: manifest) when tuning {model!r}: every fold is tuned on its "
+            f"own validation rows. Set freeze_quantum_params: False."
+        )
+    ensure_tuning_is_affordable(args, model)
+    _validate_budget(model, n_trials)
+    fixed = dict(fixed or {})
+
+    scoring_args = {**args, "grid_search": False}
+    # The kernel dumps belong to the refit on the outer split; a trial writing them
+    # would overwrite (or pre-empt) gram_/proj_ files named for the same data_key.
+    scoring_args.pop("kernel_dump_dir", None)
+
+    enqueue, space, whole = _default_trial(model, space, default_params)
+    # Trial 0 is the default config only when every searched default was enqueued.
+    is_default = bool(enqueue) and whole
+    size = _finite_size(space)
+    if size is not None:
+        n_trials = min(n_trials, size)
+    records = {}
+
+    def objective(trial):
+        params = {name: spec.suggest(trial, name) for name, spec in space.items()}
+        record = TrialRecord(
+            number=trial.number, params=params, value=math.nan, state="FAIL",
+            is_default=is_default and trial.number == 0,
+        )
+        records[trial.number] = record
+        start = time.perf_counter()
+        try:
+            if reseed is not None:
+                reseed()
+            token = _CURRENT_TRIAL.set(trial.number)
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        frame = compute_fn(
+                            validation.X_fit, validation.X_val,
+                            validation.y_fit, validation.y_val, scoring_args,
+                            **params, **fixed,
+                        )
+            finally:
+                _CURRENT_TRIAL.reset(token)
+            score = _metric_of(frame, model, metric)
+            y_pred, y_score = _frame_predictions(frame)
+        except Exception as error:  # noqa: BLE001 -- an unbuildable corner costs a trial
+            logger.info("tuning %r: trial %d with params %r failed: %s: %s",
+                        model, trial.number, params, type(error).__name__, error)
+            return float("nan")
+        finally:
+            record.duration_s = time.perf_counter() - start
+        value = score if math.isfinite(score) else float("-inf")
+        record.value, record.state = value, "COMPLETE"
+        record.y_pred, record.y_score = y_pred, y_score
+        return value
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+    )
+    if enqueue:
+        study.enqueue_trial(enqueue)
+    # The scratch projection directory: see run_function_study.
+    with tempfile.TemporaryDirectory(prefix="qbiocode_tuning_") as scratch:
+        scoring_args["pqk_projection_dir"] = scratch
+        scoring_args["qpl_projection_dir"] = scratch
+        with _suppress_unstorable_choice_warning():
+            study.optimize(objective, n_trials=n_trials, n_jobs=1)
+
+    best = _tuned_from_study(study, records, model, metric, validation, fixed=fixed)
+    if reseed is not None:
+        # The caller refits next; start it from the same global state as every trial.
+        reseed()
+    return best
+
+
 def record_tuned_params(frame, best_params, beg_time):
     """Report the tuned hyperparameters and the whole search's wall clock.
 
@@ -895,6 +1464,12 @@ def record_tuned_params(frame, best_params, beg_time):
     returns -- its ``tuning_metric``, ``tuning_score`` and ``tuning_reused`` are written
     into each metrics row as well, so the validation score of the chosen configuration
     reaches ModelResults.csv. The parameter entry itself stays a plain dict.
+
+    When it also carries trials (a search on a validation split, ``split_mode:
+    manifest``), each ``results_<label>`` column gets a ``trials_<label>`` sibling
+    holding :meth:`TunedParams.trial_log`, on the row that column is populated on --
+    unless the frame already has that column, which a wrapper writing a per-head log
+    (QPL) owns. Without trials the frame gains no column.
     """
     elapsed = time.time() - beg_time
     evidence = best_params.evidence() if isinstance(best_params, TunedParams) else {}
@@ -908,4 +1483,27 @@ def record_tuned_params(frame, best_params, beg_time):
         )
         metrics["time"] = elapsed
         metrics.update(evidence)
+    log = best_params.trial_log() if isinstance(best_params, TunedParams) else None
+    if log is not None:
+        _attach_trial_log(frame, log)
     return frame
+
+
+def _object_column(cells, index):
+    """``cells`` as an object Series on ``index``: a dict cell must stay one cell."""
+    import pandas as pd
+
+    series = pd.Series([None] * len(cells), index=index, dtype=object)
+    for position, cell in enumerate(cells):
+        series.iat[position] = cell
+    return series
+
+
+def _attach_trial_log(frame, log):
+    """Add ``trials_<label>`` next to every populated ``results_<label>`` column."""
+    for column in [c for c in frame.columns if c.startswith("results_")]:
+        target = TRIALS_PREFIX + column[len("results_"):]
+        if target in frame.columns:
+            continue
+        cells = [log if isinstance(value, dict) else None for value in frame[column]]
+        frame[target] = _object_column(cells, frame.index)

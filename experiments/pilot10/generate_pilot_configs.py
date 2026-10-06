@@ -749,15 +749,20 @@ def load_config(path):
 def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
           test_size=TEST_SIZE_DEFAULT, n_trials_quantum=N_TRIALS_QUANTUM_DEFAULT,
           emb=None, model=None, runs_dir=RUNS_DIR, protocol=False,
-          embedding_cache=EMBEDDING_CACHE_DIR):
+          embedding_cache=EMBEDDING_CACHE_DIR, job=None, title=None):
     """One config. With ``model`` (and ``emb``) set, the self-contained split-layout job for
     that pair. With ``protocol``, the dataset's PROTOCOL for build_job's files: the same
     text as any of its jobs, with the job keys left UNSET. ``embedding_cache`` is the
-    directory the jobs read their embedded features from, or None to embed in each job."""
+    directory the jobs read their embedded features from, or None to embed in each job.
+
+    ``job`` ({JOB_TOKENS token: text}) and ``title`` replace the job keys and the title of a
+    split-layout job outright; build_manifest_job uses them for its model groups, which
+    _job_values cannot express. An absolute ``folder`` is used as it is, a relative one is
+    read under DATA_ROOT."""
     if embedding_cache and not os.path.isabs(embedding_cache):
         # qprofiler refuses a relative one: every job runs from its own output directory.
         raise ValueError(f"embedding_cache must be an absolute path, got {embedding_cache!r}")
-    split = model is not None or protocol
+    split = model is not None or protocol or job is not None
     dataset = csv[:-4]
     backend, qubits, embeddings = backend_for(feats)
     if split:
@@ -769,6 +774,10 @@ def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
                      f"## Each job file here pulls this in (defaults: [{PROTOCOL}, _self_]) and "
                      f"sets the keys\n## left {UNSET} below: which job it is and where it "
                      f"writes. Run a job file, never this one.")
+        elif job is not None:
+            if title is None:
+                raise ValueError("a job given as token values needs its title too")
+            name = job["@@NAME@@"]
         else:
             job = _job_values(dataset, feats, emb, model, runs_dir)
             name = job["@@NAME@@"]
@@ -809,7 +818,7 @@ def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
         ("@@SHAPE@@", f"{rows} rows x {feats} features, binary target, no missing values."),
         ("@@WHY@@", f"In the pilot because: {why}."),
         ("@@BANDNOTE@@", bandnote),
-        ("@@FOLDER@@", f"{DATA_ROOT}/{folder}"),
+        ("@@FOLDER@@", folder if os.path.isabs(folder) else f"{DATA_ROOT}/{folder}"),
         ("@@CSV@@", csv),
         ("@@BACKEND@@", backend),
         ("@@BACKEND_REASON@@", reason),
@@ -834,10 +843,437 @@ def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
     return name, body
 
 
+# ---------------------------------------------------------------------------
+# --split-mode manifest: the fold protocol (tests/test_pilot_split_contract.py,
+# TestTheManifestModeGenerator).
+#
+# The outer splits are no longer drawn by qprofiler: each curated dataset
+# <datasets-root>/<id>/<id>.csv has a frozen manifest <split-dir>/<id>.json
+# (benchmark/make_splits.py) pinning a repeated stratified K-fold, and a job runs ONE of its
+# splits, by global iteration = repeat * k + fold + 1. A job is one (dataset, iteration,
+# embedding, group): the nine classical arms share one job (minutes each, run one after
+# another), and every quantum arm is a group of its own (hours). Every arm tunes afresh in
+# every split with the same trial budget, so freeze_quantum_params is off and
+# n_trials_quantum equals n_trials. A manifest-mode run lives in its own tree,
+# <runs-dir>/<run-id>/, with its own embedding cache, and its LSF jobs are named
+# p10_<run-id>_<config>, so neither can collide with another run's.
+# ---------------------------------------------------------------------------
+SPLIT_MODES = ("internal", "manifest")
+RUNS_CV_DIR = os.path.join(HERE, "runs_cv")
+#: Trials per arm in manifest mode, trial 0 being the configured defaults.
+N_TRIALS_DEFAULT = 30
+#: LSF wall per job in manifest mode, when --wall does not say otherwise.
+WALL_DEFAULT = "72:00"
+#: The group that holds every classical arm of a job.
+CLASSICAL_GROUP = "classical"
+#: qnn's observable: Z on every qubit ('global', compute_qnn's default) or on qubit 0 only
+#: ('local', VQC's model). 'tune' puts both in qnn's search space.
+QNN_READOUTS = ("tune", "global", "local")
+#: A job name is JOB_NAME_PREFIX + run id + '_' + config; submit_runs.sh and status.py
+#: build it the same way, from MANIFEST.tsv's run_id column.
+JOB_NAME_PREFIX = "p10_"
+#: The MANIFEST.tsv columns of both modes, in order. Consumers read the first thirteen
+#: by position (submit_runs.sh), so manifest mode only appends.
+MANIFEST_COLUMNS = ("config", "dataset", "embedding", "model", "arm", "backend", "qubits",
+                    "rows", "n_trials_quantum", "iter", "exp_h", "bound_h", "yaml")
+MANIFEST_MODE_COLUMNS = ("split_mode", "iteration", "repeat", "fold", "group", "run_id",
+                         "wall", "models", "n_trials", "qnn_readout", "sel_datasets",
+                         "sel_models", "sel_splits", "split_dir", "datasets_root",
+                         "manifest_sha256")
+
+_WALL_RE = r"\d+:[0-5]\d"
+
+
+def parse_splits(text):
+    """``--splits``: 'all', or global iterations as '1-5', '1,6,11' or a mix ('1-3,7').
+
+    Returns 'all' or a sorted list of distinct positive ints.
+    """
+    import re
+
+    text = str(text).strip()
+    if text == "all":
+        return "all"
+    out = set()
+    for part in text.split(","):
+        part = part.strip()
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if not m:
+            raise ValueError(f"--splits: {part!r} is not an iteration or a range a-b")
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        if lo < 1 or hi < lo:
+            raise ValueError(f"--splits: {part!r} is not a range of iterations >= 1")
+        out.update(range(lo, hi + 1))
+    return sorted(out)
+
+
+def parse_wall(text, groups):
+    """``--wall``: one LSF wall for every job ('4:00'), or one per group
+    ('classical=0:45,qsvc=2:00,pqk=2:00,qnn=4:00', with an optional '*=H:MM' for the groups
+    not named). Returns {group: 'H:MM'} over ``groups``; a group left without a wall, a
+    name that is not one of ``groups`` or a value that is not H:MM is an error.
+    """
+    import re
+
+    text = str(text).strip()
+    if "=" not in text:
+        if not re.fullmatch(_WALL_RE, text):
+            raise ValueError(f"--wall: {text!r} is not H:MM")
+        return {g: text for g in groups}
+    given = {}
+    for part in text.split(","):
+        key, sep, val = (s.strip() for s in part.partition("="))
+        if not sep or not re.fullmatch(_WALL_RE, val):
+            raise ValueError(f"--wall: {part!r} is not group=H:MM")
+        if key != "*" and key not in groups:
+            raise ValueError(f"--wall names group {key!r}, which this run does not have "
+                             f"(its groups: {', '.join(groups)})")
+        given[key] = val
+    missing = [g for g in groups if g not in given and "*" not in given]
+    if missing:
+        raise ValueError(f"--wall gives no wall for {', '.join(missing)}; name them or add "
+                         f"'*=H:MM'")
+    return {g: given.get(g, given.get("*")) for g in groups}
+
+
+def model_groups(models=None):
+    """[(group, classical arms, quantum arms)] of one (dataset, iteration, embedding),
+    heaviest first: each quantum arm alone, then the classical group.
+
+    ``models`` is the --models subset (None: every arm). Naming no classical arm keeps the
+    classical group whole; naming some (or 'classical') keeps those (or all nine).
+    """
+    classical, quantum = ast.literal_eval(CLASSICAL_MODELS), ast.literal_eval(QUANTUM_MODELS)
+    if models is None:
+        return [(q, [], [q]) for q in quantum] + [(CLASSICAL_GROUP, classical, [])]
+    unknown = [m for m in models if m not in classical + quantum + [CLASSICAL_GROUP]]
+    if unknown:
+        raise ValueError(f"--models: unknown arm(s) {', '.join(unknown)}; the arms are "
+                         f"{', '.join(quantum + classical)} (or '{CLASSICAL_GROUP}')")
+    named = [c for c in classical if c in models]
+    keep = classical if CLASSICAL_GROUP in models or not named else named
+    return [(q, [], [q]) for q in quantum if q in models] + [(CLASSICAL_GROUP, keep, [])]
+
+
+def resolve_dataset(name, datasets_root):
+    """The curated id of ``name`` under ``datasets_root``: ``name`` itself when
+    <root>/<name>/<name>.csv exists, else the one id ending in '__<name>' (a pilot name such
+    as 'spect' -> 'pmlb__spect'). Returns None when nothing matches; several matches are
+    an error, never a guess.
+    """
+    if os.path.isfile(os.path.join(datasets_root, name, f"{name}.csv")):
+        return name
+    hits = sorted(d for d in os.listdir(datasets_root)
+                  if d.endswith(f"__{name}")
+                  and os.path.isfile(os.path.join(datasets_root, d, f"{d}.csv")))
+    if len(hits) > 1:
+        raise ValueError(f"dataset {name!r} is ambiguous under {datasets_root}: "
+                         f"{', '.join(hits)}; name the curated id")
+    return hits[0] if hits else None
+
+
+def curated_dataset(dataset_id, datasets_root):
+    """{id, folder, csv, rows, feats, sha256} of a curated dataset, from its meta.yaml."""
+    from omegaconf import OmegaConf
+
+    folder = os.path.abspath(os.path.join(datasets_root, dataset_id))
+    meta_path = os.path.join(folder, "meta.yaml")
+    if not os.path.isfile(meta_path):
+        raise ValueError(f"{dataset_id}: no meta.yaml in {folder} (curate.py writes it)")
+    meta = OmegaConf.to_container(OmegaConf.load(meta_path))
+    return {"id": dataset_id, "folder": folder, "csv": f"{dataset_id}.csv",
+            "rows": int(meta["n"]), "feats": int(meta["p"]), "sha256": meta.get("sha256")}
+
+
+def read_split_manifest(split_dir, dataset_id):
+    """{sha256, k, splits: {iteration: (repeat, fold)}} of <split_dir>/<id>.json, or None.
+
+    Read as plain JSON rather than through qprofiler's split_manifest reader, which only
+    takes schema 2: the generator needs the iterations, and a record without 'repeat' is
+    repeat 0 (a single-repeat manifest). qprofiler checks the rest when the job runs.
+    """
+    import json
+
+    path = os.path.join(split_dir, f"{dataset_id}.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path) as fh:
+        doc = json.load(fh)
+    k = int(doc["k"])
+    splits = {}
+    for rec in doc["folds"]:
+        repeat, fold = int(rec.get("repeat", 0)), int(rec["fold"])
+        splits[repeat * k + fold + 1] = (repeat, fold)
+    return {"sha256": doc.get("sha256"), "k": k, "splits": dict(sorted(splits.items()))}
+
+
+def manifest_job_name(dataset_id, emb, iteration, group):
+    """A manifest-mode config name: ``<id>_<embedding>_i<iteration>_<group>``."""
+    return f"{dataset_id}_{emb}_i{iteration:02d}_{group}"
+
+
+def _swap(body, old, new):
+    """``body`` with the one occurrence of ``old`` replaced; anything else is a bug here."""
+    n = body.count(old)
+    if n != 1:
+        raise AssertionError(f"expected one {old[:60]!r} in the template, found {n}")
+    return body.replace(old, new)
+
+
+def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_trials,
+                       qnn_readout):
+    """The protocol keys of a manifest-mode job, edited into a split-layout config body."""
+    import re
+
+    body = _swap(body, "## Generated by generate_pilot_configs.py --layout split --",
+                 f"## Generated by generate_pilot_configs.py --split-mode manifest "
+                 f"--run-id {run_id} --")
+    start = body.index("# Train/test protocol\n")
+    end = re.search(r"^cross_validation: 5[^\n]*\n", body, re.M).end()
+    body = body[:start] + textwrap.dedent(f"""\
+        # Train/test protocol: split_mode manifest
+        # ---------------------------------------------------------------------------
+        # The outer splits are read, not drawn: split_dir holds one frozen manifest per
+        # dataset, <dataset id>.json (benchmark/make_splits.py), a repeated stratified
+        # K-fold whose every record also names its validation rows (the next fold's test
+        # rows). qprofiler refuses the CSV unless it is the file the manifest's sha256 pins.
+        # Each split has a global iteration = repeat * k + fold + 1, and this job runs the
+        # ones in `splits` (repeat {repeat}, fold {fold}). Each tuning trial is fit on the
+        # training rows minus the validation rows and scored on the validation rows; the
+        # best-validation config is refit on all the training rows and tested once. So
+        # test_size, iter, stratify, validation_split and cross_validation do not apply.
+        split_mode: manifest
+        split_dir: '{split_dir}'
+        splits: [{iteration}]
+        # Feature scaling. Options: ['True'] or true (MinMaxScaler), 'StandardScaler',
+        # 'MinMaxScaler', 'None'/false. Fit on the rows a stage trains on (the fit rows
+        # while tuning, the training rows for the final fit), never on validation or test.
+        scaling: ['True']
+        """) + body[end:]
+    body = _swap(body, textwrap.dedent("""\
+        # Trials per classical model. Automatically reduced to the size of the search space
+        # when that space is finite, so a small block does not waste trials re-sampling.
+        n_trials: 50
+        """), textwrap.dedent(f"""\
+        # Trials per model, classical and quantum alike, trial 0 being the configured
+        # defaults. Reduced to the size of the search space when that space is finite
+        # (pqk's all-list grid is; a space with a numeric range never is).
+        n_trials: {n_trials}
+        """))
+    body, n = re.subn(r"# Trials per quantum model\. Together with freeze_quantum_params "
+                      r"below, this is the\n# dominant term[^\n]*\nn_trials_quantum: \d+\n",
+                      f"# The same budget as n_trials: one budget for every arm.\n"
+                      f"n_trials_quantum: {n_trials}\n", body)
+    assert n == 1, "the template's n_trials_quantum block moved"
+    start = body.index("# Tune once, on iteration 0,")
+    end = body.index("freeze_quantum_params: True\n") + len("freeze_quantum_params: True\n")
+    body = body[:start] + (
+        "# Off: every split tunes every arm afresh on its own validation rows. Reusing one\n"
+        "# split's parameters in another would let its test rows choose them.\n"
+        "freeze_quantum_params: False\n") + body[end:]
+    body = _swap(body, "# Where the frozen parameters are cached. Per-config, so two configs cannot "
+                       "collide.\n# The cache key includes the backend, so switching simulators "
+                       "re-tunes instead of\n# silently reusing parameters chosen on a different "
+                       "one.\n",
+                 "# The frozen-parameter cache: unused while freeze_quantum_params is False, and\n"
+                 "# per-job all the same, so no two jobs could ever share one.\n")
+    body = _swap(body, "seed: 42          # classical RNG: splits, model init, tuner sampling\n",
+                 "seed: 42          # classical RNG: model init, tuner sampling (the splits are "
+                 "the manifest's)\n")
+    assert not re.search(r"^(iter|test_size|freeze_quantum_params: True)", body, re.M)
+    if qnn_readout != "tune":
+        body = _swap(body, "           'ansatz_type': 'amp'\n           }\nqsvc_args:",
+                     f"           'ansatz_type': 'amp',\n           'readout': '{qnn_readout}'\n"
+                     f"           }}\nqsvc_args:")
+    space = "['global', 'local']" if qnn_readout == "tune" else f"['{qnn_readout}']"
+    body = _swap(body, "gridsearch_qnn_args: {'encoding': ['Z', 'ZZ'],",
+                 "#   readout is qnn's observable: 'global' Z on every qubit, 'local' Z on qubit 0\n"
+                 "#   only (VQC's model). A one-element list pins it.\n"
+                 "gridsearch_qnn_args: {'encoding': ['Z', 'ZZ'],")
+    body = _swap(body, "                      'primitive': ['estimator'],\n",
+                 f"                      'primitive': ['estimator'],\n"
+                 f"                      'readout': {space},\n")
+    return body
+
+
+def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration, repeat,
+                       fold, *, run_root, run_id, split_dir, n_trials, qnn_readout,
+                       embedding_cache, why):
+    """(name, body) of one manifest-mode job: ``group`` of dataset ``ds`` (curated_dataset's
+    dict) on embedding ``emb``, split ``iteration``."""
+    name = manifest_job_name(ds["id"], emb, iteration, group)
+    rundir = os.path.join(run_root, ds["id"])
+    job = dict(zip(JOB_TOKENS, (
+        name, f"['{emb}']", str(list(classical)), str(list(quantum)),
+        os.path.join(rundir, "quantum_tuned_params", name),
+        os.path.join(rundir, "kernels", name))))
+    title = (f"RUN {run_id}, DATASET {idx:02d} of {total} -- {ds['folder']}/{ds['csv']} -- "
+             f"ONE JOB: {group} on embedding '{emb}', split {iteration} (repeat {repeat}, "
+             f"fold {fold})")
+    _, body = build(idx, ds["folder"], ds["csv"], ds["rows"], ds["feats"], why,
+                    runs_dir=run_root, embedding_cache=embedding_cache, job=job, title=title)
+    body = _manifest_protocol(body, run_id=run_id, split_dir=split_dir, iteration=iteration,
+                              repeat=repeat, fold=fold, n_trials=n_trials,
+                              qnn_readout=qnn_readout)
+    return name, body
+
+
+def main_manifest(ap, args):
+    """--split-mode manifest: write one job per (dataset, iteration, embedding, group) under
+    <runs-dir>/<run-id>/, and its MANIFEST.tsv."""
+    import re
+
+    if not args.run_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", args.run_id):
+        ap.error("--split-mode manifest needs --run-id: letters, digits, '.' and '-' "
+                 "(it goes into job names and paths)")
+    for flag in ("split_dir", "datasets_root"):
+        if not getattr(args, flag) or not os.path.isdir(getattr(args, flag)):
+            ap.error(f"--split-mode manifest needs --{flag.replace('_', '-')}, an existing "
+                     f"directory (got {getattr(args, flag)!r})")
+    if args.n_trials < 2:
+        ap.error(f"--n-trials must be at least 2 to be a search at all, got {args.n_trials}")
+    split_dir = os.path.abspath(args.split_dir)
+    datasets_root = os.path.abspath(args.datasets_root)
+    run_root = os.path.abspath(os.path.join(args.runs_dir or RUNS_CV_DIR, args.run_id))
+    # Run-local unless --embedding-cache says otherwise: a manifest-mode file must never
+    # land in (or be read from) the directory another run's jobs read.
+    cache = (os.path.join(run_root, "embeddings") if args.embedding_cache is None
+             else (os.path.abspath(args.embedding_cache) if args.embedding_cache else None))
+    try:
+        wanted = parse_splits(args.splits)
+        models = ([m.strip() for m in args.models.split(",") if m.strip()]
+                  if args.models else None)
+        groups = model_groups(models)
+        walls = parse_wall(args.wall, [g for g, _, _ in groups])
+    except ValueError as exc:
+        ap.error(str(exc))
+    explicit = args.datasets is not None
+    names = ([d.strip() for d in args.datasets.split(",") if d.strip()] if explicit
+             else [csv[:-4] for _, csv, _, _, _ in DATASETS])
+    why_by_name = {csv[:-4]: why for _, csv, _, _, why in DATASETS}
+    # The pilot set names its source by folder, so a name curated from two sources
+    # ('sonar': libsvm__sonar and pmlb__sonar) resolves to the one the pilot ran.
+    source_id = {csv[:-4]: f"{folder[:-len('_data')]}__{csv[:-4]}"
+                 for folder, csv, _, _, _ in DATASETS if folder.endswith("_data")}
+
+    chosen, seen = [], set()
+    for name in names:
+        try:
+            dataset_id = (source_id[name] if not explicit and name in source_id
+                          and os.path.isfile(os.path.join(datasets_root, source_id[name],
+                                                          f"{source_id[name]}.csv"))
+                          else resolve_dataset(name, datasets_root))
+        except ValueError as exc:
+            ap.error(str(exc))
+        if dataset_id in seen:
+            # 'spect,pmlb__spect': one dataset, so one set of jobs (two would share paths).
+            print(f"skipping {name}: {dataset_id} is already selected")
+            continue
+        if dataset_id is None:
+            if explicit:
+                ap.error(f"dataset {name!r} is not in {datasets_root} (neither an id nor a "
+                         f"unique '__{name}' suffix)")
+            print(f"skipping {name}: not curated under {datasets_root}")
+            continue
+        manifest = read_split_manifest(split_dir, dataset_id)
+        if manifest is None:
+            print(f"skipping {dataset_id}: no manifest {dataset_id}.json in {split_dir}")
+            continue
+        ds = curated_dataset(dataset_id, datasets_root)
+        if manifest["sha256"] and ds["sha256"] and manifest["sha256"] != ds["sha256"]:
+            ap.error(f"{dataset_id}: the manifest pins sha256 {manifest['sha256'][:12]}..., "
+                     f"meta.yaml says {ds['sha256'][:12]}...: not the same file")
+        its = list(manifest["splits"]) if wanted == "all" else wanted
+        absent = [i for i in its if i not in manifest["splits"]]
+        if absent:
+            ap.error(f"{dataset_id}: its manifest has no split {absent[0]} (it has "
+                     f"{min(manifest['splits'])}-{max(manifest['splits'])})")
+        why = why_by_name.get(name, why_by_name.get(dataset_id.split("__")[-1],
+                                                    "curated dataset"))
+        chosen.append((ds, manifest, its, why))
+        seen.add(dataset_id)
+    if not chosen:
+        ap.error("no dataset left to generate (see the skip messages above)")
+
+    os.makedirs(run_root, exist_ok=True)
+    # The run tree is the generator's: drop every dataset directory's YAMLs, not only the
+    # chosen ones', so a regeneration with fewer datasets leaves nothing for status.py to
+    # count. As in the split layout, the YAMLs at the top are ours, the run output is not.
+    for sub in sorted(os.listdir(run_root)):
+        ds_dir = os.path.join(run_root, sub)
+        if os.path.isdir(ds_dir):
+            for stale in sorted(os.listdir(ds_dir)):
+                if stale.endswith((".yaml", ".yml")):
+                    os.remove(os.path.join(ds_dir, stale))
+    sel = {"sel_datasets": ",".join(ds["id"] for ds, *_ in chosen),
+           "sel_models": ",".join(g for g, _, _ in groups),
+           "sel_splits": str(args.splits)}
+    rows = []
+    for idx, (ds, manifest, its, why) in enumerate(chosen, start=1):
+        ds_dir = os.path.join(run_root, ds["id"])
+        os.makedirs(ds_dir, exist_ok=True)
+        # The embedding rule is the default mode's, verbatim: backend_for on the width.
+        backend, qubits, embeddings = backend_for(ds["feats"])
+        for iteration in its:
+            repeat, fold = manifest["splits"][iteration]
+            for emb in ast.literal_eval(embeddings):
+                for group, classical, quantum in groups:
+                    name, body = build_manifest_job(
+                        idx, len(chosen), ds, emb, group, classical, quantum, iteration,
+                        repeat, fold, run_root=run_root, run_id=args.run_id,
+                        split_dir=split_dir, n_trials=args.n_trials,
+                        qnn_readout=args.qnn_readout, embedding_cache=cache, why=why)
+                    path = os.path.join(ds_dir, f"{name}.yaml")
+                    with open(path, "w") as fh:
+                        fh.write(body)
+                    rows.append({
+                        "config": name, "dataset": ds["id"], "embedding": emb,
+                        "model": group, "arm": "quantum" if quantum else "classical",
+                        "backend": backend, "qubits": qubits, "rows": ds["rows"],
+                        "n_trials_quantum": args.n_trials, "iter": 1, "exp_h": None,
+                        "bound_h": None, "yaml": path, "split_mode": "manifest",
+                        "iteration": iteration, "repeat": repeat, "fold": fold,
+                        "group": group, "run_id": args.run_id, "wall": walls[group],
+                        "models": ",".join(classical + quantum), "n_trials": args.n_trials,
+                        "qnn_readout": args.qnn_readout, **sel, "split_dir": split_dir,
+                        "datasets_root": datasets_root,
+                        "manifest_sha256": manifest["sha256"] or ""})
+        print(f"{ds['id']:32s} {backend:22s} {qubits:3d} qubits  {embeddings:>16s}  "
+              f"splits {','.join(map(str, its))}")
+    cols = MANIFEST_COLUMNS + MANIFEST_MODE_COLUMNS
+    mpath = os.path.join(run_root, "MANIFEST.tsv")
+    with open(mpath, "w") as fh:
+        fh.write("\t".join(cols) + "\n")
+        for row in rows:
+            fh.write("\t".join("" if row[c] is None else str(row[c]) for c in cols) + "\n")
+    per_group = {g: sum(r["group"] == g for r in rows) for g, _, _ in groups}
+    print(f"\n{len(rows)} jobs written under {run_root} ({len(chosen)} datasets; "
+          + ", ".join(f"{g} {n} at -W {walls[g]}" for g, n in per_group.items())
+          + f"); manifest: {mpath}")
+    print(f"n_trials {args.n_trials} per arm, qnn readout {args.qnn_readout}, embedding "
+          f"cache {cache}")
+    print(f"LSF job names: {JOB_NAME_PREFIX}{args.run_id}_<config>.  Next:  "
+          f"DRY=1 RUNS={run_root} ./submit_runs.sh")
+
+
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    """Appends each flag's default, except where the help names the real one itself.
+
+    A flag whose default depends on other flags is declared with ``default=None`` and
+    resolved in main; its help states the effective default, so '(default: None)'
+    after it would contradict it.
+    """
+
+    def _get_help_string(self, action):
+        if action.default is None and "default" in (action.help or ""):
+            return action.help
+        return super()._get_help_string(action)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Generate one qprofiler config per pilot dataset.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=_HelpFormatter,
     )
     # The pilot exists to catch plumbing failures, so it runs at 5 resamples. The full
     # benchmark runs at 10: the intervals come out ~28% narrower for twice the compute.
@@ -873,16 +1309,81 @@ def main():
     # config differs from its combined parent only in model, embedding, n_jobs and paths.
     ap.add_argument("--layout", choices=("combined", "split"), default="combined",
                     help="one job per dataset, or one per (dataset, embedding, model)")
-    ap.add_argument("--runs-dir", default=RUNS_DIR,
-                    help="root of the per-dataset directories (--layout split)")
+    ap.add_argument("--runs-dir", default=None,
+                    help="root of the per-dataset directories (--layout split; default "
+                         f"{RUNS_DIR}), or of the run trees (--split-mode manifest; default "
+                         f"{RUNS_CV_DIR})")
     ap.add_argument("--self-contained", action="store_true",
                     help="--layout split: write each job as one full config, instead of a "
                          f"job file over its dataset's {PROTOCOL}.yaml")
-    ap.add_argument("--embedding-cache", default=EMBEDDING_CACHE_DIR, metavar="DIR",
+    ap.add_argument("--embedding-cache", default=None, metavar="DIR",
                     help="where the jobs read their embedded features, written by the "
                          "submit script before it submits; '' writes null, so each job "
-                         "embeds for itself")
+                         f"embeds for itself (default {EMBEDDING_CACHE_DIR}; under "
+                         "--split-mode manifest, <runs-dir>/<run-id>/embeddings)")
+    # The fold protocol. Everything below is manifest mode only; see main_manifest.
+    fold = ap.add_argument_group(
+        "--split-mode manifest",
+        "one job per (dataset, split, embedding, group) over frozen split manifests; "
+        "every flag here but --split-mode is refused in internal mode")
+    fold.add_argument("--split-mode", choices=SPLIT_MODES, default="internal",
+                      help="internal: qprofiler draws its own splits (the pilot's configs); "
+                           "manifest: every job runs one split of <split-dir>/<id>.json")
+    fold.add_argument("--split-dir", default=None,
+                      help="the directory of <dataset id>.json manifests (make_splits.py)")
+    fold.add_argument("--datasets-root", default=None,
+                      help="the curated tree, <root>/<id>/<id>.csv + meta.yaml (curate.py); "
+                           "a pilot-local copy works as well as benchmark/datasets")
+    fold.add_argument("--run-id", default=None,
+                      help="names this run: its tree <runs-dir>/<run-id>/ and its LSF jobs "
+                           f"{JOB_NAME_PREFIX}<run-id>_<config> (required)")
+    fold.add_argument("--n-trials", type=int, default=None,
+                      help=f"trials per arm, trial 0 = defaults (default {N_TRIALS_DEFAULT})")
+    fold.add_argument("--wall", default=None,
+                      help="LSF -W per job: one H:MM, or per group, e.g. "
+                           "'classical=0:45,qsvc=2:00,pqk=2:00,qnn=4:00' ('*=H:MM' for the "
+                           f"rest; default {WALL_DEFAULT})")
+    fold.add_argument("--datasets", default=None,
+                      help="comma-separated pilot names ('spect') or curated ids "
+                           "('pmlb__spect'); default: the pilot set, each from its pilot "
+                           "source folder, skipping what is not curated or has no manifest")
+    fold.add_argument("--models", default=None,
+                      help="comma-separated arms; the classical group stays whole unless "
+                           "classical arms are named (default: every arm)")
+    fold.add_argument("--splits", default=None,
+                      help="global iterations: '1-5' (repeat 0), '1,6,11', 'all' "
+                           "(default all)")
+    fold.add_argument("--qnn-readout", choices=QNN_READOUTS, default=None,
+                      help="qnn's observable; 'tune' searches [global, local] (default tune)")
     args = ap.parse_args()
+
+    manifest_only = ("split_dir", "datasets_root", "run_id", "n_trials", "wall", "datasets",
+                     "models", "splits", "qnn_readout")
+    if args.split_mode == "manifest":
+        # The reverse of the refusal below: internal-mode knobs mean nothing here, and a
+        # silently ignored --n-trials-quantum or --budget-hours would be a wrong run.
+        ignored = [flag for flag, f, default in (
+            ("--iter", "n_iter", ITER_DEFAULT), ("--test-size", "test_size", TEST_SIZE_DEFAULT),
+            ("--n-trials-quantum", "n_trials_quantum", N_TRIALS_QUANTUM_DEFAULT),
+            ("--budget-hours", "budget_hours", None), ("--price-grid", "price_grid", False),
+            ("--config-dir", "config_dir", CONFIG_DIR), ("--layout", "layout", "combined"),
+            ("--self-contained", "self_contained", False)) if getattr(args, f) != default]
+        if ignored:
+            ap.error(f"{', '.join(ignored)} do not apply with --split-mode manifest (use "
+                     "--n-trials, --splits and --wall)")
+        for flag, default in (("n_trials", N_TRIALS_DEFAULT), ("wall", WALL_DEFAULT),
+                              ("splits", "all"), ("qnn_readout", "tune")):
+            if getattr(args, flag) is None:
+                setattr(args, flag, default)
+        main_manifest(ap, args)
+        return
+    given = [f"--{f.replace('_', '-')}" for f in manifest_only if getattr(args, f) is not None]
+    if given:
+        ap.error(f"{', '.join(given)} only apply with --split-mode manifest")
+    if args.runs_dir is None:
+        args.runs_dir = RUNS_DIR
+    if args.embedding_cache is None:
+        args.embedding_cache = EMBEDDING_CACHE_DIR
     # Absolute, because qprofiler requires it: each job runs from its own output directory.
     args.embedding_cache = os.path.abspath(args.embedding_cache) if args.embedding_cache else None
 

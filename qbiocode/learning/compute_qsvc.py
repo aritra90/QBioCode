@@ -28,6 +28,7 @@ from qbiocode.learning._tuning import (
     run_function_study,
     seed_from,
 )
+from qbiocode.learning.compute_fold import fold_fixed, function_param_names
 from qbiocode.learning._grid import warn_ignored_hyperparameter
 
 # ====== Scikit-learn imports ======
@@ -406,6 +407,9 @@ def compute_qsvc_opt(
     *,
     n_trials=10,
     validation_split=0.25,
+    validation=None,
+    default_params=None,
+    reseed=None,
 ):
     """Tune QSVC's hyperparameters with Optuna, then run it at the best ones found.
 
@@ -446,6 +450,15 @@ def compute_qsvc_opt(
             automatically when the configured values describe fewer combinations.
         validation_split (float): Fraction of the training data held out to score
             candidates on, default 0.25.
+        validation (ValidationSplit or None): ``split_mode: manifest``. Every trial is
+            then one fit on ``validation.X_fit`` scored on ``validation.X_val``
+            (``validation_split`` is ignored), trials write no kernel dumps, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the inner-holdout search, unchanged.
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+        reseed (callable or None): Resets the global RNGs; called by the tuner before
+            every trial and before the refit.
 
     Returns:
         modeleval (dict): The evaluation of the model at the best hyperparameters found,
@@ -468,6 +481,10 @@ def compute_qsvc_opt(
         "reps": reps,
     }
 
+    fixed = {}
+    if validation is not None:
+        fixed = fold_fixed("qsvc", candidates, default_params,
+                           function_param_names(compute_qsvc))
     best_params = run_function_study(
         compute_qsvc,
         build_search_space("qsvc", candidates),
@@ -479,6 +496,10 @@ def compute_qsvc_opt(
         seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
+        fixed=fixed,
+        validation=validation,
+        default_params=default_params,
+        reseed=reseed,
     )
 
     frame = compute_qsvc(
@@ -491,5 +512,6 @@ def compute_qsvc_opt(
         data_key=data_key,
         verbose=verbose,
         **best_params,
+        **fixed,
     )
     return record_tuned_params(frame, best_params, beg_time)

@@ -1,6 +1,8 @@
 # ====== Base class imports ======
 import hashlib
 import os
+import logging
+import math
 import time
 import warnings
 
@@ -52,6 +54,8 @@ except Exception as exc:  # noqa: BLE001 -- see above
 # beyond a few workers buys nothing that the startup cost does not take back.
 _SEARCH_N_JOBS = min(os.cpu_count() or 1, 8)
 
+logger = logging.getLogger(__name__)
+
 # from qiskit.primitives import Sampler
 from functools import reduce
 
@@ -62,13 +66,24 @@ from qiskit.quantum_info import Pauli
 import qbiocode.utils.qutils as qutils
 
 # ====== Additional local imports ======
-from qbiocode.evaluation.model_evaluation import extract_binary_scores, modeleval
+from qbiocode.evaluation.model_evaluation import (
+    RESULTS_PREFIX,
+    extract_binary_scores,
+    modeleval,
+)
 from qbiocode.learning.compute_pqk import _resolve_data_map
 from qbiocode.learning._tuning import (
     build_search_space,
     record_tuned_params,
     run_function_study,
     seed_from,
+    tuning_metric,
+)
+from qbiocode.learning.compute_fold import (
+    fold_fixed,
+    fold_svc_max_iter,
+    function_param_names,
+    head_scorer,
 )
 
 # Imported for its availability probe and lazy loader rather than for the estimator
@@ -98,6 +113,9 @@ def compute_qpl(
     reps=2,
     classical_models=None,
     data_map="unit",
+    *,
+    head_scoring=None,
+    head_max_iter=None,
 ):
     """
     This function generates quantum circuits, computes projections of the data onto these circuits,
@@ -138,6 +156,14 @@ def compute_qpl(
             1.0; ``'qiskit'`` uses qiskit's default ``phi(x_i, x_j) = (pi - x_i)(pi - x_j)``,
             the map the ``eng_zz``/``qlab_zz`` generators use. ``True``/``False`` are
             accepted as ``'unit'``/``'qiskit'``.
+        head_scoring (str or None): Metric every searched head's ``RandomizedSearchCV``
+            (40 candidates x 5 folds on the projections) picks its config by. None (the
+            default) is sklearn's, each estimator's ``score`` (accuracy).
+            ``compute_qpl_opt`` sets the run's tuning metric under ``split_mode:
+            manifest``. The head searches are part of this one fit -- one trial of an
+            outer study -- not extra tuning budget. The bare TabPFN head has no search.
+        head_max_iter (int or None): libsvm iteration cap of the SVC head's fits. None
+            (the default) is libsvm's -1, no cap. No other head reads it.
 
     Returns:
         modeleval (pd.DataFrame): A DataFrame containing evaluation metrics and model parameters for all models.
@@ -493,19 +519,22 @@ def compute_qpl(
     # iteration. That is why the results label below was hardcoded to "qpl_" + head:
     # there was nothing left to read it from. Same shadowing bug as compute_pqk had.
     model_res = []
+    # None unless compute_qpl_opt asked for the tuning metric: RandomizedSearchCV's own
+    # default, so an internal-mode head search is unchanged.
+    scoring = head_scorer(head_scoring, args)
     for method in classical_models:
         if method == "rf":
-            estimator = create_rf_model(args["seed"])
+            estimator = create_rf_model(args["seed"], scoring=scoring)
         elif method == "svc":
-            estimator = create_svc_model(args["seed"])
+            estimator = create_svc_model(args["seed"], scoring=scoring, max_iter=head_max_iter)
         elif method == "mlp":
-            estimator = create_mlp_model(args["seed"])
+            estimator = create_mlp_model(args["seed"], scoring=scoring)
         elif method == "lr":
-            estimator = create_lr_model(args["seed"])
+            estimator = create_lr_model(args["seed"], scoring=scoring)
         elif method == "xgb":
-            estimator = create_xgb_model(args["seed"])
+            estimator = create_xgb_model(args["seed"], scoring=scoring)
         elif method == "catboost":
-            estimator = create_catboost_model(args["seed"])
+            estimator = create_catboost_model(args["seed"], scoring=scoring)
         elif method == "tabpfn":
             estimator = create_tabpfn_model(args["seed"])
         else:
@@ -566,6 +595,12 @@ def compute_qpl(
         # Only when not the default, so 'unit' rows stay identical to earlier results.
         if data_map != "unit":
             hyperparameters["data_map"] = data_map
+        # Likewise only when set, so internal-mode rows are unchanged.
+        # The bare TabPFN head has no search, so no head metric is recorded for it.
+        if head_scoring is not None and method != "tabpfn":
+            hyperparameters["head_scoring"] = head_scoring
+        if head_max_iter is not None and method == "svc":
+            hyperparameters["head_max_iter"] = head_max_iter
         model_params = hyperparameters
 
         model_res.append(
@@ -599,7 +634,7 @@ def compute_qpl(
     return model_res
 
 
-def create_xgb_model(seed):
+def create_xgb_model(seed, scoring=None):
     # Initialize the XGBoost Classifier
     if not XGBOOST_AVAILABLE:
         raise ImportError(
@@ -643,12 +678,14 @@ def create_xgb_model(seed):
         cv=5,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
+        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
+        scoring=scoring,
     )
 
     return xgb_model
 
 
-def create_catboost_model(seed):
+def create_catboost_model(seed, scoring=None):
     """A searched CatBoost head, matching how the other tree-based heads are built.
 
     Two CatBoost-specific points:
@@ -702,6 +739,8 @@ def create_catboost_model(seed):
         cv=5,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
+        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
+        scoring=scoring,
     )
 
     return catboost_model
@@ -731,7 +770,7 @@ def create_tabpfn_model(seed):
     return classifier_cls(random_state=seed)
 
 
-def create_lr_model(seed):
+def create_lr_model(seed, scoring=None):
     # Initialize the Logistic Regression Classifier
     lr = LogisticRegression(random_state=seed, max_iter=1000)
 
@@ -749,12 +788,14 @@ def create_lr_model(seed):
         cv=5,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
+        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
+        scoring=scoring,
     )
 
     return lr_model
 
 
-def create_rf_model(seed):
+def create_rf_model(seed, scoring=None):
     # Initialize the Random Forest Classifier
     rf = RandomForestClassifier(random_state=seed)
 
@@ -774,12 +815,14 @@ def create_rf_model(seed):
         cv=5,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
+        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
+        scoring=scoring,
     )
 
     return rf_model
 
 
-def create_mlp_model(seed):
+def create_mlp_model(seed, scoring=None):
     mlp_param_distributions = {
         "hidden_layer_sizes": [(128, 64, 32, 10), (64, 32, 10), (128, 64, 32)],
         "activation": ["identity", "logistic", "tanh", "relu"],
@@ -798,20 +841,22 @@ def create_mlp_model(seed):
         cv=5,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
+        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
+        scoring=scoring,
     )
 
     return mlp_model
 
 
-def create_svc_model(seed):
+def create_svc_model(seed, scoring=None, max_iter=None):
     svc_param_distributions = {
         "C": [0.1, 1, 10, 100],
         "gamma": [0.001, 0.01, 0.1, 1],
         "kernel": ["linear", "rbf", "poly", "sigmoid"],
     }
 
-    # Initialize the SVC
-    svc = SVC(random_state=seed)
+    # Initialize the SVC. max_iter only when given, so the default head is unchanged.
+    svc = SVC(random_state=seed) if max_iter is None else SVC(random_state=seed, max_iter=max_iter)
 
     # Initialize RandomizedSearchCV
     svc_model = RandomizedSearchCV(
@@ -821,6 +866,8 @@ def create_svc_model(seed):
         cv=5,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
+        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
+        scoring=scoring,
     )
 
     return svc_model
@@ -847,6 +894,9 @@ def compute_qpl_opt(
     *,
     n_trials=10,
     validation_split=0.25,
+    validation=None,
+    default_params=None,
+    reseed=None,
 ):
     """Tune QPL's hyperparameters with Optuna, then run it at the best ones found.
 
@@ -891,6 +941,21 @@ def compute_qpl_opt(
             automatically when the configured values describe fewer combinations.
         validation_split (float): Fraction of the training data held out to score
             candidates on, default 0.25.
+        validation (ValidationSplit or None): ``split_mode: manifest``. Every trial is
+            then one fit on ``validation.X_fit`` scored on ``validation.X_val``
+            (``validation_split`` is ignored), trials write no kernel dumps, and the
+            unsearched keys of ``default_params`` are fixed for the trials and the refit
+            (see :func:`qbiocode.learning.compute_fold.fold_fixed`). None (the default)
+            is the inner-holdout search, unchanged. The heads' hidden searches are then
+            scored with the tuning metric and the SVC head is capped at
+            ``FOLD_SVC_MAX_ITER`` libsvm iterations (``head_scoring``/``head_max_iter``
+            of :func:`compute_qpl`); they are part of one trial's fit, not extra budget.
+            Trials are selected on the mean tuning metric over the heads, but every
+            head's row gets its own ``trials_<model>_<head>`` log and its own
+            ``tuning_score`` (its validation score at the refit trial).
+        default_params (dict or None): The arm's default config, enqueued as trial 0.
+        reseed (callable or None): Resets the global RNGs; called by the tuner before
+            every trial and before the refit.
 
     Returns:
         modeleval (dict): The evaluation of the model at the best hyperparameters found,
@@ -913,8 +978,27 @@ def compute_qpl_opt(
     # is the MEAN tuning_metric across heads (see _tuning._metric_of), so scoring candidates
     # on the default six while the final fit ran a different set would have chosen the
     # projection that suited heads the config excluded.
+    fixed = {"classical_models": classical_models}
+    compute_fn = compute_qpl
+    trial_frames = None
+    if validation is not None:
+        # An explicit head list wins; None falls back to the configured one (qpl_args),
+        # which default_params carries, rather than to compute_qpl's six.
+        explicit = {} if classical_models is None else {"classical_models": classical_models}
+        fixed = fold_fixed("qpl", candidates, default_params,
+                           function_param_names(compute_qpl), explicit)
+        # Every searched head's hidden 40 x 5 RandomizedSearchCV picks by the tuning
+        # metric, and the SVC head's libsvm fits are capped. Both are part of one
+        # trial's fit, not extra budget. The plain metric name keeps the log plain.
+        fixed.setdefault("head_scoring", tuning_metric(args))
+        # Assigned outright: a configured head_max_iter below 1 is libsvm's "no cap".
+        fixed["head_max_iter"] = fold_svc_max_iter(fixed.get("head_max_iter"))
+        # Each trial's frame, by trial number, for the per-head trial logs below.
+        trial_frames = {}
+        compute_fn = _recording(compute_qpl, trial_frames)
+
     best_params = run_function_study(
-        compute_qpl,
+        compute_fn,
         build_search_space("qpl", candidates),
         X_train,
         y_train,
@@ -924,7 +1008,10 @@ def compute_qpl_opt(
         seed=seed_from(args),
         validation_split=validation_split,
         data_key=data_key,
-        fixed={"classical_models": classical_models},
+        fixed=fixed,
+        validation=validation,
+        default_params=default_params,
+        reseed=reseed,
     )
 
     frame = compute_qpl(
@@ -936,7 +1023,127 @@ def compute_qpl_opt(
         model=model,
         data_key=data_key,
         verbose=verbose,
-        classical_models=classical_models,
         **best_params,
+        **fixed,
     )
-    return record_tuned_params(frame, best_params, beg_time)
+    head_scores = None
+    if trial_frames is not None:
+        head_scores = _attach_head_trial_logs(frame, best_params, trial_frames, model,
+                                              tuning_metric(args))
+    frame = record_tuned_params(frame, best_params, beg_time)
+    if head_scores:
+        _set_head_tuning_scores(frame, model, head_scores)
+    return frame
+
+
+def _recording(compute_fn, frames):
+    """``compute_fn``, storing each trial's frame in ``frames`` under its trial number.
+
+    The number is the running validation-study trial's
+    (:func:`~qbiocode.learning._tuning.current_trial_number`); a call outside a study
+    is not stored. A call that raised stores nothing, so its trial has no frame.
+    """
+    from qbiocode.learning._tuning import current_trial_number
+
+    def recorded(*args, **kwargs):
+        frame = compute_fn(*args, **kwargs)
+        number = current_trial_number()
+        if number is not None:
+            frames[number] = frame
+        return frame
+
+    return recorded
+
+
+def _head_of(frame, head):
+    """``(metrics, y_pred, y_score)`` of the ``qpl_<head>`` rows of one trial's frame."""
+    label = f"qpl_{head}"
+
+    def first(column):
+        if frame is None or column not in frame.columns:
+            return None
+        for value in frame[column]:
+            if isinstance(value, (dict, np.ndarray, list)) or (
+                value is not None and not (isinstance(value, float) and math.isnan(value))
+            ):
+                return value
+        return None
+
+    metrics = first(RESULTS_PREFIX + label)
+    y_pred = first("y_predicted_" + label)
+    y_score = first("y_score_" + label)
+    if y_score is not None and np.ndim(y_score) != 1:
+        y_score = None
+    return (
+        metrics if isinstance(metrics, dict) else None,
+        None if y_pred is None else np.asarray(y_pred),
+        None if y_score is None else np.asarray(y_score),
+    )
+
+
+def _attach_head_trial_logs(frame, best_params, trial_frames, model, metric):
+    """Give every head of the refit its own ``trials_<model>_<head>`` log.
+
+    The study scores a trial by the mean of ``metric`` over the heads (see
+    ``_tuning._metric_of``) and has no single prediction to keep for a multi-head frame.
+    Each head's log copies the study's trials -- params, state, duration, default flag
+    -- with that head's own validation score and predictions. Written before
+    :func:`record_tuned_params`, which then leaves these columns alone.
+
+    ``trial_frames`` maps a trial number to that trial's frame. A trial with none (it
+    failed before or inside the call) keeps its params and state, with a NaN score and
+    no predictions; the other trials are unaffected.
+
+    Returns:
+        dict: head -> its validation score at the refit trial, or None when the study
+        carries no trials (logged; the study-level log is then attached to every head
+        instead, as for any other model).
+    """
+    from qbiocode.evaluation.protocol import TRIALS_PREFIX, TrialRecord
+    from qbiocode.evaluation.protocol import trial_log as protocol_trial_log
+
+    trials = getattr(best_params, "trials", None)
+    if not trials:
+        logger.warning("qpl per-head trial logs skipped: the study recorded no trials.")
+        return None
+    missing = [t.number for t in trials if t.number not in trial_frames]
+    if missing:
+        logger.info("qpl trials %s have no frame (they failed before scoring); their "
+                    "per-head entries carry no score or predictions.", missing)
+    prefix = f"{RESULTS_PREFIX}{model}_"
+    heads = [c[len(prefix):] for c in frame.columns if c.startswith(prefix)]
+    scores = {}
+    for head in heads:
+        records = []
+        for trial in trials:
+            metrics, y_pred, y_score = _head_of(trial_frames.get(trial.number), head)
+            value = math.nan
+            if trial.state == "COMPLETE" and metrics is not None:
+                value = float(metrics.get(metric, math.nan))
+            records.append(TrialRecord(
+                number=trial.number, params=dict(trial.params), value=value,
+                state=trial.state, duration_s=trial.duration_s,
+                is_default=trial.is_default, y_pred=y_pred, y_score=y_score,
+            ))
+            if trial.number == best_params.best_trial:
+                scores[head] = value
+        log = protocol_trial_log(
+            records, metric=best_params.metric, best=best_params.best_trial,
+            val_idx=best_params.val_idx, y_val=best_params.y_val, fixed=best_params.fixed,
+        )
+        column = f"{RESULTS_PREFIX}{model}_{head}"
+        cells = [log if isinstance(v, dict) else None for v in frame[column]]
+        series = pd.Series([None] * len(cells), index=frame.index, dtype=object)
+        for position, cell in enumerate(cells):
+            series.iat[position] = cell
+        frame[TRIALS_PREFIX + f"{model}_{head}"] = series
+    return scores
+
+
+def _set_head_tuning_scores(frame, model, head_scores):
+    """Overwrite each head's ``tuning_score`` (the study's mean) with its own."""
+    for head, score in head_scores.items():
+        column = f"{RESULTS_PREFIX}{model}_{head}"
+        for value in frame[column]:
+            if isinstance(value, dict):
+                value["tuning_score"] = score

@@ -8,13 +8,17 @@
                                      submits); failed and partial configs are included
     ./status.py --no-lsf             from the result files alone, without asking bjobs
     watch -n 120 ./status.py         a live board
+    ./status.py --runs-dir runs_cv/ID    a manifest-mode run (--split-mode manifest)
 
-The unit is one YAML under runs/<dataset>/, i.e. one (dataset, embedding, model) job. The
-states, decided in this order:
+The unit is one YAML under runs/<dataset>/, i.e. one (dataset, embedding, model) job -- or,
+in a manifest-mode run, one (dataset, split, embedding, group) job. The states, decided in
+this order:
 
   done     a run directory holds a ModelResults.csv row for every expected (embedding,
-           iteration, model), i.e. `iter` rows for a split config
-  running  LSF says RUN (or suspended) for the job named p10_<config>
+           iteration, model), i.e. `iter` rows for a split config, and len(splits) x
+           the models of its group for a split_mode: manifest config
+  running  LSF says RUN (or suspended) for the job named p10_<config>, or p10_<run_id>_<config>
+           in a manifest-mode run (MANIFEST.tsv run_id), so another run's jobs never count
   pending  LSF says PEND
   partial  not live, and the best run directory has some rows but not all: killed at the
            wall, or died mid-way. Resubmitting reruns it from iteration 1 in a new run
@@ -98,11 +102,16 @@ def read_config(path):
     """The fields status needs, read by regex: 208 full YAML parses would dominate a watch.
 
     A composed job file sets only its job keys; iter comes from the _protocol.yaml its
-    defaults list names, read once per directory.
+    defaults list names, read once per directory. A split_mode: manifest config runs one
+    iteration per entry of its ``splits`` list and has no ``iter``, so that list's length
+    stands in for it.
     """
     layers = _layers(path)
-    it = re.match(r"\d+", _value(layers, "iter"))
-    n_iter = int(it.group(0)) if it else 0
+    if re.match(r"['\"]?manifest\b", _value(layers, "split_mode")):
+        n_iter = len(_yaml_list(layers, "splits"))
+    else:
+        it = re.match(r"\d+", _value(layers, "iter"))
+        n_iter = int(it.group(0)) if it else 0
     n_emb = max(1, len(_yaml_list(layers, "embeddings")))
     n_models = len(_yaml_list(layers, "classical_model")) + len(_yaml_list(layers, "quantum_model"))
     name = os.path.splitext(os.path.basename(path))[0]
@@ -143,8 +152,27 @@ def best_run(cfg):
     return max(reversed(runs), key=lambda r: r[1]) if runs else (None, 0)
 
 
-def lsf_jobs():
-    """{config: (jobid, stat, host, run_seconds)} for this user's p10_ jobs, latest wins."""
+def job_prefix(runs_dir):
+    """The LSF job-name prefix of the jobs in runs_dir, as submit_runs.sh sets it.
+
+    A manifest-mode tree names its run in MANIFEST.tsv's run_id column, and its jobs are
+    p10_<run_id>_<config>; any other tree's are p10_<config>.
+
+    Args:
+        runs_dir: The directory holding MANIFEST.tsv.
+
+    Returns:
+        str: ``p10_<run_id>_`` or ``p10_``.
+    """
+    for row in load_manifest(runs_dir).values():
+        if row.get("run_id"):
+            return f"{JOB_PREFIX}{row['run_id']}_"
+    return JOB_PREFIX
+
+
+def lsf_jobs(prefix=JOB_PREFIX):
+    """{config: (jobid, stat, host, run_seconds)} for this user's jobs named prefix+config,
+    latest wins."""
     try:
         out = subprocess.run(
             ["bjobs", "-a", "-noheader", "-o",
@@ -157,12 +185,12 @@ def lsf_jobs():
     jobs = {}
     for line in out.splitlines():
         parts = line.split("|")
-        if len(parts) < 5 or not parts[2].startswith(JOB_PREFIX):
+        if len(parts) < 5 or not parts[2].startswith(prefix):
             continue
         jobid, stat, name, host, rt = parts[:5]
         secs = int(re.match(r"\s*(\d+)", rt).group(1)) if re.match(r"\s*\d+", rt) else 0
         host = host.split(":")[0].split("*")[-1] if host not in ("", "-") else ""
-        cfg = name[len(JOB_PREFIX):]
+        cfg = name[len(prefix):]
         # Job ids grow, so the highest one is the latest attempt.
         if cfg not in jobs or int(jobid) > int(jobs[cfg][0]):
             jobs[cfg] = (jobid, stat, host, secs)
@@ -235,7 +263,7 @@ def main():
     paths = [p for p in args.yamls if is_job(p)] if args.yamls else find_configs(args.runs_dir)
     if not paths:
         sys.exit(f"no configs under {args.runs_dir}; run generate_pilot_configs.py --layout split")
-    jobs = {} if args.no_lsf else lsf_jobs()
+    jobs = {} if args.no_lsf else lsf_jobs(job_prefix(args.runs_dir))
     manifest = load_manifest(args.runs_dir)
     cfgs = [read_config(p) for p in paths]
     for c in cfgs:
@@ -279,7 +307,8 @@ def main():
             print(f"{c['config']:45s} {c['state']:8s} rows {c['rows']}/{c['expected']:<3d} "
                   f"{('job ' + job[0]) if job else '':12s} {host:12s} "
                   f"{('%.2fh' % el) if job else '':>7s} exp {exp_h or '-':>6s} "
-                  f"bound {bound_h or '-':>6s}{flag}")
+                  f"bound {bound_h or '-':>6s}{flag}"
+                  + (f" wall {m['wall']}" if m.get("wall") else ""))
             if args.why and c["state"] in ("failed", "partial", "running"):
                 print("\n".join(why(c)))
 

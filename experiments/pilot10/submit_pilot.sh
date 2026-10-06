@@ -10,6 +10,10 @@
 #         DRY=1 ./submit_pilot.sh      print the bsub lines without submitting
 #
 # Before submitting, it writes the embedded features the jobs read (see embedding_cache).
+#
+# Combined configs only. A manifest-mode run (generate_pilot_configs.py --split-mode
+# manifest) is one job per (dataset, split, embedding, group) under runs_cv/<run-id>, with a
+# per-job wall and run-named jobs; submit it with RUNS=runs_cv/<run-id> ./submit_runs.sh.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 PY=/dccstor/boseukb/Q/envs/qbc/bin/python
@@ -201,6 +205,11 @@ for cfg in "${configs[@]}"; do
   selected+=("$cfg")
 done
 [ ${#selected[@]} -eq 0 ] && { echo "no config matched the selection"; exit 1; }
+if manifest=$(grep -l '^split_mode: manifest' "${selected[@]}"); then
+  echo "split_mode: manifest configs are submitted by submit_runs.sh, not here:" >&2
+  printf '  %s\n' $manifest >&2
+  exit 1
+fi
 
 # The embedded features, before any job goes out. A job reads them from its config's
 # embedding_cache and never computes them, so the combined and the split run of a dataset,

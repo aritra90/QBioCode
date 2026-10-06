@@ -161,8 +161,10 @@ n_trials_quantum: 12
 # Tune once, on iteration 0, then reuse those parameters for the remaining iterations.
 # This is what makes tuning the quantum arm affordable: cost per arm becomes
 # n_trials_quantum + (iter - 1) fits instead of iter x n_trials_quantum.
-# It handicaps ONLY the quantum side (the classical arm re-tunes every iteration), so a
-# quantum win measured this way is a lower bound.
+# It is OPTIMISTIC for the quantum side, not a handicap: the resamples overlap (73-87% of
+# a later iteration's test rows were iteration-0 training rows), while the classical arm
+# re-tunes every iteration. A quantum win measured this way is not a lower bound; set
+# False (or use disjoint folds) for confirmatory runs.
 freeze_quantum_params: True
 # Where the frozen parameters are cached. Per-config, so two configs cannot collide.
 # The cache key includes the backend, so switching simulators re-tunes instead of
