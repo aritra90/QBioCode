@@ -65,13 +65,20 @@ BASE_OVERRIDES = [
     "n_jobs=2",
 ]
 
+# The shipped config tunes by default (grid_search: True, paired with tune_quantum), so a
+# run that is meant to be untuned has to say so. Without it these fixtures ran 50 Optuna
+# trials of CatBoost each, wrote ``catboost_opt`` rows without ``Model_Parameters``, and
+# the file outran a 25-minute timeout. Both keys: model_run refuses tune_quantum without
+# grid_search, quantum models or not.
+UNTUNED = ["grid_search=False", "tune_quantum=False"]
+
 
 @pytest.fixture(scope="session")
 def catboost_run(tmp_path_factory):
     """CatBoost untuned, beside another model so the joblib fan-out is real."""
     return run_qprofiler(
         tmp_path_factory.mktemp("catboost-untuned"),
-        BASE_OVERRIDES + ["model=[catboost,rf]", "seed=7"],
+        BASE_OVERRIDES + UNTUNED + ["model=[catboost,rf]", "seed=7"],
     )
 
 
@@ -79,7 +86,7 @@ def catboost_run(tmp_path_factory):
 def catboost_run_dir(tmp_path_factory):
     """A run kept with its working directory, for inspecting what it left behind."""
     work_dir = tmp_path_factory.mktemp("catboost-litter")
-    run_qprofiler(work_dir, BASE_OVERRIDES + ["model=[catboost,rf]", "seed=7"])
+    run_qprofiler(work_dir, BASE_OVERRIDES + UNTUNED + ["model=[catboost,rf]", "seed=7"])
     return work_dir
 
 
@@ -139,7 +146,7 @@ class TestCatBoostThroughQProfiler:
         """
         again = run_qprofiler(
             tmp_path_factory.mktemp("catboost-untuned-again"),
-            BASE_OVERRIDES + ["model=[catboost,rf]", "seed=7"],
+            BASE_OVERRIDES + UNTUNED + ["model=[catboost,rf]", "seed=7"],
         )
         pd.testing.assert_frame_equal(
             metric_signature(catboost_run), metric_signature(again)
@@ -399,7 +406,7 @@ class TestTabPFNThroughQProfiler:
             pytest.skip(tabpfn_skip_reason)
         frame = run_qprofiler(
             tmp_path_factory.mktemp("tabpfn-untuned"),
-            BASE_OVERRIDES + ["model=[tabpfn]", "seed=7"],
+            BASE_OVERRIDES + UNTUNED + ["model=[tabpfn]", "seed=7"],
         )
         assert set(frame["model"]) == {"tabpfn"}
         values = pd.to_numeric(frame["accuracy"])
@@ -602,6 +609,8 @@ class TestTheBugsFoundInReview:
             "folder_path=data",
             "file_dataset=ALL",
             *BASE_OVERRIDES,
+            # Untuned: a tuned classical arm does not read catboost_args at all.
+            *UNTUNED,
             "model=[catboost]",
             "+catboost_args.subsample=0.8",
             "+catboost_args.bagging_temperature=0.5",

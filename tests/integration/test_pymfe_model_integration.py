@@ -48,12 +48,12 @@ merged by ``dict.update``, written and read back through ``csv`` -- and then han
 to every consumer in turn: QuantumSage, ``compute_results_correlation``,
 ``qml_winner`` and ``combine_results``.
 
-Two of those consumers are known to be broken independently of the pyMFE work, and
-the tests that name them are ``xfail(strict=True)`` so that a fix cannot land
-unnoticed: ``combine_results`` deletes the resumed run's ``Dataset`` column, and
-``qml_winner``'s ``winner_eval_score`` concatenates two differently-indexed frames.
-The second one is *worse* on the wider table -- the misalignment fabricates NaN in
-proportion to the column count -- which is exactly why it belongs here.
+One of those consumers is known to be broken independently of the pyMFE work, and the
+test that names it is ``xfail(strict=True)`` so that a fix cannot land unnoticed:
+``combine_results`` deletes the resumed run's ``Dataset`` column. A second one,
+``qml_winner``'s ``winner_eval_score``, concatenated two differently-indexed frames
+and so fabricated NaN in proportion to the column count. It is now a merge on
+``Dataset``, and its test is an ordinary one.
 
 Cheapest possible models (``dt``, ``lr``, ``nb``, all under 0.01 s) and four tiny
 datasets: this is a test of the seam, not of the learners.
@@ -122,8 +122,10 @@ N_COMPLEXITY_COLUMNS = len(NATIVE_COMPLEXITY_COLUMNS) + N_MFE_COLUMNS + N_TASK_C
 
 #: The keys ``model_evaluation.modeleval`` puts in every result dict with tuning off.
 #: ``time`` is in there too -- it is wall-clock, but it is a column of the results
-#: file all the same, so it counts against the schema arithmetic below.
-METRIC_KEYS = ("model", "accuracy", "f1_score", "time", "auc", "Model_Parameters")
+#: file all the same, so it counts against the schema arithmetic below. The fair
+#: selection scores on balanced accuracy, MCC and PR-AUC, so those are in the row too.
+METRIC_KEYS = ("model", "accuracy", "f1_score", "balanced_accuracy", "mcc", "time", "auc",
+               "pr_auc", "Model_Parameters")
 
 #: What QProfiler adds around the two halves.
 METADATA_KEYS = ("Dataset", "embeddings", "iteration")
@@ -506,7 +508,9 @@ class TestTheCorrelationAnalysis:
         assert len(expected) == N_COMPLEXITY_COLUMNS
 
         groups = sage_input["model_embed_datatype"].nunique()
-        metrics = ["accuracy", "f1_score", "time", "auc"]
+        # Detected from the table (available_metric_columns), so the three scores the
+        # fair selection added are correlated as well, not only the original four.
+        metrics = ["accuracy", "f1_score", "balanced_accuracy", "mcc", "time", "auc", "pr_auc"]
         assert len(correlations) == groups * len(metrics) * len(expected)
         assert set(correlations["metric"]) == set(metrics)
 
@@ -584,7 +588,7 @@ def _legacy_rawevals(datasets):
 
 
 class TestTheWinnerFinder:
-    """``qml_winner`` slices its output positionally, and the table got five times wider."""
+    """``qml_winner`` on the pyMFE-wide table: which rows count as quantum, what it writes."""
 
     WINNERS = DATASETS[:2]
 
@@ -691,15 +695,15 @@ class TestTheWinnerFinder:
     def test_the_score_triple_survives_however_wide_the_evaluation_is(
         self, from_csv, assembled, tmp_path, width
     ):
-        """``qc_method_and_score.iloc[:, -3:]`` is a positional slice, and that reads
-        as a hazard on a 126-column table.
+        """``_winner_score.csv`` holds the dataset, the model, its parameters and its F1
+        score, at either evaluation width.
 
-        It is not: the slice is taken from the five-column groupby result, not from
-        the evaluation frame, so the three columns it keeps are the parameter column,
-        the model and the F1 score at either width. Pinning it both ways is what
-        keeps a future change to the groupby keys -- one more grouping column and the
-        slice silently drops ``model`` -- from becoming a wrong ``_winner_score.csv``
-        that nobody reads closely.
+        It used to be ``qc_method_and_score.iloc[:, -3:]``, a positional slice of the
+        groupby result: one more grouping column and it would silently have dropped
+        ``model``. The columns are now picked by name, and ``Dataset`` is kept so the
+        evaluations can be merged on it (the next test). Pinning the header at both
+        widths keeps a wrong ``_winner_score.csv`` that nobody reads closely from
+        coming back.
         """
         raw = (
             assembled["raw"] if width == "pymfe"
@@ -709,22 +713,21 @@ class TestTheWinnerFinder:
         qml_winner(scored, raw, str(tmp_path), width)
 
         written = pd.read_csv(tmp_path / f"{width}_winner_score.csv")
-        assert list(written.columns) == ["model", "Model_Parameters", "f1_score"]
+        assert list(written.columns) == ["Dataset", "model", "Model_Parameters", "f1_score"]
+        assert sorted(written["Dataset"]) == sorted(self.WINNERS)
         assert set(written["model"]) == {self.QML_NAME}
         assert len(written) == len(self.WINNERS)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="qc_winner_finder.py:128, `pd.concat([winner_evals_df, "
-        "winner_scores_df], axis=1)`, concatenates winner_evals_df (indexed by "
-        "RawDataEvaluation row) with winner_scores_df (indexed by df_across_split "
-        "row), so _winner_eval_score.csv gains a row per non-overlapping "
-        "index and fills the rest with NaN. Pre-existing, but the fabricated NaN "
-        "scales with the complexity block: 126 columns make it far worse than 23.",
-    )
     def test_each_winning_dataset_gets_exactly_one_row_of_evaluations(
         self, from_csv, assembled, tmp_path
     ):
+        """One row of ``_winner_eval_score.csv`` per winning dataset, none fabricated.
+
+        It was ``pd.concat([winner_evals_df, winner_scores_df], axis=1)``, which aligned
+        RawDataEvaluation rows with df_across_split rows by index. The file gained a row
+        per non-overlapping index, padded with NaN, and the wider the complexity block
+        the more NaN it fabricated. It is now a merge on ``Dataset``.
+        """
         scored = _scored_table(from_csv, self.WINNERS, self.QML_NAME)
         _, winner_eval_score, _ = qml_winner(
             scored, assembled["raw"], str(tmp_path), "tag"
