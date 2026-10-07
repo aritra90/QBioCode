@@ -8,6 +8,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### A bandwidth for the quantum kernels: `bandwidth` on qsvc, pqk and qpl
+
+- **`compute_qsvc`, `compute_pqk` and `compute_qpl` take `bandwidth`**, and their `_opt`
+  twins search it. The features reach the feature map as `bandwidth * x`
+  (`qutils.apply_bandwidth`, which refuses anything but a positive finite number). The
+  qiskit maps rotate by `2 x` and QProfiler scales features to [0, 1], so until now every
+  quantum kernel ran at one angle range while the classical SVC tuned gamma.
+  - In the kernel_exps torus study the bandwidth alone moved a fidelity kernel by up to
+    0.26 F1. Its optimum was about pi for `Z` and pi/32 for `ZZ`.
+  - On the 2026-10-06 dry run's 8-feature torus, the Z map scores 0.854 at bandwidth 1 and
+    0.920 at pi; chosen on validation (pi on 14 of 15 folds) it scores 0.914. That beats
+    the RBF SVC (0.855) and trails catboost (0.968). It is still a product kernel with an
+    exact classical twin.
+- **1.0 is the old behaviour bit for bit:** the same results, no `bandwidth` in the
+  parameter column, and the historical projection-cache filenames. Any other value is
+  recorded, and keys its own projection cache.
+- **The shipped `config.yaml` and the pilot10 template search it** for qsvc, pqk and qpl:
+  `{low: 0.0982, high: 6.2832, log: true}` (pi/32 to 2*pi). vqc and qnn do not take it.
+- `tests/test_quantum_bandwidth.py` pins the five properties: b on X equals 1 on b·X; 1.0
+  is unchanged; caches never shared; the twins search and record it; bad values refused.
+
+#### Quantum positive controls chosen without circularity: control gates
+
+- **`benchmark/control_gates.py`** accepts a positive control on its generator and its
+  matched kernel alone, from a pilot draw that never becomes a benchmark row:
+  - G1, the matched map entangles;
+  - G2, the matched kernel is not concentrated;
+  - G3, the matched kernel learns the labels at the benchmark's n;
+  - G4, its geometric difference from RBF leaves room for an advantage.
+
+  No gate fits a classical model, so choosing a control is not circular. The thresholds,
+  the pilot seed and `GATE_VERSION` are the pre-registration.
+- **`create_synthetic_datasets.py` applies them** to `ql_zz`, `eng_qiskit` and `eng_unit`.
+  A failure is skipped with its reasons, or written as `gate_rejected` with
+  `--keep-failed-controls`. `--no-control-gates` turns them off. The record goes into
+  meta.yaml.
+  - The 2026-10-06 dry run's `ql_zz` (8 qubits, bandwidth 1) is rejected before any run:
+    concentrated (off-diagonal 0.007), and its own matched kernel learns 0.795. It lost
+    to TabPFN 0.902 in the run.
+  - At bandwidth 0.25 the same 8-qubit control is accepted.
+- **`--bandwidth`** for the ql families, and **a fixed concept per (family, d, k)** for
+  them, so their seeds are samples of one concept.
+- **`angle_encoding` becomes a `product_kernel_control`.** Its kernel is a product of
+  one-qubit kernels, so it fails G1 by construction and a win on it is not quantum.
+- The gated controls' prediction no longer claims a win over every classical arm: the
+  gates guarantee learnability, not that.
+- **`generate_quantum_label_datasets(concept_seed=, bandwidth=)`.** `concept_seed` draws
+  the Hamiltonian from its own seed. `bandwidth` encodes `b * x` and still writes `x`.
+  The defaults reproduce every earlier dataset byte for byte, and only off-default values
+  add a name suffix (`_bw<b>`, `_c<seed>`) and a metadata key.
+
+#### Scaling the benchmark: synthetic datasets, corpus selection, batched jobs, automatic walls
+
+- **`benchmark/create_synthetic_datasets.py`** writes synthetic datasets in curate.py's
+  format, ready for make_splits.py. `--shapes` (torus, sphere, concentric_circles,
+  concentric_spheres, checkerboard, random_manifold, swiss_roll, half_moons, parity,
+  perm_parity, simple_linear; `benchmark/synthetic_shapes.py`) and `--quantum`
+  (angle_encoding, plus the qbiocode.data_generation families gs_sparse, gs_e2e, te, hl,
+  ql_zz, ql_evo, eng_qiskit, eng_unit; `benchmark/synthetic_quantum.py`), each a list or
+  `all`, at every `--k`, `--d`, `--n` and `--seeds` the family accepts.
+  - Labels are functions of latent coordinates only, re-derivable from `latent.npz`. The
+    reference sphere and swiss roll carried their band function in a feature; these do not.
+  - Embedding maps are fixed per (family, d, k), so seeds sample one manifold.
+  - Feature noise is reflected back into [0, 1] at the cube faces, not clipped. Clipping
+    put about 5% of a torus's entries at exactly 0 or 1, in every column; that tied rows
+    in the kNN measures and made every scaler fitted on a subset identical to one fitted
+    on all rows.
+  - Each meta.yaml records the label rule, label cells and training points per cell, the
+    role (shape / positive_control / negative_control / classically_easy /
+    difficulty_ladder / classical_favoured), and for controls the matched arm and a
+    pre-registered prediction.
+  - Output is byte-deterministic and listed in `inventory_synthetic.csv`.
+- **`benchmark/holdout.py`** draws the meta-analysis hold-out by cluster (a synthetic family
+  is one cluster), seeded and written once.
+- **`benchmark/README.md`** documents the whole workflow, from curation to the meta-analysis.
+- **`generate_pilot_configs.py --split-mode manifest`:**
+  - `--datasets all` (every curated dataset with a manifest) and `--datasets-file` (a CSV
+    with a `dataset_id` column, or one name per line);
+  - `--splits-per-job` (`N`, `all`, or per group, e.g. `classical=all,*=1`; a batched job
+    is named `..._i01-15_<group>` and its YAML runs those splits in turn);
+  - `--wall auto`, which sets each job's wall from the cost model and fills `exp_h` and
+    `bound_h`;
+  - MANIFEST.tsv gains `n_splits` and `cost_extrapolated`, and a batched row's `iteration`,
+    `repeat` and `fold` are `;`-joined.
+- **`cost_model.py`: manifest-mode laws** (`manifest_split_seconds`, `manifest_job_hours`,
+  `auto_wall`, `manifest_extrapolated`, `calibrate_manifest`), fitted on controlled run ctrl1:
+  - statevector qsvc is linear in rows, because StatevectorFidelityKernel computes one
+    statevector per row; the circuit count was 4.5-70x too high;
+  - qnn is linear in fit rows; the old model was 4.6-11.6x too low;
+  - classical gets a per-split law;
+  - pqk and mps qsvc keep the circuit model;
+  - all 12 measured (group, backend, rows) points are reproduced within 6%.
+- **`submit_runs.sh PRECOMPUTE_ONLY=1`** writes the embedding cache and submits nothing.
+- **`submit_runs.sh` sets `TABPFN_ALLOW_CPU_LARGE_DATASET=1` in every job.** TabPFN
+  refuses more than 1000 training rows on a CPU. In full run full1, all 30 trials of each
+  of the 27 largest classical jobs (1324-2600 rows) failed on it, which stopped those jobs
+  ("Every tuning trial for 'tabpfn' failed"). The guard is about speed, not validity: at
+  1000-1200 rows tabpfn took 2.4-3.6 h of a 2.6-3.9 h classical job, about 1.7x the cost
+  model.
+- **`--embed-above N`** (manifest mode): embed every dataset wider than N features, to 8
+  components. The default, 20, is the old rule; 13 removes the MPS band. Recorded in
+  MANIFEST.tsv and in each config's `embedding_min_features`; values below 8 are refused.
+- **Without `--models`, a manifest run gets qsvc, pqk and the classical group**
+  (`DEFAULT_QUANTUM_ARMS`). It used to get every arm. qnn and vqc run only when named,
+  e.g. `--models qsvc,pqk,qnn`: on ctrl1, qnn was the weakest and costliest arm.
+- **Gates 1.1:** for a fidelity kernel, G2 compares the mean overlap with 2^-d, the overlap
+  of random states (at least 2x), instead of a fixed 0.05 floor that ignored the qubit
+  count. The thresholds are pre-registered in `control_gates.THRESHOLDS`, with the reason
+  for each value.
+
 #### Fold-based evaluation: `split_mode: manifest`
 
 - **Splits: `benchmark/make_splits.py` is make_splits/2.0 and writes manifest schema 2.**
@@ -388,6 +498,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type with `NUMBA_CPU_NAME=generic`: under it UMAP changes and PCA does not, and a job
   on this host scores the files the other target wrote.
 
+- **The Isomap complexity measure no longer reads numpy's global RNG.** Isomap takes no
+  `random_state`. Above 200 rows its KernelPCA solves with ARPACK, and starts from a
+  vector drawn from the global stream. Two jobs reading the same cached features could
+  therefore report a different `Isomap Reconstruction Error`, so `collate_results.py`
+  refused the run as "different training features". This hit 10 of the 60 umap passes
+  of the 24-feature synthetic torus, 6e-6 relative. `get_complexity(random_state=)`
+  seeds that one draw and puts the caller's stream back; `evaluate` passes its own
+  `random_state`. The value can differ from an unseeded run's, so collate results
+  computed before and after this fix separately.
+
 #### QProfiler tutorial v2
 
 - **`tutorial/QProfiler_v2/example_qprofiler_v2.ipynb`**, a second pass over QProfiler built
@@ -562,6 +682,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cost.** ~0.2 s at 100x10, ~0.6 s at 500x50, ~5 s at 100x2000, ~53 s at 100x20000.
 
 ### Changed
+
+#### The docs flag that a tuned model does not read `<model>_args`
+
+- **In bold, in `apps/config.md`, `apps/profiler.rst`, the shipped `config.yaml` and
+  `benchmark/README.md`:** with `grid_search: True` (and `tune_quantum: True` for a
+  quantum model) under the default `split_mode: internal`, trials and refits are built
+  from `gridsearch_<model>_args` alone. A setting written only in `<model>_args` is
+  silently ignored. Under `split_mode: manifest` the block is read: its searched names are
+  trial 0 and its other keys are fixed for every trial and the refit.
+  `qpl_args.classical_models` is read in both modes. This is not new behaviour, but the
+  shipped config now tunes by default, so it is what a run gets.
+- The same pages said quantum tuning is "off by default". It is off when the key is
+  absent, and on in the shipped `config.yaml`.
 
 #### Default tuning objective is balanced accuracy
 

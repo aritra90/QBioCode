@@ -949,3 +949,193 @@ class TestSubmitRunsDryOnAManifestRun:
         assert "WARNING: the embedding cache cannot serve these jobs yet" in done.stderr
         args = (tmp_path / "stub_py.args").read_text().split()
         assert args[:3] == ["-m", "qbiocode.apps.qprofiler.embedding_cache", "--check"]
+
+
+# ---------------------------------------------------------------------------
+# Scaling to the full corpus: --datasets all / --datasets-file, --splits-per-job and
+# --wall auto (cost_model's manifest laws).
+# ---------------------------------------------------------------------------
+
+class TestDatasetSelectionAtScale:
+    def test_all_takes_every_curated_dataset_with_a_manifest(self, generator, monkeypatch,
+                                                              tmp_path, capsys):
+        with_manifest = {"pmlb__labor", "pmlb__spect", "pmlb__glass2"}
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "all",
+                                "--models", "qsvc", "--splits", "1",
+                                with_manifest=with_manifest)
+        assert {r["dataset"] for r in rows} == with_manifest
+        assert {r["sel_datasets"] for r in rows} == {"all"}
+        out = capsys.readouterr().out
+        assert "skipping pmlb__appendicitis: no manifest" in out
+
+    @pytest.mark.parametrize("kind", ["lines", "inventory"])
+    def test_a_datasets_file_lists_them(self, generator, monkeypatch, tmp_path, kind):
+        listing = tmp_path / ("ids.txt" if kind == "lines" else "inventory.csv")
+        if kind == "lines":
+            listing.write_text("# frozen membership\npmlb__labor\n\nspect   # by name\n")
+        else:
+            listing.write_text("dataset_id,n,p\npmlb__labor,60,16\npmlb__spect,60,22\n")
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets-file",
+                                str(listing), "--models", "qsvc", "--splits", "1")
+        assert {r["dataset"] for r in rows} == {"pmlb__labor", "pmlb__spect"}
+        assert rows[0]["sel_datasets"] == f"file:{listing}"
+
+    def test_datasets_and_a_datasets_file_are_alternatives(self, generator, monkeypatch,
+                                                             tmp_path):
+        listing = tmp_path / "ids.txt"
+        listing.write_text("pmlb__labor\n")
+        with pytest.raises(SystemExit):
+            _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                          "--datasets-file", str(listing))
+
+    def test_a_datasets_file_is_refused_in_internal_mode(self, generator, monkeypatch):
+        import sys
+        monkeypatch.setattr(sys, "argv", ["generate_pilot_configs.py", "--datasets-file", "x"])
+        with pytest.raises(SystemExit):
+            generator.main()
+
+
+class TestSplitsPerJob:
+    @pytest.fixture
+    def batched(self, generator, monkeypatch, tmp_path):
+        return _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor,spect",
+                             "--models", "qsvc", "--splits", "all",
+                             "--splits-per-job", "classical=all,*=1")
+
+    def test_the_classical_group_runs_every_split_in_one_job(self, batched):
+        root, rows = batched
+        classical = [r for r in rows if r["group"] == "classical"]
+        quantum = [r for r in rows if r["group"] == "qsvc"]
+        # labor: none; spect: pca + umap -> 3 passes; 15 splits each.
+        assert len(classical) == 3 and len(quantum) == 3 * 15
+        for r in classical:
+            assert r["iteration"] == ";".join(str(i) for i in range(1, 16))
+            assert r["n_splits"] == "15"
+            assert r["config"].endswith("_i01-15_classical")
+            cfg = _load(pathlib.Path(r["yaml"]))
+            assert cfg["splits"] == list(range(1, 16))
+        assert all(r["n_splits"] == "1" and ";" not in r["iteration"] for r in quantum)
+        assert len({r["config"] for r in rows}) == len(rows)
+
+    def test_status_expects_every_split_of_a_batched_job(self, batched):
+        root, rows = batched
+        status = _module("status")
+        r = next(r for r in rows if r["group"] == "classical")
+        cfg = status.read_config(r["yaml"])
+        assert cfg["expected"] == 15 * len(_load(pathlib.Path(r["yaml"]))["classical_model"])
+
+    def test_chunks_are_consecutive_and_cover_every_split(self, generator):
+        assert generator.chunk_splits([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]
+        assert generator.chunk_splits([1, 6, 11], None) == [[1, 6, 11]]
+        assert generator.manifest_job_name("d", "pca", [6, 11], "classical") == "d_pca_i06-11_classical"
+        assert generator.manifest_job_name("d", "pca", 6, "qsvc") == "d_pca_i06_qsvc"
+
+    def test_the_parser(self, generator):
+        groups = ["qsvc", "classical"]
+        assert generator.parse_splits_per_job("1", groups) == {"qsvc": 1, "classical": 1}
+        assert generator.parse_splits_per_job("classical=all", groups) == {"qsvc": 1, "classical": None}
+        assert generator.parse_splits_per_job("classical=5,*=2", groups) == {"qsvc": 2, "classical": 5}
+        for bad in ("0", "x", "nope=2", "classical"):
+            with pytest.raises(ValueError):
+                generator.parse_splits_per_job(bad, groups)
+
+
+class TestAutoWalls:
+    def test_auto_fills_walls_and_expected_hours(self, generator, monkeypatch, tmp_path, capsys):
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor,spect",
+                                "--models", "qsvc,pqk", "--splits", "1-2", "--wall",
+                                "classical=1:00,*=auto")
+        cm = _module("cost_model")
+        for r in rows:
+            if r["group"] == "classical":
+                assert r["wall"] == "1:00"
+            else:
+                bk = "mps" if r["backend"] == "mps_simulator" else "sv"
+                exp = cm.manifest_job_hours(r["group"], bk, int(r["qubits"]), int(r["rows"]),
+                                            k=5, n_trials=30, n_splits=1)
+                assert float(r["exp_h"]) == pytest.approx(exp, abs=1e-3)
+                assert r["wall"] == cm.auto_wall(exp)[0]
+            assert float(r["bound_h"]) > 0
+        assert "expected (cost model)" in capsys.readouterr().out
+
+    def test_the_wall_parser_takes_auto(self, generator):
+        groups = ["qsvc", "classical"]
+        assert generator.parse_wall("auto", groups) == {"qsvc": "auto", "classical": "auto"}
+        assert generator.parse_wall("classical=0:45,*=auto", groups) == {
+            "qsvc": "auto", "classical": "0:45"}
+        with pytest.raises(ValueError):
+            generator.parse_wall("automatic", groups)
+
+
+class TestTheManifestCostModel:
+    """The laws reproduce the controlled run they were fitted on (ctrl1, 2026-10-05)."""
+
+    #: (group, bk, qubits, rows, median measured seconds of the ctrl1 jobs)
+    CTRL1 = [("classical", "sv", 8, 62, 167.0), ("classical", "sv", 8, 267, 241.5),
+             ("classical", "mps", 16, 57, 173.0), ("pqk", "sv", 8, 62, 260.5),
+             ("pqk", "sv", 8, 267, 750.0), ("pqk", "mps", 16, 57, 155.0),
+             ("qsvc", "sv", 8, 62, 127.0), ("qsvc", "sv", 8, 267, 150.5),
+             ("qsvc", "mps", 16, 57, 3681.0), ("qnn", "sv", 8, 62, 750.0),
+             ("qnn", "sv", 8, 267, 2620.5), ("qnn", "mps", 16, 57, 1334.0)]
+
+    @pytest.mark.parametrize("group, bk, q, rows, measured", CTRL1)
+    def test_within_ten_percent_of_the_measured_jobs(self, group, bk, q, rows, measured):
+        cm = _module("cost_model")
+        expected = cm.manifest_job_hours(group, bk, q, rows, k=5, n_trials=30) * 3600
+        assert expected == pytest.approx(measured, rel=0.10)
+
+    def test_batching_adds_splits_not_startups(self):
+        cm = _module("cost_model")
+        one = cm.manifest_job_hours("classical", "sv", 8, 267)
+        fifteen = cm.manifest_job_hours("classical", "sv", 8, 267, n_splits=15)
+        assert fifteen == pytest.approx(cm.JOB_OVERHEAD_S / 3600 + 15 * (one - cm.JOB_OVERHEAD_S / 3600))
+
+    def test_auto_wall_rounds_up_and_caps(self):
+        cm = _module("cost_model")
+        assert cm.auto_wall(0.01) == ("0:30", False)              # floor
+        assert cm.auto_wall(1.0) == ("3:15", False)               # 3 x 1 h + 15 min
+        assert cm.auto_wall(1.01) == ("3:30", False)              # rounded up to 15 min
+        assert cm.auto_wall(100.0) == ("72:00", True)             # capped, and says so
+
+    def test_extrapolation_is_flagged(self):
+        cm = _module("cost_model")
+        assert not cm.manifest_extrapolated("sv", 8, 267)
+        assert cm.manifest_extrapolated("sv", 8, 2600)
+        assert cm.manifest_extrapolated("mps", 20, 100)
+
+
+class TestEmbedAboveAndTheDefaultArms:
+    """The full run's choices: embed every width the statevector cannot take, no qnn."""
+
+    def test_without_models_the_arms_are_qsvc_pqk_and_the_classical_group(
+            self, generator, monkeypatch, tmp_path):
+        _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                                "--splits", "1")
+        assert {r["group"] for r in rows} == {"classical", "qsvc", "pqk"}
+
+    def test_qnn_is_still_there_when_named(self, generator):
+        assert [g for g, _, _ in generator.model_groups(["qsvc", "pqk", "qnn"])] == [
+            "qsvc", "pqk", "qnn", "classical"]
+
+    def test_embed_above_13_moves_labor_from_mps_to_eight_embedded_qubits(
+            self, generator, monkeypatch, tmp_path):
+        args = ("--datasets", "labor,appendicitis", "--splits", "1")
+        _, default = _manifest_run(generator, monkeypatch, tmp_path / "a", *args)
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path / "b", *args,
+                                   "--embed-above", "13")
+        labor = lambda rs: {(r["embedding"], r["backend"], r["qubits"]) for r in rs
+                            if r["dataset"] == "pmlb__labor"}
+        assert labor(default) == {("none", "mps_simulator", "16")}
+        assert labor(rows) == {("pca", "statevector_simulator", "8"),
+                               ("umap", "statevector_simulator", "8")}
+        # appendicitis (7 features) is untouched, and the jobs tell QProfiler the same rule.
+        assert {r["embedding"] for r in rows if r["dataset"] == "pmlb__appendicitis"} == {"none"}
+        assert {r["embed_above"] for r in rows} == {"13"}
+        cfg = _load(next(root.glob("pmlb__labor/*pca*qsvc*.yaml")))
+        assert cfg["embedding_min_features"] == 13
+
+    def test_embed_above_below_the_embedding_width_is_refused(self, generator, monkeypatch,
+                                                              tmp_path):
+        with pytest.raises(SystemExit):
+            _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                          "--embed-above", "7")

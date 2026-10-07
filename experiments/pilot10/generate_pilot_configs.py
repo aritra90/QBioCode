@@ -127,9 +127,14 @@ def _load_cost_model():
     return mod
 
 
-def backend_for(n_features):
-    """Return (backend, qubits_used, embeddings) for a dataset of this width."""
-    if n_features > EMBEDDING_MIN_FEATURES:
+def backend_for(n_features, embed_above=EMBEDDING_MIN_FEATURES):
+    """Return (backend, qubits_used, embeddings) for a dataset of this width.
+
+    ``embed_above`` is the width above which a dataset is embedded to N_COMPONENTS. The
+    default (20) keeps the MPS band for 14-20 features; manifest mode's --embed-above 13
+    embeds every width the statevector cannot take, so no job needs MPS.
+    """
+    if n_features > embed_above:
         return "statevector_simulator", N_COMPONENTS, "['pca', 'umap']"
     if n_features > STATEVECTOR_MAX_QUBITS:
         return "mps_simulator", n_features, "['none']"
@@ -201,6 +206,11 @@ DATASETS = [
 
 CLASSICAL_MODELS = "['lr', 'svc', 'nb', 'dt', 'rf', 'xgb', 'catboost', 'mlp', 'tabpfn']"
 QUANTUM_MODELS = "['qsvc', 'pqk', 'qnn', 'vqc']"
+#: The quantum arms a manifest run gets when --models is not given. qnn was the weakest
+#: and costliest arm on controlled run ctrl1, and its noisy validation scores pulled the
+#: quantum side down (dropping it raised the quantum side on all 3 datasets); vqc shares
+#: its cost. Both stay available: name them in --models (e.g. qsvc,pqk,qnn).
+DEFAULT_QUANTUM_ARMS = ("qsvc", "pqk")
 N_MODELS = 13   # 9 classical + 4 quantum; n_jobs is capped at this downstream anyway
 
 TEMPLATE = r"""
@@ -583,14 +593,19 @@ pqk_args: {'encoding': ZZ,
 #   influential as the encoding, and for pqk it is close to free (its circuit count is
 #   linear in rows and its projections are cached), so pqk explores reps furthest.
 #   qnn/vqc stop at 3: their circuit count is maxiter x n_train x depth.
+#   bandwidth scales the [0, 1] features before the feature map -- the quantum arms'
+#   gamma. Without it every quantum kernel ran at one angle range; in kernel_exps the
+#   optimum was ~pi for Z and ~pi/32 for ZZ. The range is pi/32 .. 2*pi, log scale.
 gridsearch_qsvc_args: {'encoding': ['Z', 'ZZ', 'P'],
                        'reps': [1, 2, 3, 4],
                        'entanglement': @@ENTSPACE@@,
-                       'C': {low: 1.0e-2, high: 1.0e+2, log: true}
+                       'C': {low: 1.0e-2, high: 1.0e+2, log: true},
+                       'bandwidth': {low: 0.0982, high: 6.2832, log: true}
                       }
 gridsearch_pqk_args: {'encoding': ['Z', 'ZZ', 'P'],
                       'reps': [1, 2, 3, 4, 6],
-                      'entanglement': @@ENTSPACE@@
+                      'entanglement': @@ENTSPACE@@,
+                      'bandwidth': {low: 0.0982, high: 6.2832, log: true}
                       }
 #   qnn pins 'primitive' as a one-element list on purpose: the tuned path builds its
 #   kwargs from gridsearch_<model>_args only and never reads qnn_args, and qnn is the one
@@ -749,7 +764,8 @@ def load_config(path):
 def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
           test_size=TEST_SIZE_DEFAULT, n_trials_quantum=N_TRIALS_QUANTUM_DEFAULT,
           emb=None, model=None, runs_dir=RUNS_DIR, protocol=False,
-          embedding_cache=EMBEDDING_CACHE_DIR, job=None, title=None):
+          embedding_cache=EMBEDDING_CACHE_DIR, job=None, title=None,
+          embed_above=EMBEDDING_MIN_FEATURES):
     """One config. With ``model`` (and ``emb``) set, the self-contained split-layout job for
     that pair. With ``protocol``, the dataset's PROTOCOL for build_job's files: the same
     text as any of its jobs, with the job keys left UNSET. ``embedding_cache`` is the
@@ -764,7 +780,7 @@ def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
         raise ValueError(f"embedding_cache must be an absolute path, got {embedding_cache!r}")
     split = model is not None or protocol or job is not None
     dataset = csv[:-4]
-    backend, qubits, embeddings = backend_for(feats)
+    backend, qubits, embeddings = backend_for(feats, embed_above)
     if split:
         if protocol:
             job = dict.fromkeys(JOB_TOKENS, UNSET)
@@ -794,9 +810,9 @@ def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
         rundir = HERE
         title = f"PILOT {idx:02d} of {len(DATASETS)} -- {folder}/{csv}"
         layout_flag, submit = "", "submit_pilot.sh"
-    embedded = feats > EMBEDDING_MIN_FEATURES
+    embedded = feats > embed_above
     if embedded:
-        bandnote = EMBED_NOTE.format(w=feats, minf=EMBEDDING_MIN_FEATURES, nc=N_COMPONENTS)
+        bandnote = EMBED_NOTE.format(w=feats, minf=embed_above, nc=N_COMPONENTS)
         reason = (
             f"embedded from {feats} features to {N_COMPONENTS} components, "
             f"so the circuits are {N_COMPONENTS}-qubit and exact."
@@ -828,7 +844,7 @@ def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
         # 'full'. Keyed on the resolved backend, so a dataset that moves band
         # because its width changed cannot keep the wrong space.
         ("@@ENTSPACE@@", ENTANGLEMENT_BY_BACKEND[backend]),
-        ("@@MINFEAT@@", str(EMBEDDING_MIN_FEATURES)),
+        ("@@MINFEAT@@", str(embed_above)),
         ("@@NCOMP@@", str(N_COMPONENTS)),
         ("@@EMBCACHE@@", f"'{embedding_cache}'" if embedding_cache else "null"),
         ("@@NMODELS@@", str(n_models)),
@@ -879,7 +895,7 @@ MANIFEST_COLUMNS = ("config", "dataset", "embedding", "model", "arm", "backend",
 MANIFEST_MODE_COLUMNS = ("split_mode", "iteration", "repeat", "fold", "group", "run_id",
                          "wall", "models", "n_trials", "qnn_readout", "sel_datasets",
                          "sel_models", "sel_splits", "split_dir", "datasets_root",
-                         "manifest_sha256")
+                         "manifest_sha256", "n_splits", "cost_extrapolated", "embed_above")
 
 _WALL_RE = r"\d+:[0-5]\d"
 
@@ -910,21 +926,26 @@ def parse_splits(text):
 def parse_wall(text, groups):
     """``--wall``: one LSF wall for every job ('4:00'), or one per group
     ('classical=0:45,qsvc=2:00,pqk=2:00,qnn=4:00', with an optional '*=H:MM' for the groups
-    not named). Returns {group: 'H:MM'} over ``groups``; a group left without a wall, a
-    name that is not one of ``groups`` or a value that is not H:MM is an error.
+    not named). Any value may be 'auto': that job's wall is computed from the cost model
+    (cost_model.manifest_job_hours, then auto_wall). Returns {group: 'H:MM' or 'auto'} over
+    ``groups``; a group left without a wall, a name that is not one of ``groups`` or a
+    value that is neither H:MM nor auto is an error.
     """
     import re
 
+    def ok(val):
+        return val == "auto" or re.fullmatch(_WALL_RE, val)
+
     text = str(text).strip()
     if "=" not in text:
-        if not re.fullmatch(_WALL_RE, text):
-            raise ValueError(f"--wall: {text!r} is not H:MM")
+        if not ok(text):
+            raise ValueError(f"--wall: {text!r} is neither H:MM nor auto")
         return {g: text for g in groups}
     given = {}
     for part in text.split(","):
         key, sep, val = (s.strip() for s in part.partition("="))
-        if not sep or not re.fullmatch(_WALL_RE, val):
-            raise ValueError(f"--wall: {part!r} is not group=H:MM")
+        if not sep or not ok(val):
+            raise ValueError(f"--wall: {part!r} is not group=H:MM or group=auto")
         if key != "*" and key not in groups:
             raise ValueError(f"--wall names group {key!r}, which this run does not have "
                              f"(its groups: {', '.join(groups)})")
@@ -936,16 +957,55 @@ def parse_wall(text, groups):
     return {g: given.get(g, given.get("*")) for g in groups}
 
 
+def parse_splits_per_job(text, groups):
+    """``--splits-per-job``: how many outer splits one job runs, per group.
+
+    One value for every group ('1', '15', 'all') or per group ('classical=all,*=1').
+    'all' puts every selected split of a (dataset, embedding) in one job. A classical job
+    takes minutes per split, so batching its splits removes most of the per-job LSF and
+    startup overhead; a quantum job is long enough on its own. Returns {group: int or None},
+    None meaning all.
+    """
+    def val(v, where):
+        if v == "all":
+            return None
+        if not v.isdigit() or int(v) < 1:
+            raise ValueError(f"--splits-per-job: {where!r} is not a positive count or 'all'")
+        return int(v)
+
+    text = str(text).strip()
+    if "=" not in text:
+        return {g: val(text, text) for g in groups}
+    given = {}
+    for part in text.split(","):
+        key, sep, v = (x.strip() for x in part.partition("="))
+        if not sep:
+            raise ValueError(f"--splits-per-job: {part!r} is not group=N")
+        if key != "*" and key not in groups:
+            raise ValueError(f"--splits-per-job names group {key!r}, which this run does not "
+                             f"have (its groups: {', '.join(groups)})")
+        given[key] = val(v, part)
+    return {g: given.get(g, given.get("*", 1)) for g in groups}
+
+
+def chunk_splits(iterations, size):
+    """Consecutive chunks of ``iterations`` (in order), ``size`` each (None: one chunk)."""
+    its = list(iterations)
+    size = len(its) if size is None else size
+    return [its[i:i + size] for i in range(0, len(its), size)]
+
+
 def model_groups(models=None):
     """[(group, classical arms, quantum arms)] of one (dataset, iteration, embedding),
     heaviest first: each quantum arm alone, then the classical group.
 
-    ``models`` is the --models subset (None: every arm). Naming no classical arm keeps the
+    ``models`` is the --models subset (None: DEFAULT_QUANTUM_ARMS and the classical group;
+    qnn and vqc only when named). Naming no classical arm keeps the
     classical group whole; naming some (or 'classical') keeps those (or all nine).
     """
     classical, quantum = ast.literal_eval(CLASSICAL_MODELS), ast.literal_eval(QUANTUM_MODELS)
     if models is None:
-        return [(q, [], [q]) for q in quantum] + [(CLASSICAL_GROUP, classical, [])]
+        return [(q, [], [q]) for q in DEFAULT_QUANTUM_ARMS] + [(CLASSICAL_GROUP, classical, [])]
     unknown = [m for m in models if m not in classical + quantum + [CLASSICAL_GROUP]]
     if unknown:
         raise ValueError(f"--models: unknown arm(s) {', '.join(unknown)}; the arms are "
@@ -1008,8 +1068,15 @@ def read_split_manifest(split_dir, dataset_id):
 
 
 def manifest_job_name(dataset_id, emb, iteration, group):
-    """A manifest-mode config name: ``<id>_<embedding>_i<iteration>_<group>``."""
-    return f"{dataset_id}_{emb}_i{iteration:02d}_{group}"
+    """A manifest-mode config name: ``<id>_<embedding>_i<iteration>_<group>``.
+
+    ``iteration`` is one split or a list of them; a job of several splits is named by its
+    first and last (``i01-15``), which is unique because a job's splits are a consecutive
+    chunk of the selected ones.
+    """
+    its = [iteration] if isinstance(iteration, int) else list(iteration)
+    tag = f"i{its[0]:02d}" if len(its) == 1 else f"i{its[0]:02d}-{its[-1]:02d}"
+    return f"{dataset_id}_{emb}_{tag}_{group}"
 
 
 def _swap(body, old, new):
@@ -1020,11 +1087,26 @@ def _swap(body, old, new):
     return body.replace(old, new)
 
 
+def _splits_phrase(iteration, repeat, fold):
+    """'split 3 (repeat 0, fold 2)', or for a batch 'splits 1-15 (repeats 0-2)'."""
+    if isinstance(iteration, int):
+        return f"split {iteration} (repeat {repeat}, fold {fold})"
+    its, reps = list(iteration), sorted(set(repeat))
+    if len(its) == 1:
+        return f"split {its[0]} (repeat {repeat[0]}, fold {fold[0]})"
+    rtxt = f"repeat {reps[0]}" if len(reps) == 1 else f"repeats {reps[0]}-{reps[-1]}"
+    return f"splits {its[0]}-{its[-1]} ({len(its)} splits, {rtxt})"
+
+
 def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_trials,
                        qnn_readout):
-    """The protocol keys of a manifest-mode job, edited into a split-layout config body."""
+    """The protocol keys of a manifest-mode job, edited into a split-layout config body.
+
+    ``iteration``, ``repeat`` and ``fold`` are one split, or equal-length lists of the
+    splits the job runs in turn."""
     import re
 
+    its = [iteration] if isinstance(iteration, int) else list(iteration)
     body = _swap(body, "## Generated by generate_pilot_configs.py --layout split --",
                  f"## Generated by generate_pilot_configs.py --split-mode manifest "
                  f"--run-id {run_id} --")
@@ -1038,13 +1120,13 @@ def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_tr
         # K-fold whose every record also names its validation rows (the next fold's test
         # rows). qprofiler refuses the CSV unless it is the file the manifest's sha256 pins.
         # Each split has a global iteration = repeat * k + fold + 1, and this job runs the
-        # ones in `splits` (repeat {repeat}, fold {fold}). Each tuning trial is fit on the
+        # ones in `splits` ({_splits_phrase(iteration, repeat, fold)}). Each trial is fit on the
         # training rows minus the validation rows and scored on the validation rows; the
         # best-validation config is refit on all the training rows and tested once. So
         # test_size, iter, stratify, validation_split and cross_validation do not apply.
         split_mode: manifest
         split_dir: '{split_dir}'
-        splits: [{iteration}]
+        splits: [{", ".join(str(i) for i in its)}]
         # Feature scaling. Options: ['True'] or true (MinMaxScaler), 'StandardScaler',
         # 'MinMaxScaler', 'None'/false. Fit on the rows a stage trains on (the fit rows
         # while tuning, the training rows for the final fit), never on validation or test.
@@ -1098,9 +1180,10 @@ def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_tr
 
 def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration, repeat,
                        fold, *, run_root, run_id, split_dir, n_trials, qnn_readout,
-                       embedding_cache, why):
+                       embedding_cache, why, embed_above=EMBEDDING_MIN_FEATURES):
     """(name, body) of one manifest-mode job: ``group`` of dataset ``ds`` (curated_dataset's
-    dict) on embedding ``emb``, split ``iteration``."""
+    dict) on embedding ``emb``, split ``iteration`` -- or, with lists for ``iteration``,
+    ``repeat`` and ``fold``, on those splits in turn (--splits-per-job)."""
     name = manifest_job_name(ds["id"], emb, iteration, group)
     rundir = os.path.join(run_root, ds["id"])
     job = dict(zip(JOB_TOKENS, (
@@ -1108,14 +1191,40 @@ def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration
         os.path.join(rundir, "quantum_tuned_params", name),
         os.path.join(rundir, "kernels", name))))
     title = (f"RUN {run_id}, DATASET {idx:02d} of {total} -- {ds['folder']}/{ds['csv']} -- "
-             f"ONE JOB: {group} on embedding '{emb}', split {iteration} (repeat {repeat}, "
-             f"fold {fold})")
+             f"ONE JOB: {group} on embedding '{emb}', {_splits_phrase(iteration, repeat, fold)}")
     _, body = build(idx, ds["folder"], ds["csv"], ds["rows"], ds["feats"], why,
-                    runs_dir=run_root, embedding_cache=embedding_cache, job=job, title=title)
+                    runs_dir=run_root, embedding_cache=embedding_cache, job=job, title=title,
+                    embed_above=embed_above)
     body = _manifest_protocol(body, run_id=run_id, split_dir=split_dir, iteration=iteration,
                               repeat=repeat, fold=fold, n_trials=n_trials,
                               qnn_readout=qnn_readout)
     return name, body
+
+
+def curated_ids(datasets_root):
+    """Every curated dataset id under ``datasets_root``: directories holding a meta.yaml."""
+    return sorted(d for d in os.listdir(datasets_root)
+                  if os.path.isfile(os.path.join(datasets_root, d, "meta.yaml")))
+
+
+def read_datasets_file(path):
+    """Dataset names from ``--datasets-file``: a CSV with a ``dataset_id`` column (e.g. a
+    curated inventory.csv or a frozen membership list), or one name per line, '#' starting
+    a comment. Order is kept; blank lines are skipped."""
+    import csv as _csv
+
+    with open(path, newline="") as fh:
+        text = fh.read()
+    first = text.splitlines()[0] if text.strip() else ""
+    if "dataset_id" in [c.strip() for c in first.split(",")]:
+        return [r["dataset_id"].strip() for r in _csv.DictReader(text.splitlines())
+                if r.get("dataset_id", "").strip()]
+    names = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            names.append(line)
+    return names
 
 
 def main_manifest(ap, args):
@@ -1132,6 +1241,10 @@ def main_manifest(ap, args):
                      f"directory (got {getattr(args, flag)!r})")
     if args.n_trials < 2:
         ap.error(f"--n-trials must be at least 2 to be a search at all, got {args.n_trials}")
+    if args.embed_above < N_COMPONENTS:
+        ap.error(f"--embed-above must be at least {N_COMPONENTS} (the embedding has "
+                 f"{N_COMPONENTS} components, so it cannot shrink a narrower dataset); "
+                 f"got {args.embed_above}")
     split_dir = os.path.abspath(args.split_dir)
     datasets_root = os.path.abspath(args.datasets_root)
     run_root = os.path.abspath(os.path.join(args.runs_dir or RUNS_CV_DIR, args.run_id))
@@ -1145,11 +1258,28 @@ def main_manifest(ap, args):
                   if args.models else None)
         groups = model_groups(models)
         walls = parse_wall(args.wall, [g for g, _, _ in groups])
+        per_job = parse_splits_per_job(args.splits_per_job, [g for g, _, _ in groups])
     except ValueError as exc:
         ap.error(str(exc))
-    explicit = args.datasets is not None
-    names = ([d.strip() for d in args.datasets.split(",") if d.strip()] if explicit
-             else [csv[:-4] for _, csv, _, _, _ in DATASETS])
+    cm = _load_cost_model() if "auto" in walls.values() else None
+    if args.datasets is not None and args.datasets_file is not None:
+        ap.error("--datasets and --datasets-file are alternatives; give one")
+    explicit = args.datasets is not None or args.datasets_file is not None
+    every = args.datasets is not None and args.datasets.strip() == "all"
+    if every:
+        # Every curated dataset; one without a manifest is skipped (and said so), since
+        # 'all' asks for what exists rather than naming datasets that must.
+        names = curated_ids(datasets_root)
+    elif args.datasets_file is not None:
+        if not os.path.isfile(args.datasets_file):
+            ap.error(f"--datasets-file {args.datasets_file!r} does not exist")
+        names = read_datasets_file(args.datasets_file)
+        if not names:
+            ap.error(f"--datasets-file {args.datasets_file!r} names no dataset")
+    elif explicit:
+        names = [d.strip() for d in args.datasets.split(",") if d.strip()]
+    else:
+        names = [csv[:-4] for _, csv, _, _, _ in DATASETS]
     why_by_name = {csv[:-4]: why for _, csv, _, _, why in DATASETS}
     # The pilot set names its source by folder, so a name curated from two sources
     # ('sonar': libsvm__sonar and pmlb__sonar) resolves to the one the pilot ran.
@@ -1205,39 +1335,62 @@ def main_manifest(ap, args):
             for stale in sorted(os.listdir(ds_dir)):
                 if stale.endswith((".yaml", ".yml")):
                     os.remove(os.path.join(ds_dir, stale))
-    sel = {"sel_datasets": ",".join(ds["id"] for ds, *_ in chosen),
+    sel = {"sel_datasets": ("all" if every else f"file:{os.path.abspath(args.datasets_file)}"
+                            if args.datasets_file else ",".join(ds["id"] for ds, *_ in chosen)),
            "sel_models": ",".join(g for g, _, _ in groups),
            "sel_splits": str(args.splits)}
-    rows = []
+    rows, overrun = [], []
     for idx, (ds, manifest, its, why) in enumerate(chosen, start=1):
         ds_dir = os.path.join(run_root, ds["id"])
         os.makedirs(ds_dir, exist_ok=True)
-        # The embedding rule is the default mode's, verbatim: backend_for on the width.
-        backend, qubits, embeddings = backend_for(ds["feats"])
-        for iteration in its:
-            repeat, fold = manifest["splits"][iteration]
-            for emb in ast.literal_eval(embeddings):
-                for group, classical, quantum in groups:
+        # The embedding rule is the default mode's, at --embed-above: backend_for on the width.
+        backend, qubits, embeddings = backend_for(ds["feats"], args.embed_above)
+        bk = "mps" if backend == "mps_simulator" else "sv"
+        for emb in ast.literal_eval(embeddings):
+            for group, classical, quantum in groups:
+                for chunk in chunk_splits(its, per_job[group]):
+                    reps = [manifest["splits"][i][0] for i in chunk]
+                    folds = [manifest["splits"][i][1] for i in chunk]
+                    one = len(chunk) == 1
+                    iteration = chunk[0] if one else chunk
                     name, body = build_manifest_job(
                         idx, len(chosen), ds, emb, group, classical, quantum, iteration,
-                        repeat, fold, run_root=run_root, run_id=args.run_id,
-                        split_dir=split_dir, n_trials=args.n_trials,
-                        qnn_readout=args.qnn_readout, embedding_cache=cache, why=why)
+                        reps[0] if one else reps, folds[0] if one else folds,
+                        run_root=run_root, run_id=args.run_id, split_dir=split_dir,
+                        n_trials=args.n_trials, qnn_readout=args.qnn_readout,
+                        embedding_cache=cache, why=why, embed_above=args.embed_above)
                     path = os.path.join(ds_dir, f"{name}.yaml")
                     with open(path, "w") as fh:
                         fh.write(body)
+                    exp_h = bound_h = None
+                    wall, extrapolated = walls[group], ""
+                    if cm is not None:
+                        exp_h = cm.manifest_job_hours(group, bk, qubits, ds["rows"],
+                                                      k=manifest["k"], n_trials=args.n_trials,
+                                                      n_splits=len(chunk))
+                        extrapolated = "yes" if cm.manifest_extrapolated(bk, qubits, ds["rows"]) else ""
+                        if wall == "auto":
+                            wall, capped = cm.auto_wall(exp_h)
+                            if capped:
+                                overrun.append((name, exp_h))
+                        h, m = wall.split(":")
+                        bound_h = round(int(h) + int(m) / 60, 2)
+                        exp_h = round(exp_h, 3)
                     rows.append({
                         "config": name, "dataset": ds["id"], "embedding": emb,
                         "model": group, "arm": "quantum" if quantum else "classical",
                         "backend": backend, "qubits": qubits, "rows": ds["rows"],
-                        "n_trials_quantum": args.n_trials, "iter": 1, "exp_h": None,
-                        "bound_h": None, "yaml": path, "split_mode": "manifest",
-                        "iteration": iteration, "repeat": repeat, "fold": fold,
-                        "group": group, "run_id": args.run_id, "wall": walls[group],
+                        "n_trials_quantum": args.n_trials, "iter": 1, "exp_h": exp_h,
+                        "bound_h": bound_h, "yaml": path, "split_mode": "manifest",
+                        "iteration": ";".join(map(str, chunk)),
+                        "repeat": ";".join(map(str, reps)), "fold": ";".join(map(str, folds)),
+                        "group": group, "run_id": args.run_id, "wall": wall,
                         "models": ",".join(classical + quantum), "n_trials": args.n_trials,
                         "qnn_readout": args.qnn_readout, **sel, "split_dir": split_dir,
                         "datasets_root": datasets_root,
-                        "manifest_sha256": manifest["sha256"] or ""})
+                        "manifest_sha256": manifest["sha256"] or "",
+                        "n_splits": len(chunk), "cost_extrapolated": extrapolated,
+                        "embed_above": args.embed_above})
         print(f"{ds['id']:32s} {backend:22s} {qubits:3d} qubits  {embeddings:>16s}  "
               f"splits {','.join(map(str, its))}")
     cols = MANIFEST_COLUMNS + MANIFEST_MODE_COLUMNS
@@ -1247,9 +1400,27 @@ def main_manifest(ap, args):
         for row in rows:
             fh.write("\t".join("" if row[c] is None else str(row[c]) for c in cols) + "\n")
     per_group = {g: sum(r["group"] == g for r in rows) for g, _, _ in groups}
+
+    def wall_text(g):
+        ws = sorted({r["wall"] for r in rows if r["group"] == g},
+                    key=lambda w: tuple(int(x) for x in w.split(":")))
+        return ws[0] if len(ws) == 1 else f"{ws[0]}-{ws[-1]} (auto)"
+
     print(f"\n{len(rows)} jobs written under {run_root} ({len(chosen)} datasets; "
-          + ", ".join(f"{g} {n} at -W {walls[g]}" for g, n in per_group.items())
+          + ", ".join(f"{g} {n} at -W {wall_text(g)}" for g, n in per_group.items())
           + f"); manifest: {mpath}")
+    if cm is not None:
+        total = sum(r["exp_h"] for r in rows)
+        slow = max(rows, key=lambda r: r["exp_h"])
+        n_ext = sum(bool(r["cost_extrapolated"]) for r in rows)
+        print(f"expected (cost model): {total:.1f} core-h in all; slowest job "
+              f"{slow['config']} {slow['exp_h']:.2f} h (wall {slow['wall']}); "
+              f"{n_ext} of {len(rows)} jobs priced outside the calibrated rows/widths")
+    if overrun:
+        print(f"!! {len(overrun)} jobs are expected to need more than the "
+              f"{cm.AUTO_WALL_MAX_H:g} h queue limit even at their capped wall, e.g. "
+              + ", ".join(f"{n} ({h:.0f} h)" for n, h in overrun[:5])
+              + ": split them over fewer splits per job, embed the dataset, or drop it")
     print(f"n_trials {args.n_trials} per arm, qnn readout {args.qnn_readout}, embedding "
           f"cache {cache}")
     print(f"LSF job names: {JOB_NAME_PREFIX}{args.run_id}_<config>.  Next:  "
@@ -1340,16 +1511,35 @@ def main():
     fold.add_argument("--n-trials", type=int, default=None,
                       help=f"trials per arm, trial 0 = defaults (default {N_TRIALS_DEFAULT})")
     fold.add_argument("--wall", default=None,
-                      help="LSF -W per job: one H:MM, or per group, e.g. "
+                      help="LSF -W per job, a kill limit: one H:MM, 'auto', or per group, e.g. "
                            "'classical=0:45,qsvc=2:00,pqk=2:00,qnn=4:00' ('*=H:MM' for the "
-                           f"rest; default {WALL_DEFAULT})")
+                           "rest). 'auto' sets each job's wall from the calibrated cost model "
+                           "(rows, qubits, backend, n_trials, splits in the job): 3x the "
+                           "expected time + 15 min, 0:30-72:00, and fills MANIFEST.tsv exp_h "
+                           f"and bound_h (default {WALL_DEFAULT})")
     fold.add_argument("--datasets", default=None,
                       help="comma-separated pilot names ('spect') or curated ids "
-                           "('pmlb__spect'); default: the pilot set, each from its pilot "
-                           "source folder, skipping what is not curated or has no manifest")
+                           "('pmlb__spect'), or 'all' for every curated dataset under "
+                           "--datasets-root that has a manifest; default: the pilot set, each "
+                           "from its pilot source folder, skipping what is not curated or has "
+                           "no manifest")
+    fold.add_argument("--datasets-file", default=None,
+                      help="the datasets to run, from a file: a CSV with a dataset_id column "
+                           "(a curated inventory.csv or a frozen membership list) or one name "
+                           "per line ('#' comments); instead of --datasets")
+    fold.add_argument("--splits-per-job", default=None,
+                      help="outer splits per job: one count or 'all', or per group, e.g. "
+                           "'classical=all,*=1' (a classical job takes minutes per split, so "
+                           "batching it cuts the job count; default 1)")
     fold.add_argument("--models", default=None,
                       help="comma-separated arms; the classical group stays whole unless "
-                           "classical arms are named (default: every arm)")
+                           "classical arms are named (default: qsvc, pqk and the classical "
+                           "group; add qnn or vqc by naming them, e.g. qsvc,pqk,qnn)")
+    fold.add_argument("--embed-above", type=int, default=EMBEDDING_MIN_FEATURES,
+                      help="embed (pca and umap, to 8 components) every dataset with more "
+                           f"features than this (default {EMBEDDING_MIN_FEATURES}, which "
+                           "leaves 14-20 features on MPS; 13 embeds every width the "
+                           "statevector cannot take)")
     fold.add_argument("--splits", default=None,
                       help="global iterations: '1-5' (repeat 0), '1,6,11', 'all' "
                            "(default all)")
@@ -1358,7 +1548,7 @@ def main():
     args = ap.parse_args()
 
     manifest_only = ("split_dir", "datasets_root", "run_id", "n_trials", "wall", "datasets",
-                     "models", "splits", "qnn_readout")
+                     "datasets_file", "models", "splits", "qnn_readout", "splits_per_job")
     if args.split_mode == "manifest":
         # The reverse of the refusal below: internal-mode knobs mean nothing here, and a
         # silently ignored --n-trials-quantum or --budget-hours would be a wrong run.
@@ -1372,7 +1562,8 @@ def main():
             ap.error(f"{', '.join(ignored)} do not apply with --split-mode manifest (use "
                      "--n-trials, --splits and --wall)")
         for flag, default in (("n_trials", N_TRIALS_DEFAULT), ("wall", WALL_DEFAULT),
-                              ("splits", "all"), ("qnn_readout", "tune")):
+                              ("splits", "all"), ("qnn_readout", "tune"),
+                              ("splits_per_job", "1")):
             if getattr(args, flag) is None:
                 setattr(args, flag, default)
         main_manifest(ap, args)

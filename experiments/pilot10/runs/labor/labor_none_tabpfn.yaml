@@ -377,14 +377,19 @@ pqk_args: {'encoding': ZZ,
 #   influential as the encoding, and for pqk it is close to free (its circuit count is
 #   linear in rows and its projections are cached), so pqk explores reps furthest.
 #   qnn/vqc stop at 3: their circuit count is maxiter x n_train x depth.
+#   bandwidth scales the [0, 1] features before the feature map -- the quantum arms'
+#   gamma. Without it every quantum kernel ran at one angle range; in kernel_exps the
+#   optimum was ~pi for Z and ~pi/32 for ZZ. The range is pi/32 .. 2*pi, log scale.
 gridsearch_qsvc_args: {'encoding': ['Z', 'ZZ', 'P'],
                        'reps': [1, 2, 3, 4],
                        'entanglement': ['linear', 'pairwise'],
-                       'C': {low: 1.0e-2, high: 1.0e+2, log: true}
+                       'C': {low: 1.0e-2, high: 1.0e+2, log: true},
+                       'bandwidth': {low: 0.0982, high: 6.2832, log: true}
                       }
 gridsearch_pqk_args: {'encoding': ['Z', 'ZZ', 'P'],
                       'reps': [1, 2, 3, 4, 6],
-                      'entanglement': ['linear', 'pairwise']
+                      'entanglement': ['linear', 'pairwise'],
+                      'bandwidth': {low: 0.0982, high: 6.2832, log: true}
                       }
 #   qnn pins 'primitive' as a one-element list on purpose: the tuned path builds its
 #   kwargs from gridsearch_<model>_args only and never reads qnn_args, and qnn is the one

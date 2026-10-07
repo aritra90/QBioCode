@@ -8,6 +8,7 @@
 #   EMB=umap ./submit_runs.sh                     columns dataset / embedding / model
 #   HOSTS='cccxc4[0-9]+' ./submit_runs.sh ...    only these candidate hosts (anchored regex)
 #   DRY=1 ./submit_runs.sh                   print the bsub lines, submit nothing
+#   PRECOMPUTE_ONLY=1 ./submit_runs.sh       write the embedding cache, submit nothing
 #   FORCE=1 ./submit_runs.sh ...             submit even configs that are done or live
 #   LIST_HOSTS=Intel_Platinum:128 ./submit_runs.sh   print a HOSTS= regex of every host of
 #                                            that lshosts model (and ncpus), minus
@@ -55,7 +56,11 @@ MEM=${MEM:-8}
 WALL_SET=${WALL:-}
 WALL=${WALL:-24:00}
 THREADS=${THREADS:-1}
-ENVV="OMP_NUM_THREADS=$THREADS MKL_NUM_THREADS=$THREADS OPENBLAS_NUM_THREADS=$THREADS NUMEXPR_NUM_THREADS=$THREADS VECLIB_MAXIMUM_THREADS=$THREADS"
+# TABPFN_ALLOW_CPU_LARGE_DATASET: TabPFN refuses more than 1000 training rows on a CPU, and
+# every trial of the run's 27 largest classical jobs (1324-2600 rows) failed on it, killing
+# the job ("Every tuning trial for 'tabpfn' failed"). The guard is about speed, not validity;
+# a 1000-1200-row job measured tabpfn at 2.4-3.6 h, so those jobs need a long wall.
+ENVV="OMP_NUM_THREADS=$THREADS MKL_NUM_THREADS=$THREADS OPENBLAS_NUM_THREADS=$THREADS NUMEXPR_NUM_THREADS=$THREADS VECLIB_MAXIMUM_THREADS=$THREADS TABPFN_ALLOW_CPU_LARGE_DATASET=1"
 JOB_PREFIX=p10_
 
 # ---------------------------------------------------------------------------
@@ -220,6 +225,13 @@ if [ "${DRY:-0}" = "1" ]; then
 elif ! env $ENVV NUMBA_NUM_THREADS=$THREADS "$CACHE_PY" -m qbiocode.apps.qprofiler.embedding_cache "${cfgs[@]}" >&2; then
   echo "!! the embedding cache could not be written (above), so nothing was submitted" >&2
   exit 1
+fi
+# PRECOMPUTE_ONLY=1: stop here, with the cache written and nothing submitted -- e.g. to build a
+# large corpus's cache once (as its own LSF job if it is long), then submit with a second call,
+# whose step 4 then only confirms every file is current.
+if [ "${PRECOMPUTE_ONLY:-0}" = "1" ] && [ "${DRY:-0}" != "1" ]; then
+  echo "embedding cache written for ${#cfgs[@]} configs; PRECOMPUTE_ONLY=1, so nothing was submitted" >&2
+  exit 0
 fi
 
 N=${#selected[@]}

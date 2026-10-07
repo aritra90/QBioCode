@@ -365,3 +365,133 @@ def choose_trials(bk, q, n_emb, rows, n_iter, budget_hours,
         else:
             break
     return best
+
+
+# ---------------------------------------------------------------------------
+# split_mode: manifest jobs (generate_pilot_configs.py --split-mode manifest --wall auto).
+#
+# A manifest job runs one model group on one or more outer splits of one (dataset,
+# embedding). Per split: n_trials fits on the fit rows scored on the validation rows, then
+# one refit on the training rows -- no freeze, so the search is paid on every split. Rows
+# split as k-fold: n_test = n_val = rows/k, n_fit = rows - 2 rows/k.
+#
+# Calibrated against controlled run ctrl1 (2026-10-05, 300 LSF jobs on AMD EPYC 7763,
+# 30 trials, k=5; analysis/job_runtimes.csv under the run): labor 57 rows x 16 qubits mps,
+# colon_cancer 62 rows and spect 267 rows at 8 qubits sv. Against those runs the circuit
+# model above holds for pqk and mps qsvc (measured / predicted 0.9-1.1 once the per-job
+# startup is added) but not for:
+#   sv qsvc   priced as n(n-1)/2 circuits; StatevectorFidelityKernel computes one
+#             statevector per row, so the real cost is ~linear (0.22x at 62 rows,
+#             0.014x at 267 rows).
+#   qnn       4.6-11.6x underpriced; per fit it is ~linear in rows.
+#   classical not modelled above; all nine arms in one job.
+# Those three get the measured linear laws below. Rows beyond 267 and widths other than
+# 8 sv / 16 mps are extrapolated: the generator flags such jobs, and their walls carry the
+# same safety factor. Re-calibrate with calibrate_manifest() on a run that covers them.
+# ---------------------------------------------------------------------------
+JOB_OVERHEAD_S = 100.0             # python start, imports, data load, sidecar writes
+#: Per-fit seconds = a + b * rows for the arms the circuit model misprices, at 8 sv qubits.
+MANIFEST_LINEAR_S = {"qsvc": (0.65, 0.0036), "qnn": (2.4, 0.49)}   # qsvc: per row fitted+scored; qnn: per fit row
+#: qnn per fit on mps relative to the 8-qubit sv law (labor 16q mps: 39.8 s vs 19.6 s).
+QNN_MPS_FACTOR = 2.0
+#: Classical group, all nine arms, per split: a + b * rows (the startup is extra).
+CLASSICAL_SPLIT_S = (45.0, 0.36)
+#: Measured / predicted per (arm, bk) after the laws above, from ctrl1; 1.0 = trusted.
+MANIFEST_CALIBRATION = {("pqk", "sv"): 1.0, ("pqk", "mps"): 1.07, ("qsvc", "mps"): 1.07,
+                        ("qsvc", "sv"): 1.0, ("qnn", "sv"): 1.0, ("qnn", "mps"): 1.0,
+                        ("vqc", "sv"): 1.0, ("vqc", "mps"): 1.0}
+#: The (arm-or-group, bk, qubits) points and the largest row count the laws were fitted on.
+MANIFEST_CALIBRATED = {"widths": {("sv", 8), ("mps", 16)}, "max_rows": 267}
+AUTO_WALL_SAFETY = 3.0             # wall = safety x expected + margin
+AUTO_WALL_MARGIN_H = 0.25
+AUTO_WALL_MIN_H = 0.5
+AUTO_WALL_MAX_H = 72.0             # the queue's ABS_RUNLIMIT ceiling
+
+
+def manifest_rows(rows, k=5):
+    """(n_fit, n_val, n_train, n_test) of one outer split of a ``rows``-row dataset."""
+    n_te = max(1, int(round(rows / k)))
+    n_tr = rows - n_te
+    return n_tr - n_te, n_te, n_tr, n_te
+
+
+def manifest_split_seconds(group, bk, q, rows, k=5, n_trials=30):
+    """Expected seconds for ONE outer split of one model group in a manifest job.
+
+    ``group`` is a quantum arm ('qsvc', 'pqk', 'qnn', 'vqc') or 'classical'. Excludes the
+    per-job startup (JOB_OVERHEAD_S).
+    """
+    n_fit, n_val, n_tr, n_te = manifest_rows(rows, k)
+    if group == "classical":
+        a, b = CLASSICAL_SPLIT_S
+        return a + b * rows
+    if group == "qsvc" and bk == "sv":
+        a, b = MANIFEST_LINEAR_S["qsvc"]
+        # One statevector per row; the per-row cost grows with the 2^q amplitudes.
+        width = 2.0 ** (q - 8) * q / 8.0
+        per_fit = lambda n: a + b * n * width  # noqa: E731
+        secs = n_trials * per_fit(n_fit + n_val) + per_fit(n_tr + n_te)
+    elif group == "qnn":
+        a, b = MANIFEST_LINEAR_S["qnn"]
+        scale = QNN_MPS_FACTOR if bk == "mps" else 2.0 ** max(0, q - 8) * q / 8.0
+        secs = scale * (n_trials * (a + b * n_fit) + (a + b * n_tr))
+    else:
+        g = grid_factor(group, bk, q, "mean")
+        secs = (n_trials * fit_seconds(group, bk, q, n_fit, n_val)
+                + fit_seconds(group, bk, q, n_tr, n_te)) * g
+    return secs * MANIFEST_CALIBRATION.get((group, bk), 1.0)
+
+
+def manifest_job_hours(group, bk, q, rows, k=5, n_trials=30, n_splits=1):
+    """Expected wall-clock hours of one manifest job: startup + n_splits splits."""
+    return (JOB_OVERHEAD_S + n_splits * manifest_split_seconds(group, bk, q, rows, k, n_trials)) / 3600.0
+
+
+def manifest_extrapolated(bk, q, rows):
+    """True when (bk, q, rows) lies outside what the manifest laws were fitted on."""
+    return (bk, q) not in MANIFEST_CALIBRATED["widths"] or rows > MANIFEST_CALIBRATED["max_rows"]
+
+
+def auto_wall(hours):
+    """LSF -W for an expected run of ``hours``: ``(H:MM, capped)``.
+
+    safety x expected + margin, rounded up to 15 minutes, at least AUTO_WALL_MIN_H and at
+    most AUTO_WALL_MAX_H; ``capped`` says the ceiling cut it, i.e. the job is expected to
+    need more than the queue allows and should be split (fewer splits per job) or dropped.
+    """
+    want = AUTO_WALL_SAFETY * hours + AUTO_WALL_MARGIN_H
+    capped = want > AUTO_WALL_MAX_H
+    h = min(max(want, AUTO_WALL_MIN_H), AUTO_WALL_MAX_H)
+    quarters = math.ceil(h * 4 - 1e-9)
+    return f"{quarters // 4}:{(quarters % 4) * 15:02d}", capped
+
+
+def calibrate_manifest(manifest_tsv, runtimes):
+    """Measured / expected per (group, bk) for a finished manifest run.
+
+    Args:
+        manifest_tsv: the run's MANIFEST.tsv (pandas DataFrame).
+        runtimes: {config: seconds} from the LSF logs ("Run time").
+
+    Returns:
+        A DataFrame per (group, bk, qubits, rows): jobs, median measured and expected
+        seconds and their ratio, to update MANIFEST_CALIBRATION and the laws above.
+    """
+    import pandas as pd
+
+    rows = []
+    for _, r in manifest_tsv.iterrows():
+        if r["config"] not in runtimes:
+            continue
+        bk = "mps" if r["backend"] == "mps_simulator" else "sv"
+        n_splits = len(str(r["iteration"]).split(";"))
+        exp = manifest_job_hours(r["group"], bk, int(r["qubits"]), int(r["rows"]),
+                                 n_trials=int(r["n_trials"]), n_splits=n_splits) * 3600
+        rows.append(dict(group=r["group"], bk=bk, qubits=int(r["qubits"]), rows=int(r["rows"]),
+                         measured_s=runtimes[r["config"]], expected_s=exp))
+    df = pd.DataFrame(rows)
+    out = df.groupby(["group", "bk", "qubits", "rows"]).agg(
+        jobs=("measured_s", "size"), measured_s=("measured_s", "median"),
+        expected_s=("expected_s", "median")).reset_index()
+    out["ratio"] = out["measured_s"] / out["expected_s"]
+    return out
