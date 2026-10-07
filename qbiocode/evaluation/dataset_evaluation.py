@@ -466,7 +466,7 @@ def get_volume(df):
     return vol
 
 
-def get_complexity(df, n_neighbors=10, n_components=2):
+def get_complexity(df, n_neighbors=10, n_components=2, random_state=0):
     """Measure manifold complexity via Isomap's geodesic-vs-Euclidean residual.
 
     This function computes the reconstruction error of the Isomap algorithm, which
@@ -476,6 +476,7 @@ def get_complexity(df, n_neighbors=10, n_components=2):
         df (pandas.DataFrame): Dataset in pandas with observation in rows, features in columns
         n_neighbors: Number of neighbors for the Isomap algorithm. Default value 10
         n_components: Number of components (dimensions) for Isomap projection.  Default value 2
+        random_state: Seed of the ARPACK start vector (see below). Default value 0
 
     Returns:
         float: The reconstruction error of the fitted Isomap model -- the
@@ -485,7 +486,17 @@ def get_complexity(df, n_neighbors=10, n_components=2):
     # Both arguments are forwarded. They used to be accepted and then ignored in
     # favour of hardcoded 10 and 2, so passing anything else silently did nothing.
     isomap = Isomap(n_neighbors=n_neighbors, n_components=n_components)
-    isomap.fit(df.values)
+    # Above 200 rows Isomap's KernelPCA solves with ARPACK and starts it from a vector drawn
+    # from numpy's global RNG (Isomap takes no random_state), so on identical data the
+    # error moved in the 5th-6th significant figure from run to run -- enough for
+    # collate_results.py to report two jobs of one pass as having seen different features.
+    # Seed that one draw, and leave the global stream as it was.
+    state = np.random.get_state()
+    np.random.seed(random_state)
+    try:
+        isomap.fit(df.values)
+    finally:
+        np.random.set_state(state)
 
     # reconstruction error - an indicator of complexity
     reconstruction_error = isomap.reconstruction_error()
@@ -555,7 +566,7 @@ def evaluate(df, y, file, random_state=0, mfe_features=None, task_spectrum=True,
     num_low_variance_features = get_low_var_features(df_numeric, n_features)
     avg_co_of_v, std_co_of_v = get_coefficient_var(df_numeric)
     mean_log_density = get_log_density(df_numeric)
-    complexity = get_complexity(df_numeric)
+    complexity = get_complexity(df_numeric, random_state=random_state)
     fractal_dim = get_fractal_dim(df_numeric, k_max=5)
 
     summary = {

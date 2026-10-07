@@ -281,6 +281,37 @@ class TestReproducibility:
         assert a.keys() == b.keys()
         assert any(a[k] != b[k] for k in a), "random_state had no effect anywhere"
 
+    def test_isomap_does_not_read_the_global_rng(self, monkeypatch):
+        """Isomap takes no ``random_state``, and above 200 rows its ARPACK solver starts
+        from a vector drawn from numpy's global RNG.
+
+        Unseeded, the reconstruction error of one cached UMAP embedding moved in the
+        6th digit between LSF jobs, and ``collate_results.py`` refused the run as
+        "different training features". ``get_complexity`` seeds that one draw and puts
+        the caller's global stream back afterwards; the spy records what ``fit`` would
+        draw first.
+        """
+        from sklearn.manifold import Isomap
+
+        seen, real_fit = [], Isomap.fit
+
+        def spy(self, X, y=None):
+            seen.append(np.random.random())
+            return real_fit(self, X, y)
+
+        monkeypatch.setattr(Isomap, "fit", spy)
+        X, _ = _fixture()
+        values = []
+        for outer in (0, 1):
+            np.random.seed(outer)
+            before = np.random.get_state()
+            values.append(get_complexity(X))
+            after = np.random.get_state()
+            np.testing.assert_array_equal(before[1], after[1])
+            assert before[2] == after[2], "get_complexity moved the caller's global RNG"
+        assert seen[0] == seen[1], "Isomap.fit still sees the caller's global RNG"
+        assert values[0] == values[1]
+
 
 class TestWideData:
     """``p >> n`` is the normal case for omics matrices, not an edge case."""
