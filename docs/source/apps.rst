@@ -14,7 +14,9 @@ QProfiler is an automated benchmarking tool for comparing quantum and classical 
 * Statistical analysis and visualization tools
 * Support for custom datasets and embeddings
 
-See the :doc:`QProfiler documentation <apps/profiler>` for detailed usage instructions.
+See the :doc:`QProfiler documentation <apps/profiler>` for detailed usage instructions, and
+:doc:`Benchmarking <benchmarking>` for running it across a whole corpus, from curated
+data to a meta-analysis.
 
 QSage
 -----

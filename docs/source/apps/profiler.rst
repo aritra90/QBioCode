@@ -13,7 +13,7 @@ QProfiler is a comprehensive tool that goes beyond simple model evaluation. It p
 
 📊 **What QProfiler Does**
    1. **Runs Multiple Models**: Evaluates classical (RF, SVM, LR, XGBoost, CatBoost, TabPFN, etc.) and quantum (QSVC, PQK, VQC) algorithms
-   2. **Analyzes Data Complexity**: Computes 125 complexity measures before model training
+   2. **Analyzes Data Complexity**: Computes 141 complexity measures before model training (see :doc:`../dataset_metrics`)
    3. **Correlates Results**: Links model performance to data characteristics
    4. **Automates Workflows**: Handles data splitting, scaling, encoding, and evaluation
 
@@ -153,287 +153,28 @@ You can also import and use QProfiler components directly in Python:
 For complete examples, see the :doc:`QProfiler Tutorial <../tutorials/QProfiler/example_qprofiler>`.
 
 
-.. _data-complexity-measures:
-
 Data Complexity Measures
 =========================
 
-In data mining and machine learning, we can distinguish between two fundamental types of complexity that affect model performance:
+QProfiler describes every dataset before it fits a single model: **141 complexity
+measures** per (dataset, embedding, split) pass, written beside every score in
+``ModelResults.csv`` and, for the raw data, in ``RawDataEvaluation.csv``. They come in
+three blocks:
 
-**Intrinsic Complexity**
-   Inherent structure of the data that makes it difficult to learn, independent of the algorithm:
-   
-   - **Class distribution**: Imbalanced or overlapping classes
-   - **Non-linear decision boundaries**: Complex separating surfaces
-   - **Higher-order correlations**: Interactions between multiple features
-   - **Noise**: Random variations in the data
+- **10 native measures**, computed by QBioCode because pyMFE has none of them: intrinsic
+  dimension, condition number, Fisher discriminant ratio, coefficient of variation,
+  sparsity, kernel density, Isomap reconstruction error and fractal dimension.
+- **115 pyMFE columns** (``mfe.*``) from a curated 76 of pyMFE's meta-features: the
+  Lorena et al. complexity suite, landmarking, statistics, information theory, trees and
+  clustering.
+- **16 target-spectrum columns** (``task.*``), which are label-based: where ``y`` sits in
+  the geometric spectrum of ``X``. They tell a smooth target from a structured
+  oscillatory one (parity, checkerboard) and from noise, each with a permutation-null
+  z-score.
 
-**Extrinsic Complexity**
-   Complexity arising from external factors dependent on the algorithm or preprocessing:
-   
-   - **Preprocessing issues**: Inadequate feature scaling or transformation
-   - **Misalignment between model and data**: Model assumptions don't match data structure
-   - **Learning limitations of models**: Insufficient capacity or inappropriate inductive bias
-
-.. figure:: ../_static/IEComplexity.png
-   :align: center
-   :width: 80%
-   
-   Intrinsic vs. Extrinsic Complexity: Understanding the sources of learning difficulty in machine learning tasks.
-
-QProfiler automatically computes the following complexity measures for each dataset to characterize its intrinsic properties and predict model performance.
-
-.. admonition:: Where these numbers come from
-   :class: note
-
-   Most of the measures below are extracted with `pyMFE
-   <https://github.com/ealcobaca/pymfe>`_ and appear in the output with an ``mfe.``
-   prefix (``mfe.var.mean``, ``mfe.f1.mean``, ...). The rest are computed directly by
-   :mod:`qbiocode.evaluation.dataset_evaluation` because pyMFE has no equivalent:
-   intrinsic dimension, condition number, Fisher discriminant ratio, coefficient of
-   variation, low-variance feature count, non-zero entry count, mean log kernel
-   density, Isomap reconstruction error and fractal dimension.
-
-   QBioCode uses a **curated subset** of pyMFE's ~105 meta-features, not all of them.
-   A large fraction are unusable on the data QProfiler profiles -- all-numeric,
-   binary-labelled, and frequently with far more features than samples -- either
-   because they are undefined (and pyMFE reports that as a silent ``NaN``), because
-   they collapse to a constant, or because they are quadratic in the feature count and
-   so intractable on an omics matrix. Every exclusion is recorded with its measured
-   reason in :mod:`qbiocode.evaluation.mfe_features`, and
-   ``tests/test_dataset_evaluation.py`` keeps them excluded.
-
-Classification Complexity (Lorena et al. 2019)
-----------------------------------------------
-
-The F, L, N, T and C families measure how hard the classes are to separate, rather
-than how the data is distributed. ``mfe.f1``--``mfe.f4`` measure feature overlap
-between classes; ``mfe.l1``--``mfe.l3`` measure how far the problem is from linearly
-separable; ``mfe.n1``--``mfe.n4``, ``mfe.lsc``, ``mfe.density``, ``mfe.cls_coef`` and
-``mfe.hubs`` describe the neighbourhood and adjacency-graph structure around the class
-boundary; ``mfe.t3``/``mfe.t4`` are PCA-based dimensionality ratios; ``mfe.c2`` is the
-class-imbalance ratio.
-
-.. note::
-
-   The L family, ``mfe.f2`` and ``mfe.f4`` are informative when :math:`p < n` but
-   degenerate when :math:`p \ge n`: a dataset with more features than samples is
-   almost always linearly separable, so L1, L2, L3 and F4 all go to zero regardless of
-   how hard the problem really is. They are most useful on the *embedded* data, where
-   the dimension is small. Read them alongside ``mfe.attr_to_inst``.
-
-*Reference:* Lorena, A. C., et al. (2019). "How Complex is your classification
-problem? A survey on measuring classification complexity." *ACM Computing Surveys*,
-52(5), 1-34.
-
-Landmarking
------------
-
-The accuracy of deliberately cheap learners on the dataset itself -- a 1-nearest
-neighbour (``mfe.one_nn``), naive Bayes (``mfe.naive_bayes``), linear discriminant
-analysis (``mfe.linear_discr``), single decision-tree nodes (``mfe.best_node``,
-``mfe.worst_node``) and a 1-NN restricted to the most informative features
-(``mfe.elite_nn``). These are the most directly useful features for
-:doc:`QSage <sage>`: rather than describing the data and hoping the description
-predicts model performance, a landmark *is* a cheap measurement of model performance.
-
-*Reference:* Pfahringer, B., Bensusan, H., & Giraud-Carrier, C. (2000). "Meta-learning
-by landmarking various learning algorithms." *ICML*, 743-750.
-
-Model-Based, Clustering and Concept Measures
---------------------------------------------
-
-``mfe.leaves``, ``mfe.nodes``, ``mfe.tree_depth`` and their relatives describe the
-shape of a decision tree induced on the data -- a deeper, bushier tree implies a more
-convoluted decision boundary. ``mfe.sil``, ``mfe.ch``, ``mfe.vdb``, ``mfe.vdu``,
-``mfe.int`` and ``mfe.pb`` are cluster-validity indices measuring how well the class
-labels line up with the data's own geometry. ``mfe.conceptvar``, ``mfe.wg_dist``,
-``mfe.impconceptvar`` and ``mfe.cohesiveness`` measure how variable the labels are
-among near neighbours.
-
-Dimensionality Metrics
-----------------------
-
-**Number of Features, Samples, and Feature-to-Sample Ratio**
-   Basic dataset dimensions that characterize the problem scale. High feature-to-sample ratios (:math:`p/n > 1`) indicate high-dimensional problems prone to overfitting, known as the "curse of dimensionality."
-   
-   .. math::
-      
-      \text{Ratio} = \frac{p}{n}
-   
-   where :math:`p` = number of features, :math:`n` = number of samples.
-   
-   *Reference:* Bellman, R. (1961). *Adaptive Control Processes*. Princeton University Press.
-
-**Intrinsic Dimension**
-   Estimates the true dimensionality of data embedded in high-dimensional space. While data may have :math:`p` features, it often lies on a lower-dimensional manifold of dimension :math:`d \ll p`. Lower intrinsic dimension suggests the data structure is simpler than the ambient dimension implies.
-   
-   .. math::
-      
-      d_{\text{intrinsic}} \ll p
-   
-   *Reference:* Fukunaga, K., & Olsen, D. R. (1971). "An algorithm for finding intrinsic dimensionality of data." *IEEE Transactions on Computers*, C-20(2), 176-183.
-
-**Fractal Dimension**
-   Measures self-similarity and geometric complexity of data structure. Values range from 1 (simple line) to 2 (space-filling), indicating varying degrees of complexity and irregularity in the data manifold.
-   
-   .. math::
-      
-      D_f = \lim_{\epsilon \to 0} \frac{\log N(\epsilon)}{\log(1/\epsilon)}
-   
-   where :math:`N(\epsilon)` is the number of boxes of size :math:`\epsilon` needed to cover the data.
-   
-   .. figure:: ../_static/Sierpinski_triangle.png
-      :align: center
-      :width: 40%
-      
-      Sierpinski Triangle: A classic example of a fractal with self-similar structure at multiple scales, illustrating the concept of fractal dimension.
-   
-   *Reference:* Higuchi, T. (1988). "Approach to an irregular time series on the basis of the fractal theory." *Physica D: Nonlinear Phenomena*, 31(2), 277-283.
-
-Statistical Properties
-----------------------
-
-**Variance**
-   Measures data spread across features. Low variance features (:math:`\sigma^2 \approx 0`) may not contribute to discrimination; high variance may indicate noise or important signal variation.
-   
-   .. math::
-      
-      \sigma^2 = \frac{1}{n}\sum_{i=1}^{n}(x_i - \mu)^2
-
-**Coefficient of Variation (CV)**
-   Normalized measure of dispersion that enables comparison across features with different scales. Expressed as percentage of the mean.
-   
-   .. math::
-      
-      CV = \frac{\sigma}{\mu} \times 100\%
-   
-   *Reference:* Abdi, H. (2010). "Coefficient of variation." *Encyclopedia of Research Design*, 1, 169-171.
-
-**Skewness**
-   Third statistical moment measuring distribution asymmetry. Negative skewness indicates left-tailed distributions, zero indicates symmetry (normal distribution), and positive skewness indicates right-tailed distributions.
-   
-   .. math::
-      
-      \text{Skewness} = \frac{E[(X-\mu)^3]}{\sigma^3}
-   
-   .. figure:: ../_static/skew.png
-      :align: center
-      :width: 70%
-      
-      Distribution skewness: negative skew (left-tailed), zero skew (symmetric), and positive skew (right-tailed). Skewness quantifies the asymmetry of probability distributions.
-
-**Kurtosis**
-   Fourth statistical moment measuring tail heaviness and peakedness of distributions. Higher kurtosis indicates heavier tails and more outliers; lower kurtosis indicates lighter tails. Normal distribution has kurtosis of 3 (excess kurtosis of 0).
-   
-   .. math::
-      
-      \text{Kurtosis} = \frac{E[(X-\mu)^4]}{\sigma^4}
-   
-   .. figure:: ../_static/kurt.jpg
-      :align: center
-      :width: 70%
-      
-      Distribution kurtosis: platykurtic (light tails, kurtosis < 3), mesokurtic (normal, kurtosis = 3), and leptokurtic (heavy tails, kurtosis > 3). Kurtosis quantifies tail behavior and outlier propensity.
-   
-   *Reference:* Joanes, D. N., & Gill, C. A. (1998). "Comparing measures of sample skewness and kurtosis." *Journal of the Royal Statistical Society: Series D*, 47(1), 183-189.
-
-**Nonzero Value Count**
-   Measures data sparsity. High sparsity (many zeros) indicates sparse representations that may benefit from specialized algorithms or dimensionality reduction.
-
-**Low Variance Feature Count**
-   Number of features below the 25th percentile of variance distribution. Identifies potentially uninformative features that contribute little to model discrimination.
-
-Separability Measures
----------------------
-
-**Fisher Discriminant Ratio (FDR)**
-   Quantifies class separability as the ratio of between-class to within-class scatter. Higher values indicate better linear separability. Only defined for binary classification.
-   
-   .. math::
-      
-      \text{FDR} = \frac{\text{tr}(\mathbf{S}_B)}{\text{tr}(\mathbf{S}_W)}
-   
-   where :math:`\mathbf{S}_B` is between-class scatter and :math:`\mathbf{S}_W` is within-class scatter.
-   
-   *Reference:* Fisher, R. A. (1936). "The use of multiple measurements in taxonomic problems." *Annals of Eugenics*, 7(2), 179-188.
-
-**Mutual Information**
-   Measures statistical dependence between features and class labels. Higher values indicate features are more informative for classification. Mutual information can be expressed in terms of entropy:
-   
-   .. math::
-      
-      I(X;Y) &= \sum_{x,y} p(x,y) \log\frac{p(x,y)}{p(x)p(y)} \\
-      &= H(X) + H(Y) - H(X,Y) \\
-      &= H(X) - H(X|Y) \\
-      &= H(Y) - H(Y|X)
-   
-   where :math:`H(X)` and :math:`H(Y)` are the marginal entropies, :math:`H(X,Y)` is the joint entropy, and :math:`H(X|Y)` and :math:`H(Y|X)` are the conditional entropies.
-   
-   .. figure:: ../_static/MutualInformation.png
-      :align: center
-      :width: 50%
-      
-      Relationship between entropy, mutual information, and relative entropy (KL divergence). Mutual information quantifies the reduction in uncertainty about one variable given knowledge of another.
-   
-   *Reference:* Cover, T. M., & Thomas, J. A. (2006). *Elements of Information Theory*. Wiley-Interscience.
-
-**Feature Correlation** (``mfe.cor``, ``mfe.nr_cor_attr``)
-   Feature redundancy and multicollinearity. ``mfe.cor.mean`` is the *mean* absolute
-   correlation over feature pairs and ``mfe.nr_cor_attr`` the proportion of pairs whose
-   absolute correlation exceeds 0.5:
-
-   .. math::
-
-      \overline{|\rho|} = \frac{2}{p(p-1)}\sum_{i < j} |\rho_{ij}|
-
-   where :math:`\rho_{ij}` is the correlation between features :math:`i` and :math:`j`.
-
-   .. note::
-
-      This replaces an earlier ``Total Correlations`` column that reported the
-      unnormalized :math:`\sum_{i \neq j} |\rho_{ij}|`. That sum grows with
-      :math:`p^2`, so it was dominated by the feature count and not comparable between
-      datasets of different widths -- which is exactly the comparison QSage makes.
-
-   *Reference:* Watanabe, S. (1960). "Information theoretical analysis of multivariate correlation." *IBM Journal of Research and Development*, 4(1), 66-82.
-
-**Log Kernel Density**
-   Mean log-likelihood of data under Gaussian kernel density estimation. Indicates data concentration and distribution smoothness. Higher (less negative) values suggest more concentrated data.
-   
-   .. math::
-      
-      \log p(x) = \frac{1}{n}\sum_{i=1}^{n} \log\left(\frac{1}{nh^d}\sum_{j=1}^{n}K\left(\frac{x_i-x_j}{h}\right)\right)
-   
-   where :math:`K` is the kernel function and :math:`h` is the bandwidth.
-   
-   .. figure:: ../_static/KernelDensityGaussianAnimation.gif
-      :align: center
-      :width: 60%
-      
-      Gaussian kernel density estimation: Animation showing how individual kernels (dashed lines) combine to form the overall density estimate (solid line). The bandwidth parameter controls the smoothness of the estimate.
-   
-   *Reference:* Silverman, B. W. (1986). *Density Estimation for Statistics and Data Analysis*. Chapman and Hall.
-
-Matrix Properties
------------------
-
-**Condition Number**
-   Ratio of largest to smallest singular value of the data matrix. Measures numerical stability and sensitivity to perturbations. High values (:math:`\kappa > 10^3`) indicate ill-conditioned problems with potential numerical instability.
-   
-   .. math::
-      
-      \kappa(\mathbf{X}) = \frac{\sigma_{\max}(\mathbf{X})}{\sigma_{\min}(\mathbf{X})} = \|\mathbf{X}\| \cdot \|\mathbf{X}^{-1}\|
-   
-   where :math:`\sigma_{\max}` and :math:`\sigma_{\min}` are the largest and smallest singular values.
-   
-   *Reference:* Golub, G. H., & Van Loan, C. F. (2013). *Matrix Computations* (4th ed.). Johns Hopkins University Press.
-
-.. admonition:: Key References
-   :class: tip
-   
-   - **Comprehensive Overview:** `Data Complexity slides <https://github.com/qiskit-community/QBioCode/blob/Tutorial_ISMB25/ISMB2025/SessionII/DataComplexity/datacomplex.pdf>`_ from ISMB 2025 tutorial
-   - **Meta-Learning Context:** Lorena, A. C., et al. (2019). "How Complex is your classification problem? A survey on measuring classification complexity." *ACM Computing Surveys*, 52(5), 1-34.
+.. important::
+   Every measure is defined, with formulas, headline readings and references, on the
+   :doc:`Dataset complexity metrics <../dataset_metrics>` page.
 
 
 Configuration

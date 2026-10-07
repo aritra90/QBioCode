@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Docs: a Benchmarking guide and a Dataset metrics page
+
+- **`benchmarking.md`**, in the top navigation beside Tutorials and Applications, takes a
+  newcomer through the whole benchmark: curate, synthesize, split, hold out, configure,
+  embed once, run QProfiler on the YAMLs (on LSF or by hand), collect, select winners,
+  read the kernel dumps (Huang et al.'s geometry) and run the meta-analysis. Each step
+  shows its command, what it writes and where, a real sample of the output, and tips on
+  what to keep in mind. It ends with a checklist and a table of where every artefact
+  lives.
+- **`dataset_metrics.md`**, also in the top navigation: the 141 complexity measures,
+  which used to be a section deep inside the QProfiler page. It covers the 10 native
+  measures, the 16 label-based target-spectrum measures (new) with their permutation
+  null, and the pyMFE headliners with a link to pyMFE's own catalogue. The QProfiler
+  page keeps a short summary under the old heading, so existing links still resolve.
+
 #### A bandwidth for the quantum kernels: `bandwidth` on qsvc, pqk and qpl
 
 - **`compute_qsvc`, `compute_pqk` and `compute_qpl` take `bandwidth`**, and their `_opt`
