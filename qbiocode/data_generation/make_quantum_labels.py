@@ -64,31 +64,42 @@ TAU = [1.0]
 ENCODINGS = ("zz", "evo")
 
 
-def _quantum_label_name(n, encoding, tau, seed, data_map="qiskit"):
+def _quantum_label_name(n, encoding, tau, seed, data_map="qiskit", concept_seed=None,
+                        bandwidth=1.0):
     """The default dataset name for one configuration.
 
-    The ``data_map`` suffix is appended only for the non-default map, and only
-    for the ``'zz'`` encoding that has a data map at all, so every name
-    generated before that option existed is unchanged.
+    The ``data_map``, ``bandwidth`` and ``concept_seed`` suffixes are appended only off
+    their defaults (``data_map`` only for the ``'zz'`` encoding that has one), so every
+    name generated before those options existed is unchanged.
     """
     suffix = "" if (data_map == "qiskit" or encoding != "zz") else f"_dm{data_map}"
+    if bandwidth != 1.0:
+        suffix += f"_bw{bandwidth:g}"
+    if concept_seed is not None:
+        suffix += f"_c{concept_seed}"
     return f"ql_{encoding}_n{n}_tau{tau:g}_s{seed}{suffix}"
 
 
 def _quantum_label_dataset(save_path, name, n, n_rows, encoding, tau, reps, entanglement,
-                           margin, seed, blas_threads, data_map):
+                           margin, seed, blas_threads, data_map, concept_seed=None,
+                           bandwidth=1.0):
     """Build and write one quantum-label dataset."""
     rng = np.random.default_rng(seed)
     with blas_limit(n, blas_threads):
         X = rng.uniform(0, 1, size=(n_rows, n))
-        Hh = pauli_sum(n, heisenberg_terms(n, rng)).toarray()
+        # The concept (the Hamiltonian) comes from its own seed when one is given, so
+        # every random_state then samples the SAME concept. Without one it comes from
+        # the data stream, after X, exactly as before.
+        crng = rng if concept_seed is None else np.random.default_rng(concept_seed)
+        Hh = pauli_sum(n, heisenberg_terms(n, crng)).toarray()
         E, V = np.linalg.eigh(Hh)
         U = (V * np.exp(-1j * E * tau)) @ V.conj().T
         obs = [Pauli(n, {0: "Z"})]
         F = []
         for x in X:
-            psi = (zz_feature_state(x, reps, entanglement, data_map) if encoding == "zz"
-                   else evo_encoding_state(x))
+            xb = x if bandwidth == 1.0 else bandwidth * x
+            psi = (zz_feature_state(xb, reps, entanglement, data_map) if encoding == "zz"
+                   else evo_encoding_state(xb))
             F.append(expvals(U @ psi, obs)[0, 0])
         F = np.array(F)
         thr, keep = threshold(F, margin)
@@ -98,6 +109,11 @@ def _quantum_label_dataset(save_path, name, n, n_rows, encoding, tau, reps, enta
                     label_rule="1[<Z0> > median] after exp(-i H_heis tau) U_enc(x)|0>",
                     threshold=thr, margin=margin, seed=seed,
                     note="run with scaling off (inputs already in [0,1]) if encoder alignment matters")
+        # Recorded off the default only, so earlier metadata stays byte-identical.
+        if concept_seed is not None:
+            meta["concept_seed"] = concept_seed
+        if bandwidth != 1.0:
+            meta["bandwidth"] = bandwidth
         return write_dataset(save_path, name, X[keep], [f"x{i}" for i in range(n)],
                              y[keep], F[keep], meta)
 
@@ -115,6 +131,8 @@ def generate_quantum_label_datasets(
     random_state=0,
     blas_threads=1,
     data_map="qiskit",
+    concept_seed=None,
+    bandwidth=1.0,
 ):
     """
     Generate datasets with classical features and circuit-generated labels.
@@ -151,8 +169,8 @@ def generate_quantum_label_datasets(
         Override the generated dataset name. Only valid when the sweep yields a
         single dataset.
     random_state : int or list of int, default=0
-        Seed, or seeds to sweep over. It sets both the inputs and the Heisenberg
-        Hamiltonian.
+        Seed, or seeds to sweep over. It sets the inputs, and the Heisenberg
+        Hamiltonian too unless ``concept_seed`` is given.
     blas_threads : int or None, default=1
         BLAS threads for the linear algebra. Pass ``None`` to leave threading
         untouched.
@@ -163,6 +181,15 @@ def generate_quantum_label_datasets(
         and recorded as ``None`` in its metadata. Not swept; the non-default
         value adds a ``_dmunit`` suffix to the dataset name. See
         :func:`~qbiocode.data_generation.quantum_core.zz_feature_state`.
+    concept_seed : int, optional
+        Seed of the Heisenberg Hamiltonian alone. With it, every ``random_state`` is a
+        new sample of ONE concept; without it (the default, and every dataset written
+        before it existed) each ``random_state`` also draws a new concept. Not swept;
+        adds a ``_c<seed>`` suffix to the name.
+    bandwidth : float, default=1.0
+        The inputs are encoded as ``bandwidth * x``, the scale QProfiler's ``qsvc``,
+        ``pqk`` and ``qpl`` take as ``bandwidth``. The written features stay ``x``.
+        Not swept; off 1.0 it adds a ``_bw<value>`` suffix to the name.
 
     Returns
     -------
@@ -205,6 +232,11 @@ def generate_quantum_label_datasets(
             "'qiskit' targets QProfiler's qsvc, 'unit' targets its pqk. "
             "Ignored by the 'evo' encoding, which has no data map."
         )
+    if isinstance(bandwidth, (bool, np.bool_)) or not isinstance(
+            bandwidth, (int, float, np.integer, np.floating)) \
+            or not np.isfinite(bandwidth) or bandwidth <= 0:
+        raise ValueError(f"bandwidth must be a positive finite number; got {bandwidth!r}.")
+    bandwidth = float(bandwidth)
     if entanglement not in ENTANGLEMENTS:
         # Checked here rather than left to zz_feature_state: the 'evo' encoding never
         # reaches the feature map, so a typo would pass silently and be recorded in
@@ -218,13 +250,13 @@ def generate_quantum_label_datasets(
     reject_name_for_sweep(
         name, len(configurations), ["n_qubits", "n_samples", "encoding", "tau", "random_state"]
     )
-    names = [name or _quantum_label_name(n, enc, t, seed, data_map)
+    names = [name or _quantum_label_name(n, enc, t, seed, data_map, concept_seed, bandwidth)
              for n, _, enc, t, seed in configurations]
     ensure_unique_names(names, unnamed_knobs=["n_samples"])
     metas = []
     for (n, n_rows, enc, t, seed), dataset_name in zip(configurations, names):
         metas.append(_quantum_label_dataset(
             save_path, dataset_name, n, n_rows, enc, t, reps, entanglement,
-            float(margin), seed, blas_threads, data_map,
+            float(margin), seed, blas_threads, data_map, concept_seed, bandwidth,
         ))
     return metas

@@ -559,6 +559,57 @@ class TestTheKnobsThatChangeTheConcept:
         assert len(metas) == 1
         assert read_view(tmp_path, "x_view", _only_name(tmp_path)).shape[1] - 1 == 2 * 4 * 3
 
+    @staticmethod
+    def _ql_target(X, H, bandwidth=1.0, tau=1.0):
+        """<Z0> after exp(-i H tau) on the ZZ state of ``bandwidth * x``, written out again."""
+        U = expm(-1j * tau * H)
+        z0 = quantum_core.pauli_sum(X.shape[1], [(1.0, quantum_core.Pauli(X.shape[1], {0: "Z"}))])
+        z0 = z0.toarray() if hasattr(z0, "toarray") else z0
+        out = []
+        for x in X:
+            psi = U @ quantum_core.zz_feature_state(bandwidth * x, 2, "linear", "qiskit")
+            out.append(np.real(psi.conj() @ z0 @ psi))
+        return np.array(out)
+
+    def _ql(self, tmp_path, seed, **kw):
+        quantum_labels.generate_quantum_label_datasets(
+            n_qubits=4, n_samples=16, tau=1.0, random_state=seed, save_path=str(tmp_path), **kw)
+        name = _only_name(tmp_path)
+        X = read_view(tmp_path, "x_view", name).drop(columns="label").to_numpy()
+        return name, X, np.load(tmp_path / "meta" / f"{name}_F.npy")
+
+    def test_a_concept_seed_makes_every_seed_a_sample_of_one_concept(self, tmp_path):
+        """Without it the Hamiltonian is redrawn per seed, so seeds are different concepts."""
+        H = quantum_core.pauli_sum(
+            4, quantum_core.heisenberg_terms(4, np.random.default_rng(5))).toarray()
+        for seed in (0, 1):
+            _, X, F = self._ql(tmp_path / f"s{seed}", seed, concept_seed=5)
+            np.testing.assert_allclose(F, self._ql_target(X, H), atol=1e-10)
+
+    def test_the_default_still_draws_the_concept_from_the_data_stream(self, tmp_path):
+        """Bit-for-bit the old order: X first, then the Hamiltonian, from one generator."""
+        rng = np.random.default_rng(3)
+        rng.uniform(0, 1, size=(16, 4))
+        H = quantum_core.pauli_sum(4, quantum_core.heisenberg_terms(4, rng)).toarray()
+        name, X, F = self._ql(tmp_path, 3)
+        np.testing.assert_allclose(F, self._ql_target(X, H), atol=1e-10)
+        assert name == "ql_zz_n4_tau1_s3"
+
+    def test_bandwidth_encodes_b_x_and_writes_x(self, tmp_path):
+        H = quantum_core.pauli_sum(
+            4, quantum_core.heisenberg_terms(4, np.random.default_rng(5))).toarray()
+        name, X, F = self._ql(tmp_path, 0, concept_seed=5, bandwidth=0.5)
+        np.testing.assert_allclose(X, np.random.default_rng(0).uniform(0, 1, size=(16, 4)))
+        np.testing.assert_allclose(F, self._ql_target(X, H, bandwidth=0.5), atol=1e-10)
+        meta = json.loads((tmp_path / "meta" / f"{name}.json").read_text())
+        assert name.endswith("_bw0.5_c5") and meta["bandwidth"] == 0.5 and meta["concept_seed"] == 5
+
+    @pytest.mark.parametrize("bad", [0, -1.0, float("nan"), True, "1"])
+    def test_a_bandwidth_that_is_not_a_positive_number_is_refused(self, bad, tmp_path):
+        with pytest.raises(ValueError, match="bandwidth"):
+            quantum_labels.generate_quantum_label_datasets(
+                n_qubits=4, n_samples=16, bandwidth=bad, save_path=str(tmp_path))
+
     def test_the_engineered_kernel_records_its_geometric_difference(self, tmp_path):
         """``g`` is the construction's own diagnostic, and it comes with a caveat.
 
