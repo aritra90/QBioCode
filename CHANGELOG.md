@@ -8,20 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Docs: a Benchmarking guide and a Dataset metrics page
+#### Docs: a Benchmarking section, a Dataset metrics page, and a calmer layout
 
-- **`benchmarking.md`**, in the top navigation beside Tutorials and Applications, takes a
-  newcomer through the whole benchmark: curate, synthesize, split, hold out, configure,
-  embed once, run QProfiler on the YAMLs (on LSF or by hand), collect, select winners,
-  read the kernel dumps (Huang et al.'s geometry) and run the meta-analysis. Each step
-  shows its command, what it writes and where, a real sample of the output, and tips on
-  what to keep in mind. It ends with a checklist and a table of where every artefact
-  lives.
-- **`dataset_metrics.md`**, also in the top navigation: the 141 complexity measures,
-  which used to be a section deep inside the QProfiler page. It covers the 10 native
-  measures, the 16 label-based target-spectrum measures (new) with their permutation
-  null, and the pyMFE headliners with a link to pyMFE's own catalogue. The QProfiler
-  page keeps a short summary under the old heading, so existing links still resolve.
+- **Six top-bar sections, each with a left sidebar:** Get started, Tutorials,
+  Benchmarking, Applications, API and Community. Installation, Background and Citing
+  moved under Get started, and the landing page has a card for each section.
+  `custom.css` used to hide the theme's entire left navigation, which left the top bar as
+  the only way around; now only its redundant heading is hidden.
+- **Benchmarking** (`benchmarking.md` and `benchmarking/`): an overview with the steps at a
+  glance, the file map and a checklist, then three short pages:
+  - Prepare the data: curate, synthesize, split, hold out;
+  - Configure and run: YAMLs, embedding cache, QProfiler on LSF or by hand;
+  - Collect and analyze: collate, winners, kernel geometry (Huang et al.), meta-analysis.
+
+  Each step shows its command, what it writes, a sample of the output in a dropdown, and
+  a tip.
+- **Dataset metrics** (`dataset_metrics.md`, in the Benchmarking sidebar): the 141
+  complexity measures, formerly a section deep inside the QProfiler page. It covers the 10
+  native measures, the 16 label-based target-spectrum measures with their permutation
+  null, and the pyMFE headliners in one table, linking to pyMFE. The QProfiler page keeps
+  a short summary under the old heading, so existing links still resolve.
+- **Calmer typography:** tables, tips, dropdowns and cards are a step below body text,
+  with tighter spacing.
 
 #### A bandwidth for the quantum kernels: `bandwidth` on qsvc, pqk and qpl
 

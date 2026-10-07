@@ -378,10 +378,12 @@ html_theme_options = {
     "navbar_start": ["navbar-logo"],
     "navbar_center": ["navbar-nav"],  # Add navigation to center
     "navbar_end": ["navbar-icon-links", "theme-switcher"],
-    "header_links_before_dropdown": 8,
-    "navigation_depth": 3,  # Increased depth for better navigation
+    # Six short sections in the top bar; each section's pages are in the left sidebar.
+    "header_links_before_dropdown": 6,
+    "navigation_depth": 2,  # the left sidebar: a section's pages and one level below
+    "show_nav_level": 1,
     "show_toc_level": 2,  # Show 2 levels in TOC
-    "collapse_navigation": False,  # Keep navigation expanded
+    "collapse_navigation": True,  # only the current branch expands, so the sidebar stays short
     "navigation_with_keys": True,  # Enable keyboard navigation
 }
 

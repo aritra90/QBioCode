@@ -57,11 +57,18 @@ dl.field-list dt {
     padding: 0.5em;
 }
 
-/* Improve admonition (note, warning, etc.) styling */
-.admonition {
-    margin: 1.5em 0;
-    padding: 1em;
-    border-radius: 4px;
+/* Admonitions (note, tip, warning): compact, a step below body text */
+.admonition,
+div.admonition {
+    margin: 1.1rem 0;
+    padding: 0.55rem 0.9rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+}
+
+.admonition > p:last-child,
+div.admonition > p:last-child {
+    margin-bottom: 0.2rem;
 }
 
 /* Better link styling in notebooks */
@@ -105,27 +112,50 @@ dl.field-list dt {
     }
 }
 
-/* Hide "Section Navigation" heading - Correct selectors from HTML */
+/* The left sidebar lists the pages of the current top-bar section. Its
+   "Section Navigation" heading is redundant with the highlighted tab, so only the
+   heading is hidden (hiding the whole nav left the top bar as the only way around). */
 .bd-links__title,
-p.bd-links__title,
-nav[aria-label="Section Navigation"],
-nav[aria-label="Section Navigation"] p {
-    display: none !important;
-    visibility: hidden !important;
-    height: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    overflow: hidden !important;
-}
-
-/* Hide the entire Section Navigation nav element */
-nav[aria-label="Section Navigation"] {
+p.bd-links__title {
     display: none !important;
 }
 
-/* Hide bd-toc-item content */
-.bd-toc-item {
-    display: none !important;
+.bd-sidebar-primary .bd-links {
+    font-size: 0.9rem;
+}
+
+/* ---- Calmer content: tables, dropdowns and cards a step below body text ---- */
+.bd-article table {
+    font-size: 0.875rem;
+    line-height: 1.45;
+}
+
+.bd-article table th,
+.bd-article table td {
+    padding: 0.4rem 0.65rem;
+    vertical-align: top;
+}
+
+.bd-article table code,
+.bd-article table code.literal {
+    font-size: 0.82rem;
+}
+
+.bd-article details.sd-dropdown {
+    font-size: 0.9rem;
+}
+
+.bd-article details.sd-dropdown > summary {
+    font-size: 0.95rem;
+}
+
+.bd-article .sd-card {
+    font-size: 0.92rem;
+}
+
+.bd-article .sd-card .sd-card-title {
+    font-size: 1rem;
+    margin-bottom: 0.3rem;
 }
 
 /* Also hide any WY theme navigation subsections as fallback */

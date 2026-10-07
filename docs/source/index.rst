@@ -34,30 +34,56 @@ Key Features
 Ready to dive into the world of quantum healthcare and life sciences?
 
 
-.. note::
-    Before you start, make sure that you have installed QBioCode correctly by following the  `Installation <https://qiskit-community.github.io/QBioCode/installation.html>`_ guide.
+.. grid:: 1 2 3 3
+   :gutter: 3
+   :class-container: sd-mt-3 sd-mb-4
 
+   .. grid-item-card:: :octicon:`rocket;1.4em;sd-mr-1` Get started
+      :link: get_started
+      :link-type: doc
+
+      Install QBioCode, the quantum machine learning background, and how to cite it.
+
+   .. grid-item-card:: :octicon:`mortar-board;1.4em;sd-mr-1` Tutorials
+      :link: tutorials
+      :link-type: doc
+
+      Worked notebooks, from data generation to QProfiler, QSage and QuVINE.
+
+   .. grid-item-card:: :octicon:`graph;1.4em;sd-mr-1` Benchmarking
+      :link: benchmarking
+      :link-type: doc
+
+      Classical vs quantum across a whole corpus, from raw data to a meta-analysis.
+
+   .. grid-item-card:: :octicon:`apps;1.4em;sd-mr-1` Applications
+      :link: apps
+      :link-type: doc
+
+      QProfiler, QSage and QuVINE, and their configuration.
+
+   .. grid-item-card:: :octicon:`code;1.4em;sd-mr-1` API
+      :link: api_overview
+      :link-type: doc
+
+      Every public module and function.
+
+   .. grid-item-card:: :octicon:`people;1.4em;sd-mr-1` Community
+      :link: workshops/index
+      :link-type: doc
+
+      Workshops, slides and hands-on sessions.
 
 .. toctree::
-    :maxdepth: 1
-    :titlesonly:
-    
-    Installation <installation.md>
-    Background <background.md>
-    Tutorials <tutorials.md>
-    Benchmarking <benchmarking.md>
-    Applications <apps>
-    Dataset metrics <dataset_metrics.md>
-    Simulated quantum datasets <quantum_datasets.md>
-    API <api_overview>
-    Citing <citing>
+   :hidden:
+   :maxdepth: 2
 
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Community
-
-   workshops/index
+   Get started <get_started>
+   Tutorials <tutorials.md>
+   Benchmarking <benchmarking.md>
+   Applications <apps>
+   API <api_overview>
+   Community <workshops/index>
 
 
 .. Indices and tables
