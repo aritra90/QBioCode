@@ -148,6 +148,7 @@ def compute_pqk(
     entanglement="linear",
     reps=2,
     data_map="unit",
+    bandwidth=1.0,
     *,
     head_scoring=None,
     head_max_iter=None,
@@ -184,6 +185,9 @@ def compute_pqk(
             ``'qiskit'`` is qiskit's default map, ``phi(x_i, x_j) = (pi - x_i)(pi - x_j)``.
             ``True``/``False`` are accepted as ``'unit'``/``'qiskit'``, matching
             :func:`qbiocode.embeddings.embed.pqk`.
+        bandwidth (float): Scale applied to the features before the feature map
+            (:func:`qbiocode.utils.qutils.apply_bandwidth`). Default 1.0, the unscaled
+            map; any other value is part of the projection cache key.
         head_scoring (str or None): Metric the classical head's ``RandomizedSearchCV``
             (40 candidates x 5 folds on the projections) picks its SVC by. None (the
             default) is sklearn's, accuracy. ``compute_pqk_opt`` sets the run's tuning
@@ -276,6 +280,9 @@ def compute_pqk(
             f"samples vs {len(y_train)} train labels, and {X_test.shape[0]} test "
             f"samples vs {len(y_test)} test labels."
         )
+    # Before the cache key, the projector and the feature map read the rows, so all of
+    # them see the scaled inputs. 1.0 returns the arrays unchanged.
+    X_train, X_test = qutils.apply_bandwidth(bandwidth, X_train, X_test)
     # ------------------------------------------------------------------------
 
     beg_time = time.time()
@@ -303,6 +310,10 @@ def compute_pqk(
     # circuit, so it must never reach a 'unit' file.
     if data_map != "unit":
         fingerprint_parts = fingerprint_parts + (f"data_map={data_map}",)
+    # The scaled rows already change the data digest below; named as well, off the default
+    # only, so 1.0 keeps every existing key.
+    if float(bandwidth) != 1.0:
+        fingerprint_parts = fingerprint_parts + (f"bandwidth={float(bandwidth)!r}",)
     _projection_backend = args.get("projection_backend")
     if _projection_backend:
         fingerprint_parts = fingerprint_parts + (_projection_backend,)
@@ -657,6 +668,8 @@ def compute_pqk(
     # byte-identical to results written before `data_map` existed.
     if data_map != "unit":
         hyperparameters["data_map"] = data_map
+    if float(bandwidth) != 1.0:
+        hyperparameters["bandwidth"] = bandwidth
     # Likewise only when set, so internal-mode rows are unchanged.
     if head_scoring is not None:
         hyperparameters["head_scoring"] = head_scoring
@@ -762,6 +775,7 @@ def compute_pqk_opt(
     entanglement=None,
     reps=None,
     data_map=None,
+    bandwidth=None,
     *,
     n_trials=10,
     validation_split=0.25,
@@ -799,6 +813,8 @@ def compute_pqk_opt(
         entanglement (list or dict): Entanglement patterns to search ('linear', 'full', ...). None leaves it at the default.
         reps (list or dict): Feature-map repetition counts to search. None leaves it at the default.
         data_map (list): Data maps to search ('unit', 'qiskit'; see :func:`compute_pqk`).
+        bandwidth (list or dict): Input scales to search (see :func:`compute_pqk`). None
+            leaves it at 1.0.
             None leaves it at the default, 'unit'.
         n_trials (int): Trial budget, default 10 -- an order of magnitude below the
             classical default because each trial is a quantum fit. Lowered
@@ -832,6 +848,7 @@ def compute_pqk_opt(
         "entanglement": entanglement,
         "reps": reps,
         "data_map": data_map,
+        "bandwidth": bandwidth,
     }
 
     fixed = {}

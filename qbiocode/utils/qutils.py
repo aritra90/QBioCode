@@ -571,6 +571,40 @@ def get_feature_map(feature_map, feat_dimension, reps=1, entanglement="linear", 
     return feature_map, feat_dimension
 
 
+def apply_bandwidth(bandwidth, *arrays):
+    """Scale the inputs of a quantum feature map: ``x -> bandwidth * x``.
+
+    A feature map turns each feature into a rotation angle (``P(2 x)`` per qubit for the
+    qiskit maps), and QProfiler scales features to [0, 1]. Without this, every quantum
+    kernel runs at one fixed angle range, while a classical RBF kernel tunes its gamma.
+    ``bandwidth`` is that missing knob: features reach the map in [0, bandwidth], the
+    ``B`` of the kernel_exps studies. There it moved a fidelity kernel by up to 0.26 F1,
+    and its optimum depended on the encoding (about pi for Z, pi/32 for ZZ).
+
+    Args:
+        bandwidth (float): A positive, finite number. 1.0 is the unscaled map, and returns
+            the arrays unchanged, so existing results and caches are untouched.
+        *arrays: The feature matrices to scale (train, test, ...).
+
+    Returns:
+        tuple: The arrays, as numpy arrays, scaled by ``bandwidth``.
+
+    Raises:
+        ValueError: If ``bandwidth`` is not a positive finite number (a bool or a string
+            included).
+    """
+    if isinstance(bandwidth, (bool, np.bool_)) or not isinstance(
+            bandwidth, (int, float, np.integer, np.floating)) or not np.isfinite(bandwidth) \
+            or bandwidth <= 0:
+        raise ValueError(
+            f"bandwidth scales the features before the feature map and must be a positive "
+            f"finite number; got {bandwidth!r}."
+        )
+    if float(bandwidth) == 1.0:
+        return tuple(np.asarray(a) for a in arrays)
+    return tuple(np.asarray(a, dtype=float) * float(bandwidth) for a in arrays)
+
+
 def get_optimizer(
     type="COBYLA", max_iter=100, learning_rate_a=None, perturbation_gamma=None, prior_iter=0
 ):

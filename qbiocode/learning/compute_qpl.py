@@ -113,6 +113,7 @@ def compute_qpl(
     reps=2,
     classical_models=None,
     data_map="unit",
+    bandwidth=1.0,
     *,
     head_scoring=None,
     head_max_iter=None,
@@ -156,6 +157,9 @@ def compute_qpl(
             1.0; ``'qiskit'`` uses qiskit's default ``phi(x_i, x_j) = (pi - x_i)(pi - x_j)``,
             the map the ``eng_zz``/``qlab_zz`` generators use. ``True``/``False`` are
             accepted as ``'unit'``/``'qiskit'``.
+        bandwidth (float): Scale applied to the features before the feature map
+            (:func:`qbiocode.utils.qutils.apply_bandwidth`). Default 1.0, the unscaled
+            map; any other value is part of the projection cache key.
         head_scoring (str or None): Metric every searched head's ``RandomizedSearchCV``
             (40 candidates x 5 folds on the projections) picks its config by. None (the
             default) is sklearn's, each estimator's ``score`` (accuracy).
@@ -178,6 +182,8 @@ def compute_qpl(
 
     # Checked before the projection directory is created, so a typo leaves no trace.
     data_map = _resolve_data_map(data_map)
+    # Before the cache key and the feature map read the rows. 1.0 returns them unchanged.
+    X_train, X_test = qutils.apply_bandwidth(bandwidth, X_train, X_test)
 
     beg_time = time.time()
     feat_dimension = X_train.shape[1]
@@ -215,6 +221,8 @@ def compute_qpl(
     # stay byte-identical, and a 'qiskit' projection can never load a 'unit' file.
     if data_map != "unit":
         fingerprint_parts = fingerprint_parts + (f"data_map={data_map}",)
+    if float(bandwidth) != 1.0:
+        fingerprint_parts = fingerprint_parts + (f"bandwidth={float(bandwidth)!r}",)
     # The data itself, plus the two settings that change the numbers a projection holds
     # without changing the circuit. Without them the key names the feature map and the
     # dataset but never the rows, so a different fold of the same dataset, a regenerated
@@ -595,6 +603,8 @@ def compute_qpl(
         # Only when not the default, so 'unit' rows stay identical to earlier results.
         if data_map != "unit":
             hyperparameters["data_map"] = data_map
+        if float(bandwidth) != 1.0:
+            hyperparameters["bandwidth"] = bandwidth
         # Likewise only when set, so internal-mode rows are unchanged.
         # The bare TabPFN head has no search, so no head metric is recorded for it.
         if head_scoring is not None and method != "tabpfn":
@@ -891,6 +901,7 @@ def compute_qpl_opt(
     reps=None,
     classical_models=None,
     data_map=None,
+    bandwidth=None,
     *,
     n_trials=10,
     validation_split=0.25,
@@ -928,6 +939,8 @@ def compute_qpl_opt(
         entanglement (list or dict): Entanglement patterns to search ('linear', 'full', ...). None leaves it at the default.
         reps (list or dict): Feature-map repetition counts to search. None leaves it at the default.
         data_map (list): Data maps to search ('unit', 'qiskit'; see :func:`compute_qpl`).
+        bandwidth (list or dict): Input scales to search (see :func:`compute_qpl`). None
+            leaves it at 1.0.
             None leaves it at the default.
         classical_models (list, optional): Which classical heads to fit on the quantum
             projection. **Not** a hyperparameter to search -- it selects which models
@@ -970,6 +983,7 @@ def compute_qpl_opt(
         "entanglement": entanglement,
         "reps": reps,
         "data_map": data_map,
+        "bandwidth": bandwidth,
     }
 
     # `classical_models` selects which heads run; it is not a candidate value, so it goes

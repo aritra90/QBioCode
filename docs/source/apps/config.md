@@ -532,8 +532,23 @@ model: ['qsvc', 'vqc', 'qnn', 'pqk']
 ### Model Hyperparameters
 
 Configure hyperparameters for each model. Each model has:
-- **Standard arguments**: Single values for quick runs
+- **Standard arguments** (`<model>_args`): single values, used when the model is not tuned
 - **Tuned arguments** (`gridsearch_<model>_args`): what to search when `grid_search: True`
+
+```{warning}
+**With tuning on and the default `split_mode: internal`, a model's `<model>_args` block is
+NOT read.** When `grid_search: True` (and, for a quantum model, `tune_quantum: True`),
+every trial and the final refit are built from `gridsearch_<model>_args` alone. **A
+setting written only in `<model>_args` is silently ignored: no error, no warning.** The
+shipped `config.yaml` has tuning on, so this is what a default run gets.
+
+- **To fix a setting while tuning,** write it in `gridsearch_<model>_args` as a one-value
+  list, e.g. `thread_count: [1]`.
+- **Under `split_mode: manifest` the block IS read:** its values for the searched names
+  are trial 0 (the arm's default config), and its other keys are fixed for every trial
+  and the refit.
+- **`qpl_args.classical_models`** is read in both modes (see below).
+```
 
 A tuned argument may be written two ways:
 
@@ -581,8 +596,9 @@ not meta-features, and the meta-regression excludes them.
 #### Tuning the quantum models
 
 The quantum classifiers (`qsvc`, `vqc`, `qnn`, `pqk`, `qpl`) tune through the same
-`gridsearch_<model>_args` blocks, but tuning them is **off by default** and needs a
-second key:
+`gridsearch_<model>_args` blocks, but tuning them needs a second key. A config without it
+leaves them untuned; the shipped `config.yaml` sets both keys, so that the two sides are
+tuned alike:
 
 ```yaml
 grid_search: True        # tune at all
@@ -651,12 +667,29 @@ What is tunable per model:
 
 | Model | Tunable |
 |---|---|
-| `qsvc` | `encoding`, `entanglement`, `reps`, `primitive`, `C`, `gamma`, `pegasos` |
+| `qsvc` | `encoding`, `entanglement`, `reps`, `primitive`, `C`, `gamma`, `pegasos`, `bandwidth` |
 | `vqc`, `qnn` | `encoding`, `entanglement`, `reps`, `primitive`, `ansatz_type`, `local_optimizer`, `maxiter` |
-| `pqk`, `qpl` | `encoding`, `entanglement`, `reps`, `primitive` |
+| `pqk`, `qpl` | `encoding`, `entanglement`, `reps`, `primitive`, `data_map`, `bandwidth` |
 
 There is no `n_qubits`: the qubit count follows from the width of the data reaching the
 model, so it is set by the embedding's `n_components`, not by tuning.
+
+**`bandwidth` is the quantum arms' gamma.** QProfiler scales features to [0, 1], and a
+feature map turns each feature into a rotation angle (`P(2 x)` for the qiskit maps). So
+without it, every quantum kernel runs at one fixed angle range, while the classical SVC
+tunes its gamma. `bandwidth` multiplies the features before the feature map, so they reach
+it in [0, bandwidth]:
+
+```yaml
+gridsearch_qsvc_args:
+  bandwidth: {low: 0.0982, high: 6.2832, log: true}   # pi/32 .. 2*pi
+```
+
+In the kernel_exps torus study this setting alone moved a fidelity kernel by up to 0.26 F1.
+Its optimum depended on the encoding: about pi for `Z` and pi/32 for `ZZ`. The default 1.0
+is the unscaled map and leaves results and projection caches exactly as before; any other
+value is recorded in the parameter column and keys its own projection cache. `vqc` and
+`qnn` do not take it.
 
 `qpl`'s `classical_models` is **not** in that table, because it is not a hyperparameter to
 search -- it selects which classical heads are fitted on the quantum projection. It stays

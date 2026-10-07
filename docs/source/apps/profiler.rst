@@ -725,10 +725,24 @@ Each model can have standard parameters and tuned parameters:
 combination, which is what to use when reproducing a number published against it.
 Ranges need ``tuner: optuna``; under ``tuner: grid`` every entry must be a list.
 
+.. warning::
+    **With tuning on and the default** ``split_mode: internal``, **a model's**
+    ``<model>_args`` **block is NOT read.** When ``grid_search: True`` (and, for a quantum
+    model, ``tune_quantum: True``), every trial and the final refit are built from
+    ``gridsearch_<model>_args`` alone. **A setting written only in** ``<model>_args``
+    **is silently ignored: no error, no warning.** The shipped ``config.yaml`` has tuning
+    on, so in the example above ``svc_args`` does nothing.
+
+    **To fix a setting while tuning,** write it in ``gridsearch_<model>_args`` as a
+    one-value list (``thread_count: [1]``). **Under** ``split_mode: manifest`` **the block
+    IS read:** its searched names are trial 0 and its other keys are fixed for every trial
+    and the refit. ``qpl_args.classical_models`` is read in both modes.
+
 .. important::
     **For quantum models:** they now tune through the same ``gridsearch_<model>_args``
-    blocks, but only when ``tune_quantum: True`` is set alongside ``grid_search: True``
-    -- each trial is a quantum fit, so it is off by default. Their budget is
+    blocks, but only when ``tune_quantum: True`` is set alongside ``grid_search: True``.
+    Each trial is a quantum fit, so a config without the key leaves them untuned; the
+    shipped ``config.yaml`` sets both, so the two sides are tuned alike. Their budget is
     ``n_trials_quantum`` (default 10) and each candidate is scored on one stratified
     holdout (``validation_split``) rather than on ``cross_validation`` folds. Tuning
     against a real device is refused unless ``allow_hardware_tuning: True``.

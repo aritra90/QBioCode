@@ -218,6 +218,16 @@ splits: all
 # Begin function arguments
 # Each CML method takes a tuned set of arguments (gridsearch_<method>_args) as well as
 # a standard set (<method>_args), the latter usually the same values but not as lists.
+#
+# !!! WITH TUNING ON -- grid_search: True, and tune_quantum: True for a quantum model --
+# !!! AND split_mode: internal (this file's), A MODEL'S <method>_args BLOCK IS NOT READ.
+# !!! Every trial and the final refit use gridsearch_<method>_args alone, so a setting
+# !!! written only in <method>_args is SILENTLY IGNORED: no error, no warning.
+# !!! To fix a value while tuning, write it in the gridsearch block as a one-value list
+# !!! (thread_count: [1]). Under split_mode: manifest the block IS read: searched names
+# !!! are trial 0, other keys are fixed for every trial and the refit.
+# !!! qpl_args.classical_models is read in both modes.
+#
 # A tuned argument may be written either way:
 #   a list  -- ['linear', 'rbf']        one of these values is chosen
 #   a range -- {low: 0.001, high: 100}  sampled continuously; add log: true for a
@@ -392,6 +402,9 @@ gridsearch_tabpfn_args: {'model_version': 'v2',
 
 
 #### Begin QML function parameters
+# !!! The tuning warning above applies here too: with tune_quantum: True and
+# !!! split_mode: internal these <model>_args blocks are not read
+# !!! (qpl_args.classical_models excepted).
 
 # Begin QNN arguments
 # add SPSA
@@ -443,10 +456,13 @@ hydra:
 # Same syntax as the classical blocks: a list is a choice, a {low, high} mapping is a
 # range. Keep these small -- every trial is a quantum fit, so the cost is n_trials_quantum
 # times the cost of one ordinary run of that model.
+# bandwidth: the features (in [0, 1]) are multiplied by it before the feature map, the
+# quantum counterpart of an RBF gamma. 1.0 is the unscaled map; pi/32 .. 2*pi on a log scale.
 gridsearch_qsvc_args: {'encoding': ['Z', 'ZZ'],
                        'reps': [1, 2],
                        'entanglement': ['linear', 'full'],
-                       'C': {low: 1.0e-2, high: 1.0e+2, log: true}
+                       'C': {low: 1.0e-2, high: 1.0e+2, log: true},
+                       'bandwidth': {low: 0.0982, high: 6.2832, log: true}
                       }
 
 gridsearch_vqc_args: {'encoding': ['Z', 'ZZ'],
@@ -465,10 +481,12 @@ gridsearch_qnn_args: {'encoding': ['Z', 'ZZ'],
 
 gridsearch_pqk_args: {'encoding': ['Z', 'ZZ'],
                       'reps': [1, 2],
-                      'entanglement': ['linear', 'full']
+                      'entanglement': ['linear', 'full'],
+                      'bandwidth': {low: 0.0982, high: 6.2832, log: true}
                      }
 
 gridsearch_qpl_args: {'encoding': ['Z', 'ZZ'],
                       'reps': [1, 2],
-                      'entanglement': ['linear', 'full']
+                      'entanglement': ['linear', 'full'],
+                      'bandwidth': {low: 0.0982, high: 6.2832, log: true}
                      }

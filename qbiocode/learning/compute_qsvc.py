@@ -280,6 +280,7 @@ def compute_qsvc(
     reps=2,
     verbose=False,
     local_optimizer="",
+    bandwidth=1.0,
 ):
     """
     This function computes a quantum support vector classifier (QSVC) using the Qiskit Machine Learning library.
@@ -304,11 +305,15 @@ def compute_qsvc(
         primitive (str): Primitive type to use, default is 'sampler'.
         reps (int): Number of repetitions for the feature map, default is 2.
         verbose (bool): Whether to print additional information, default is False.
+        bandwidth (float): Scale applied to the features before the feature map
+            (:func:`qbiocode.utils.qutils.apply_bandwidth`), the quantum counterpart of an
+            RBF kernel's gamma. Default 1.0, the unscaled map.
 
     Returns:
         modeleval (dict): A dictionary containing the evaluation results, including accuracy, runtime, model parameters, and other relevant metrics.
     """
     beg_time = time.time()
+    X_train, X_test = qutils.apply_bandwidth(bandwidth, X_train, X_test)
 
     # choose a method for mapping your features onto the circuit
     feature_map, _ = qutils.get_feature_map(
@@ -358,6 +363,9 @@ def compute_qsvc(
         "C": C,
         "gamma": gamma,
     }
+    # Only when not the default, so unscaled rows stay identical to earlier results.
+    if float(bandwidth) != 1.0:
+        hyperparameters["bandwidth"] = bandwidth
     model_params = hyperparameters
     y_predicted = qsvc.predict(X_test)
     # `auc` is computed from these scores alone, never from y_predicted. Both kernel
@@ -404,6 +412,7 @@ def compute_qsvc_opt(
     primitive=None,
     reps=None,
     local_optimizer=None,
+    bandwidth=None,
     *,
     n_trials=10,
     validation_split=0.25,
@@ -445,6 +454,8 @@ def compute_qsvc_opt(
         reps (list or dict): Feature-map repetition counts to search. None leaves it at the default.
         local_optimizer (list or dict): Accepted so a shared config block can name it,
             and warned about -- compute_qsvc takes the parameter and never reads it.
+        bandwidth (list or dict): Input scales to search (see :func:`compute_qsvc`), e.g.
+            ``{low: 0.098, high: 6.283, log: true}``. None leaves it at 1.0.
         n_trials (int): Trial budget, default 10 -- an order of magnitude below the
             classical default because each trial is a quantum fit. Lowered
             automatically when the configured values describe fewer combinations.
@@ -479,6 +490,7 @@ def compute_qsvc_opt(
         "entanglement": entanglement,
         "primitive": primitive,
         "reps": reps,
+        "bandwidth": bandwidth,
     }
 
     fixed = {}
