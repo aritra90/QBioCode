@@ -132,10 +132,23 @@ the rest, then scored **once** on the held-back datasets. The draw is by cluster
 - every variant of a synthetic family falls on the same side;
 - so do datasets grouped in a cluster map, such as the pairs listed in `duplicates.csv`.
 
+First write the cluster map. `benchmark/review_duplicates.py` emits one covering exactly
+the corpus on disk, with the `dataset_id,cluster` columns `holdout.py` requires — which
+`experiments/cluster_map_draft.csv` does not have, and does not cover the synthetic corpus
+with at all. Read its report before using the file: it prints the resulting **G**, every
+cluster holding more than one dataset, and any dataset left alone in a cluster.
+
 ```bash
-printf 'dataset_id,cluster\nlibsvm__sonar,sonar\npmlb__sonar,sonar\n' > $BENCH/cluster_map.csv
+python benchmark/review_duplicates.py --datasets $BENCH/data/datasets \
+    --emit-cluster-map $BENCH/cluster_map.csv
 python benchmark/holdout.py --datasets $BENCH/data/datasets --fraction 0.2 --seed 20261007 \
     --cluster-map $BENCH/cluster_map.csv --out $BENCH/holdout.csv
+```
+
+```{warning}
+`--cluster-map` **replaces** the clustering `holdout.py` derives from each `meta.yaml`,
+rather than adding to it, so a map that mis-groups the synthetic families is worse than
+no map at all. Check the `-> N clusters` line before passing the file on.
 ```
 
 **Writes:** `holdout.csv` (`dataset_id, family, cluster, holdout`), and prints its sha256.
