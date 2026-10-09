@@ -92,6 +92,28 @@ def checkpoint_restart(
     >>> # Run QProfiler only on remaining datasets
     >>> # (use datasets_to_process in your batch processing loop)
 
+    Warnings
+    --------
+    The default marker is **not** a completion marker. QProfiler writes
+    ``RawDataEvaluation.csv`` as soon as it has loaded and profiled a dataset's raw
+    features -- before the first split is drawn and before any model is fitted
+    (``qprofiler.main``) -- so a dataset that was killed one minute into a multi-hour
+    run already carries it and is reported here as completed. Resuming on that basis
+    skips the dataset for good.
+
+    Pass ``completion_marker='ModelResults.csv'`` for a marker that at least implies
+    one model finished, and check the row count yourself if you need more. For a resume
+    that is precise about *which* (embedding, split, model) cells finished, use
+    QProfiler's own ``skip_existing`` instead
+    (:mod:`qbiocode.apps.qprofiler.resume`): it works per cell rather than per dataset,
+    and carries the finished rows into the new run.
+
+    Also note that ``prefix_length=8`` strips QProfiler's ``dataset=`` directory
+    prefix, and that the packaged config nests one more level
+    (``<backend>_<timestamp>``) *below* that -- so point this at the directory whose
+    immediate children are the ``dataset=...`` ones, and expect it to find the marker
+    only where ``hydra.run.dir`` ends at that level.
+
     Notes
     -----
     - The function only checks for the presence of the completion marker file,

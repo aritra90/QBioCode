@@ -170,9 +170,26 @@ def job_prefix(runs_dir):
     return JOB_PREFIX
 
 
+def _jobid_number(jobid):
+    """The numeric part of an LSF job id, for comparing two attempts.
+
+    An element of a job array is reported as ``12345[7]``, so ``int(jobid)`` raised
+    ValueError and took the whole status call down as soon as ANY array job of this user
+    was in bjobs -- including one submitted by submit_array.sh, which names its array
+    jobs rather than its elements. The leading number is the job id in both forms.
+    """
+    m = re.match(r"\s*(\d+)", jobid or "")
+    return int(m.group(1)) if m else -1
+
+
 def lsf_jobs(prefix=JOB_PREFIX):
     """{config: (jobid, stat, host, run_seconds)} for this user's jobs named prefix+config,
-    latest wins."""
+    latest wins.
+
+    A job array submitted by submit_array.sh carries one name for every element, so it
+    matches no single config and contributes nothing here; read an array run's progress
+    from the result files (``--no-lsf``) and its queue state from bjobs directly.
+    """
     try:
         out = subprocess.run(
             ["bjobs", "-a", "-noheader", "-o",
@@ -192,7 +209,7 @@ def lsf_jobs(prefix=JOB_PREFIX):
         host = host.split(":")[0].split("*")[-1] if host not in ("", "-") else ""
         cfg = name[len(prefix):]
         # Job ids grow, so the highest one is the latest attempt.
-        if cfg not in jobs or int(jobid) > int(jobs[cfg][0]):
+        if cfg not in jobs or _jobid_number(jobid) > _jobid_number(jobs[cfg][0]):
             jobs[cfg] = (jobid, stat, host, secs)
     return jobs
 

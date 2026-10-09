@@ -16,6 +16,19 @@ from joblib import Parallel, delayed
 from qbiocode import checkpoint_restart
 
 
+def config_job_name(data_type, output_folder_timestamp, data_file):
+    """The name of the per-dataset config ``run_job`` writes under ``configs/``.
+
+    One function because two places need the same string: ``run_job``, which writes the
+    file, and ``main``, which removes it afterwards. They disagreed -- the cleanup globbed
+    ``configs/config_<timestamp>*`` while the files are called
+    ``config_<data_type>_<timestamp>__<dataset>.yaml`` -- so the glob matched nothing and
+    every batch run left one config per dataset behind for good.
+    """
+    stem = data_file.replace('.csv', '').replace('.txt', '')
+    return f"config_{data_type}_{output_folder_timestamp}__{stem}"
+
+
 def run_job(data_file, configfile, output_folder_timestamp, data_type):
     """Run QProfiler on a single dataset file with custom configuration.
     
@@ -36,19 +49,21 @@ def run_job(data_file, configfile, output_folder_timestamp, data_type):
         data_type (str): Label for this batch of data (used in output directory naming)
         
     Returns:
-        None
-        
+        int: the exit status of the qprofiler process. Non-zero means that dataset
+        failed; ``main`` counts those rather than reporting success for all of them.
+
     Example:
         >>> run_job('cancer_data.csv', 'configs/base.yaml', '2024_01_15_120000', 'cancer_study')
         # Creates configs/config_cancer_study_2024_01_15_120000__cancer_data.yaml
         # Runs: qprofiler --config-name=config_cancer_study_2024_01_15_120000__cancer_data
     """
 
-    ## edit YAML    
+    ## edit YAML
 
-    # Read the YAML file
-    
-    with open(configfile, "r+") as yaml_file:
+    # Read the YAML file. Opened 'r', not 'r+': nothing is written back through this
+    # handle (the modified config goes to a new file below), and 'r+' additionally
+    # refused a read-only base config -- a reasonable thing for a frozen protocol to be.
+    with open(configfile, "r") as yaml_file:
         data = yaml.safe_load(yaml_file)
         # add timestamp to output dir key of config file
         data['timestamp'] = output_folder_timestamp
@@ -58,18 +73,26 @@ def run_job(data_file, configfile, output_folder_timestamp, data_type):
     data["file_dataset"] = data_file
 
     # Write the updated data back to the file
-    config_name = 'config_'+data_type+'_'+output_folder_timestamp+'__'+data_file.replace('.csv','').replace('.txt','')
+    config_name = config_job_name(data_type, output_folder_timestamp, data_file)
     config_dir = os.path.abspath('configs')
     config_file = os.path.join(config_dir, config_name + '.yaml')
-    
+
     # Ensure configs directory exists
     os.makedirs(config_dir, exist_ok=True)
-    
+
     with open(config_file, "w") as yaml_file:
         yaml.dump(data, yaml_file, default_flow_style=False)
-    
+
     commands = ["qprofiler", f"--config-dir={config_dir}", f"--config-name={config_name}"]
-    subprocess.run(commands)
+    # The status is returned rather than discarded. `subprocess.run(commands)` without it
+    # made a batch of failing datasets look exactly like a batch of successful ones: the
+    # only hint was the "Results not found" line in the collection step below, which also
+    # appears when the results are merely somewhere else.
+    done = subprocess.run(commands)
+    if done.returncode != 0:
+        print(f"!! qprofiler exited {done.returncode} for {data_file} "
+              f"(config {config_name})")
+    return done.returncode
 
 
 def parse_args():
@@ -211,41 +234,62 @@ def main():
     print("\nCollecting results...")
     final_model_results = pd.DataFrame()
     final_rde_results = pd.DataFrame()
-    
+    failed = [code for code in (results or []) if code]
+    output_dir = f'results/{data_type}_batch_{output_folder_timestamp}'
+
+    for file in os.listdir(path_to_input):
+        if not file.endswith('csv'):
+            continue
+        # Searched for rather than computed. This used to read exactly
+        #   results/<type>_batch_<stamp>/dataset=<file>/ModelResults.csv
+        # which is only where the file lands if the config's hydra.run.dir ends at the
+        # dataset level -- the packaged config.yaml adds a '<backend>_<timestamp>' level
+        # below it, so with any shipped config nothing was ever found and every dataset
+        # printed "Results not found" while its results sat one directory deeper.
+        found = sorted(glob.glob(
+            os.path.join(output_dir, f'dataset={file}', '**', 'ModelResults.csv'),
+            recursive=True,
+        ))
+        if not found:
+            print(f"Warning: Results not found for {file} under {output_dir}")
+            continue
+        # The newest run directory of that dataset, by the timestamp in its name.
+        indv_results = found[-1]
+        print(f"Processing results for: {file}  ({indv_results})")
+        final_model_results = pd.concat(
+            [final_model_results, pd.read_csv(indv_results, index_col=0)]
+        )
+        rde = os.path.join(os.path.dirname(indv_results), 'RawDataEvaluation.csv')
+        if os.path.isfile(rde):
+            final_rde_results = pd.concat([final_rde_results, pd.read_csv(rde, index_col=0)])
+
+    # Clean up the per-dataset configs this batch wrote -- once, and by the name they
+    # were actually written under (config_job_name).
     for file in os.listdir(path_to_input):
         if file.endswith('csv'):
-            indv_results = f'results/{data_type}_batch_{output_folder_timestamp}/dataset={file}/ModelResults.csv'
-            if os.path.isfile(indv_results):
-                print(f"Processing results for: {file}")
-                model_results = pd.read_csv(indv_results, index_col=0)
-                final_model_results = pd.concat([final_model_results, model_results])
-                
-                rde = pd.read_csv(
-                    f'results/{data_type}_batch_{output_folder_timestamp}/dataset={file}/RawDataEvaluation.csv',
-                    index_col=0
-                )
-                final_rde_results = pd.concat([final_rde_results, rde])
-                
-                # Clean up temporary config files
-                for f in glob.glob(f'configs/config_{output_folder_timestamp}*'):
-                    os.remove(f)
-            else:
-                print(f"Warning: Results not found for {file}")
-    
-    # Save combined results
-    output_dir = f'results/{data_type}_batch_{output_folder_timestamp}'
+            stale = os.path.join(
+                'configs',
+                config_job_name(data_type, output_folder_timestamp, file) + '.yaml',
+            )
+            if os.path.isfile(stale):
+                os.remove(stale)
+
+    # Save combined results. NOT inside the dataset directories they were read from:
+    # the merged file sits at the root of the batch directory, so a later glob for
+    # '**/ModelResults.csv' under a dataset does not pick it up alongside its parts.
     os.makedirs(output_dir, exist_ok=True)
-    
+
     final_model_results.to_csv(f'{output_dir}/ModelResults.csv')
     final_rde_results.to_csv(f'{output_dir}/RawDataEvaluation.csv')
-    
+
     total_time = (time.time() - beg_time) / 3600
     print(f"\n{'=' * 60}")
-    print(f"Batch processing complete!")
+    print("Batch processing complete!" if not failed
+          else f"Batch finished with {len(failed)} FAILED dataset(s) -- see the lines above")
     print(f"Total run time: {round(total_time, 2)} hours")
     print(f"Results saved to: {output_dir}")
     print(f"{'=' * 60}")
-    
+
     return None
 
 

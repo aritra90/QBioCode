@@ -10,6 +10,14 @@
 #   DRY=1 ./submit_runs.sh                   print the bsub lines, submit nothing
 #   PRECOMPUTE_ONLY=1 ./submit_runs.sh       write the embedding cache, submit nothing
 #   FORCE=1 ./submit_runs.sh ...             submit even configs that are done or live
+#   SKIP_EXISTING=1 ./submit_runs.sh         each job adopts the (embedding, split, model)
+#                                            cells its config's earlier run directories
+#                                            already hold, and fits only the rest. This is
+#                                            what makes resubmitting a job killed at its
+#                                            wall cumulative: without it the new run starts
+#                                            at the first split again, so a config needing
+#                                            two walls never finishes. See
+#                                            qbiocode.apps.qprofiler.resume.
 #   LIST_HOSTS=Intel_Platinum:128 ./submit_runs.sh   print a HOSTS= regex of every host of
 #                                            that lshosts model (and ncpus), minus
 #                                            advance-reserved (brsvs) hosts; submits nothing
@@ -56,6 +64,11 @@ MEM=${MEM:-8}
 WALL_SET=${WALL:-}
 WALL=${WALL:-24:00}
 THREADS=${THREADS:-1}
+# '++' rather than '+': it sets the key whether or not the composed config defines it, so
+# one spelling works both for the packaged config (which ships skip_existing: false) and
+# for the generated protocols (which do not name it at all).
+SKIP_OVERRIDE=""
+[ "${SKIP_EXISTING:-0}" = "1" ] && SKIP_OVERRIDE=" ++skip_existing=true"
 # TABPFN_ALLOW_CPU_LARGE_DATASET: TabPFN refuses more than 1000 training rows on a CPU, and
 # every trial of the run's 27 largest classical jobs (1324-2600 rows) failed on it, killing
 # the job ("Every tuning trial for 'tabpfn' failed"). The guard is about speed, not validity;
@@ -175,8 +188,16 @@ done
 
 # 2. Unless FORCE=1, drop what is done or already queued/running -- so this is safe to
 #    re-run after a partial failure, and never puts a second copy of a live job in flight.
+#    status.py's exit status is checked: read through `mapfile < <(...)` alone, a status.py
+#    that died (a traceback, a missing runs dir) produced an empty list, which is
+#    indistinguishable here from "everything is done" -- so the script said so and exited 0,
+#    having submitted nothing and reported success.
 if [ "${FORCE:-0}" != "1" ]; then
-  mapfile -t abs < <("$PY" "$HERE/status.py" --runs-dir "$RUNS" --todo "${abs[@]}")
+  todo=$("$PY" "$HERE/status.py" --runs-dir "$RUNS" --todo "${abs[@]}") || {
+    echo "!! status.py failed (above); nothing submitted. FORCE=1 skips this step." >&2; exit 1; }
+  mapfile -t abs <<< "$todo"
+  # A single empty line is what `mapfile` makes of empty input.
+  [ ${#abs[@]} -eq 1 ] && [ -z "${abs[0]}" ] && abs=()
   [ ${#abs[@]} -eq 0 ] && { echo "nothing to submit: every selected config is done, running or pending"; exit 0; }
 fi
 
@@ -250,7 +271,7 @@ for k in "${!selected[@]}"; do
   IFS=$'\t' read -r cfg name dataset wall <<< "${selected[$k]}"
   dsdir=$(dirname "$cfg")
   mkdir -p "$dsdir/lsf_logs"
-  payload="cd $dsdir && export $ENVV && $PY -m qbiocode.apps.qprofiler.cli --config-dir=$dsdir --config-name=$name"
+  payload="cd $dsdir && export $ENVV && $PY -m qbiocode.apps.qprofiler.cli --config-dir=$dsdir --config-name=$name$SKIP_OVERRIDE"
 
   mopt=()
   if [ "$H" -gt 0 ]; then
@@ -283,7 +304,16 @@ for k in "${!selected[@]}"; do
   fi
   n_sub=$((n_sub + 1))
   case " $walls " in *" $wall "*) ;; *) walls="${walls:+$walls }$wall" ;; esac
-  grep -qP "^$name\t[^\t]*\t[^\t]*\t[^\t]*\tquantum\t" "$MANIFEST" && n_q=$((n_q + 1))
+  # awk, not `grep -qP`. -P is not portable: stock BSD grep (macOS /usr/bin/grep, "BSD
+  # grep, GNU compatible 2.6.0-FreeBSD") rejects it outright -- "invalid option -- P",
+  # exit 2 -- so there the quantum/classical tally in the closing summary was always
+  # 0/all, silently, and the DRY=1 run that is meant to preview a submission printed a
+  # usage block per job. It survives on a developer machine only when something like
+  # ugrep shadows grep on PATH. Comparing the two fields is what the ordering step above
+  # already does, and it does not depend on how an implementation spells \t either.
+  awk -F'\t' -v n="$name" -v arm="quantum" '$1 == n && $5 == arm {found = 1}
+                                            END {exit !found}' "$MANIFEST" &&
+    n_q=$((n_q + 1))
 done
 verb=$([ "${DRY:-0}" = "1" ] && echo "would submit" || echo "submitted")
 echo "$verb $n_sub jobs ($n_q quantum, $((n_sub - n_q)) classical) over $H candidate hosts; wall ${walls:-$WALL}, $SLOTS slot, ${MEM} GB each" >&2
