@@ -256,6 +256,11 @@ fi
 **Step 2 — a one-job manifest for this checkout.** Only if step 1 told you to. Three
 commands, nothing typed by hand: the old prefix is read out of the manifest.
 
+This is scoped to the test. The real fix for a checkout that is not the one the configs
+were generated in is to **regenerate them**, which rewrites every absolute path to your
+tree — see "Whose paths are in `runs/`?" at the end of this file. Step 2 exists so you can
+finish the test without doing that first.
+
 ```bash
 mkdir -p $T/runs/heart
 sed "s|$(dirname "$STORED")|$T/runs/heart|g" \
@@ -402,12 +407,13 @@ unset QBC_TASKS QBC_RUNS QBC_STATUS QBC_PY QBC_ENVV QBC_TASK_OFFSET RUNS CFG STO
 
 | Symptom | Cause |
 |---|---|
+| `Additional config directory '…/runs/heart' not found` | you are in the wrong directory. Every command here is run from `experiments/pilot10`, so that `$PWD/runs/heart` resolves; from the repository root `$PWD/runs` does not exist |
 | No `skip_existing:` line in the log at all | the override did not arrive. Check `++`, not `+`, and that the log is the one in the run directory you just wrote |
 | `0 result row(s) found` | `hydra.run.dir` is not a sibling of the earlier run. `skip_existing: true` looks at the **parent** of the current run directory and one level below it |
 | `will NOT adopt … its dataset_sha256 is …` | the dataset changed since the earlier run. This is the guard working; it only fires under `split_mode: manifest`, which this test does not use |
 | `adopted.csv` absent after phase 3 | nothing was adopted — usually the truncation in phase 2 did not take, so check `cells $R1/ModelResults.csv` says 2 |
 | `skip_existing must be true, false, or an ABSOLUTE directory` | a relative path was passed. Raised during validation, before any data is read |
-| `no config matched the selection (DATASET='' EMB='' MODEL='')` | **The common one.** `MANIFEST.tsv` stores absolute YAML paths from the machine the configs were generated on, and this checkout is elsewhere. Use **5b step 2**, which builds a one-job manifest naming your path; or regenerate with `generate_pilot_configs.py --layout split`. Phases 1-4, 5a and the array part of 6 need no manifest at all |
+| `no config matched the selection (DATASET='' EMB='' MODEL='')` | **The common one.** `MANIFEST.tsv` stores absolute YAML paths from the machine the configs were generated on, and this checkout is elsewhere. 5b step 1 detects it; step 2 works around it for the test, and *Whose paths are in `runs/`?* below is the real fix. Phases 1-4, 5a and the array part of 6 need no manifest at all |
 | phase 5: `nothing to submit: every selected config is done` | `FORCE=1` was omitted. That is skip **B**, which phase 5 is not testing — it is the *expected* result in phase 6 |
 | phase 6: the config reads `todo`, not `done` | `--runs-dir` is wrong, or the results are not under `<config dir>/results/<config_file_name>/`. `status.py` globs exactly that, and counts distinct (embedding, iteration, model) rows against `iter x embeddings x models` |
 | phase 6: skipped when you expected it to run | the truncation did not take. `status.py … --list all` must say `partial  rows 2/5` before the runner will run it |
@@ -434,3 +440,50 @@ Nor does it cover `status.py`'s *live* states (`running`, `pending`), which need
 queued jobs: skip B also drops a config that is currently in flight, so a second
 `./submit_runs.sh` while the first is running queues nothing. Phase 6 exercises only the
 `done` and `partial` paths, which are the ones decided from the result files alone.
+
+## Whose paths are in `runs/`?
+
+Not necessarily yours. `generate_pilot_configs.py` bakes **absolute** paths into every
+config, because hydra changes the working directory and a relative one would mean something
+different in each job. The `runs/` tree committed here was generated on one machine, so in
+anybody else's checkout four things point at that machine:
+
+| In each YAML | Points at | Matters? |
+|---|---|---|
+| `hydra.run.dir` | the generating machine's `runs/<ds>/results/` | **yes** — the job writes here |
+| `quantum_param_dir` | …`/quantum_tuned_params/` | yes, for quantum arms |
+| `kernel_dump_dir` | …`/kernels/` | yes, for qsvc/pqk |
+| `embedding_cache` | …`/embeddings/` | yes, for any embedded (non-`none`) arm |
+| `folder_path` | `/dccstor/cgq4hls/Q/qbc_data/...` | no — shared, readable |
+
+`MANIFEST.tsv`'s `yaml` column is absolute for the same reason, which is what makes
+`submit_runs.sh` print *"no config matched the selection"* elsewhere.
+
+**Regenerate, rather than editing by hand.** Run this from your own checkout:
+
+```bash
+cd $REPO/experiments/pilot10
+./generate_pilot_configs.py --layout split --self-contained --n-trials-quantum 12
+```
+
+Every absolute path is then derived from the script's own location, so `runs/`,
+`embeddings/` and `MANIFEST.tsv` all land in your tree, and `folder_path` stays on the
+shared data root. After that `submit_runs.sh` works normally and step 2 of 5b is
+unnecessary.
+
+The three flags are not decoration — they are what makes the result the *same experiment*:
+
+- `--self-contained`, because this `runs/` holds whole configs rather than job files over a
+  `_protocol.yaml`;
+- `--n-trials-quantum 12`, because the generator's default is 32 and these were built at 12;
+- `--layout split`, one job per (dataset, embedding, model).
+
+`--iter` and `--test-size` already default to the shipped 5 and 0.20. Checked: with those
+three flags the regenerated `heart_none_nb.yaml` is byte-identical to the committed one
+apart from `hydra.run.dir`, `quantum_param_dir` and `kernel_dump_dir` — so no search space,
+seed, model list or split setting moves.
+
+> **Note.** `runs/*/*.yaml` and `runs/MANIFEST.tsv` are tracked in git, so regenerating
+> shows up as modified tracked files. That is a local adaptation, not a change anyone else
+> wants: keep it out of shared branches, or commit it on your own branch knowing it
+> re-points the tree at your paths.
