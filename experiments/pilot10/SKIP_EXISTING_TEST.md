@@ -16,6 +16,14 @@ it is handed to A to finish, which is the whole point of the pair.
 Phases 1-4 run the mechanism by hand on the login node (fast, deterministic, nothing
 queued), phase 5 checks the LSF submission path, phase 6 checks the done-check.
 
+> **Validated 2026-10-09** on LSF (CCC, `normal` queue), every phase, in a checkout whose
+> configs had been regenerated for it. Measured there: an adopted split takes 0.005 s
+> against 0.75 s computed; a fully adopted pass of `heart_none_nb` runs in 1.1 s against
+> 6.9 s from scratch; adopted rows are byte-identical to the originals; a done config is
+> skipped in under a second; and a config truncated to 2 of 5 rows reports `partial` and
+> **is** run. Not covered, and still only covered by the unit tests: the manifest-mode
+> sidecar carry-over, and `status.py`'s live `running`/`pending` states.
+
 Everything is written under one scratch directory, so **nothing touches `runs/` or the
 shipped `results/` trees**. Delete the directory and the test is gone.
 
