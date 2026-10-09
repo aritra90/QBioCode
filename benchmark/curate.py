@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -36,7 +37,38 @@ SOURCES = {
 # learners, would drive their outcome. cylinder-bands has a 71-level `customer` column,
 # two constant columns and 29% NaN in paper_mill_location; dresses-sales has duplicated
 # case-variant levels (Low/low, Summer/winter/Winter, M/S/small) and 53% NaN in V11.
-EXCLUDE = {("openml", "cylinder-bands"), ("openml", "dresses-sales")}
+#
+# The six below are CROSS-SOURCE COPIES: the same dataset reaching us from two of the three
+# sources. They are excluded rather than clustered because two files of the same rows are
+# one dataset, and keeping both counts one observation twice in every corpus-level test --
+# the cluster is the unit of independence for meta_regression's wild cluster bootstrap and
+# for holdout.py's draw, so a duplicate inflates G.
+#
+# Which copy is kept follows a source precedence, libsvm > openml > pmlb. That rule
+# reproduces, on all six pairs, the dedup already recorded in
+# experiments/cluster_map_draft.csv (which simply omits these six: 91 draft rows - 13
+# synthetic = 78 real, and 84 curated - 6 = 78).
+#
+# NOT "keep the copy with more features", which is the intuitive rule and the wrong one
+# here. It decides only two of the six -- diabetes, ionosphere and sonar are byte-identical
+# at equal width, so it ties -- and it disagrees on german_numer. More columns almost never
+# means more information, it means one-hot instead of ordinal: credit-g's 61 columns are
+# the one-hot expansion of the same 20 attributes libsvm__german_numer carries in 24, and
+# tic-tac-toe's 27 are 9 squares x 3 states against 9 ordinal. Width is also not neutral in
+# this benchmark, because the quantum arms encode one qubit per feature and
+# generate_pilot_configs.backend_for() bands a dataset by its width: pmlb__tic_tac_toe at
+# 9 features would run unembedded on 9 qubits, while openml__tic-tac-toe at 27 is reduced
+# to 8 components and runs the pca/umap arms. Choosing by width would quietly change which
+# arms each dataset exercises.
+EXCLUDE = {
+    ("openml", "cylinder-bands"), ("openml", "dresses-sales"),
+    ("openml", "breast-w"),    # = libsvm__breast_cancer, 683 rows (Wisconsin), 9 vs 10 cols
+    ("openml", "credit-g"),    # = libsvm__german_numer, 1000 rows, one-hot 61 vs 24 cols
+    ("openml", "diabetes"),    # = libsvm__diabetes, 768 x 8, identical
+    ("pmlb", "ionosphere"),    # = libsvm__ionosphere, 351 x 33, identical
+    ("pmlb", "sonar"),         # = libsvm__sonar, 208 x 60, identical
+    ("pmlb", "tic_tac_toe"),   # = openml__tic-tac-toe, 958 rows, ordinal 9 vs one-hot 27
+}
 
 # Row-identifier columns dropped before anything else, keyed like EXCLUDE. Each one is a
 # pure row identifier, and most also carry label signal (single-column label AUC on the
@@ -283,6 +315,9 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path, default=Path("/dccstor/cgq4hls/Q/qbc_data"))
     parser.add_argument("--out-root", type=Path, default=Path(__file__).resolve().parent / "datasets")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--prune", action="store_true",
+                        help="remove dataset directories an earlier run wrote that this "
+                             "one did not -- what adding an EXCLUDE entry leaves behind")
     args = parser.parse_args()
 
     source_root = args.source_root.resolve()
@@ -336,6 +371,32 @@ def main() -> int:
             found = sorted(p.name for p in dataset_dir.glob("*.csv"))
             if len(found) != 1:
                 raise SystemExit(f"{dataset_dir} holds {len(found)} csv files ({found}); need exactly 1")
+
+    # Directories this run did not write, i.e. datasets curated by an EARLIER run and now
+    # excluded or renamed. Nothing here overwrites or removes them, and every consumer
+    # downstream discovers datasets by globbing for a meta.yaml -- the generator's
+    # --datasets all is literally "directories holding a meta.yaml". So adding an entry to
+    # EXCLUDE and re-running leaves the dropped dataset in the corpus, silently, and the
+    # exclusion has no effect at all where it matters.
+    curated_ids = {meta["dataset_id"] for meta in rows}
+    stale = sorted(d for d in out_root.iterdir()
+                   if d.is_dir() and (d / "meta.yaml").is_file() and d.name not in curated_ids)
+    if stale:
+        if args.prune:
+            for dataset_dir in stale:
+                shutil.rmtree(dataset_dir)
+            print(f"\npruned {len(stale)} stale dataset directory(ies) this run did not write:")
+            for dataset_dir in stale:
+                print(f"    {dataset_dir.name}")
+        else:
+            raise SystemExit(
+                f"\n{len(stale)} dataset directory(ies) under {out_root} were written by an "
+                f"earlier run and not by this one:\n"
+                + "".join(f"    {d.name}\n" for d in stale)
+                + "They are still a part of the corpus for anything that globs meta.yaml "
+                  "(the generator's --datasets all), so leaving them would undo the "
+                  "exclusion.\nRe-run with --prune to remove them, or delete them by hand."
+            )
 
     inventory = pd.DataFrame(rows)
     inventory_columns = ["dataset_id", "source", "n", "p", "minority_n", "minority_fraction",
