@@ -299,6 +299,19 @@ DRY=1 FORCE=1 SPREAD=0                 ./submit_runs.sh $CFG
 **Expect** `++skip_existing=true` at the end of the printed `bsub` command in the first and
 absent in the second. That one flag is the entire submit-side change.
 
+**Read the last line, not the flag you typed.** `DRY=1` is opt-in, so a typo in it —
+`RY=1`, `DRY=l` — leaves it unset and the command **submits for real**. The two cases are
+told apart by the summary line:
+
+```text
+would submit 1 jobs (0 quantum, 1 classical) …     <- DRY=1 took effect, nothing queued
+submitted 1 jobs (0 quantum, 1 classical) …        <- a job is in the queue
+```
+
+A dry run also prints no `Job <…> is submitted to queue` line. If you see one by accident,
+`bkill` it and carry on — it is the same job step 4 submits anyway, so the only cost is a
+stray run directory.
+
 **Step 4 — submit, twice.** The second job finds the first's run directory as a sibling:
 
 ```bash
@@ -360,6 +373,7 @@ second per finished task instead of a process. `QBC_SKIP_DONE=1` is its default.
 element by hand:
 
 ```bash
+mkdir -p "${T:?set T first}"        # step 7 removes $T; this phase writes into it
 printf '%s\t%s\t%s\t\n' "$CFG" heart_none_nb "$(dirname $CFG)" > $T/tasks.tsv
 export QBC_TASKS=$T/tasks.tsv QBC_RUNS=$RUNS QBC_STATUS=$PWD/status.py
 export QBC_PY=$PY QBC_ENVV="OMP_NUM_THREADS=1" QBC_TASK_OFFSET=0
