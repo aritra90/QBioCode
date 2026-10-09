@@ -487,3 +487,26 @@ seed, model list or split setting moves.
 > shows up as modified tracked files. That is a local adaptation, not a change anyone else
 > wants: keep it out of shared branches, or commit it on your own branch knowing it
 > re-points the tree at your paths.
+
+### After regenerating: rebuild the embedding cache
+
+`embedding_cache` now points at **your** `experiments/pilot10/embeddings`, which is
+gitignored and therefore empty. Of the 208 split-layout jobs, 104 are `embeddings: ['none']`
+and read nothing from it — `heart_none_nb`, so this whole test, is one of those. The other
+104 (the `pca`/`umap` arms of `spect`, `wdbc`, `sonar`, `colon_cancer`) read it for every
+split, and a job whose file is missing **stops before fitting anything** rather than
+embedding for itself. So before running those:
+
+```bash
+PRECOMPUTE_ONLY=1 ./submit_runs.sh          # writes the cache, submits nothing
+```
+
+Check it without writing anything:
+
+```bash
+$PY -m qbiocode.apps.qprofiler.embedding_cache --check runs/*/*_pca_*.yaml runs/*/*_umap_*.yaml
+```
+
+This is not a `skip_existing` interaction — `skip_existing` still requires the cache to be
+complete for the whole run, including the passes it is going to adopt. It is a pre-flight
+contract and resuming does not relax it.
