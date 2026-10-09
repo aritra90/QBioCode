@@ -34,7 +34,18 @@ hydra-core
 ipykernel
 joblib
 matplotlib
-networkx
+# >= 3.0 is a correctness floor, not a preference. networkx 2.x's
+# normalized_laplacian_matrix calls `sp.errstate(...)` -- scipy's long-deprecated
+# re-export of numpy's errstate -- which modern scipy (1.18 here) no longer provides. On
+# that pair nx.normalized_laplacian_matrix raises AttributeError, and
+# qbiocode.evaluation.graph_evaluation catches it per metric family, so the whole spectral
+# block (spectral_gap and its neighbours) comes back NaN with only a warning. Both
+# packages were unpinned, so a fresh resolve could land there: measured on networkx 2.8.5
+# + scipy 1.18.1, compute_graph_complexity_metrics raised and
+# tests/test_graph_evaluation_edges.py::...::test_a_disconnected_graph_has_a_zero_spectral_gap
+# failed; on networkx 3.7 all 53 metrics are finite and that file is 38/38 green.
+# networkx 3.x uses np.errstate.
+networkx>=3.0
 numpy
 optuna
 pandas

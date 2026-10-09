@@ -49,6 +49,12 @@ import warnings
 
 logger = logging.getLogger(__name__)
 
+#: The community-detection methods :func:`generate_community_labels` implements. Named
+#: once so the argument check and the docstring cannot drift apart. ``'louvain'`` falls
+#: back to ``'label_propagation'`` when python-louvain is not installed.
+COMMUNITY_LABEL_METHODS = ("louvain", "label_propagation", "spectral")
+
+
 def generate_community_labels(
     G: nx.Graph,
     method: str = 'louvain',
@@ -66,7 +72,19 @@ def generate_community_labels(
     
     Returns:
         Dictionary mapping node IDs to community labels
+
+    Raises:
+        ValueError: if ``method`` is not one of the three named above.
     """
+    # Checked up front. The branches below each guard one name, so an unrecognised one
+    # fell through all of them with `communities` never assigned and died at the
+    # small-community merge with `UnboundLocalError: communities` -- which names neither
+    # the argument at fault nor the values it accepts.
+    if method not in COMMUNITY_LABEL_METHODS:
+        raise ValueError(
+            f"generate_community_labels: unknown method {method!r}; "
+            f"choose one of {', '.join(sorted(COMMUNITY_LABEL_METHODS))}."
+        )
     if method == 'louvain':
         try:
             import community as community_louvain

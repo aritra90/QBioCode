@@ -56,6 +56,36 @@ from .quantum_core import (
 #: Seed used by every check, so a reported residual is reproducible.
 SELFTEST_SEED = 1
 
+
+def _require_assertions(check):
+    """Refuse to run ``check`` when ``assert`` statements have been compiled out.
+
+    Every check below signals failure with a bare ``assert``, which reads well and lets
+    pytest introspect the comparison. ``python -O`` (and ``PYTHONOPTIMIZE``) removes
+    ``assert`` statements outright, and this module is library code, so -- unlike the
+    asserts inside a test file, which pytest rewrites into real raises -- there is nothing
+    left to fail. Each check would then return its measured quantities no matter how wrong
+    they were, and its caller would conclude the physics is right.
+
+    :func:`run_selftest` has refused under -O since it was written, but the test suite
+    calls the ``check_*`` functions *directly* and so bypassed that guard: measured on
+    this tree, ``python -O -m pytest -k TestThePhysicsIsRight`` reported 7 passed and only
+    the one test that goes through ``run_selftest`` failed. The guard therefore belongs on
+    each check rather than on the runner.
+
+    Args:
+        check (str): the check's name, for the message.
+
+    Raises:
+        RuntimeError: if the interpreter is running with ``-O`` / ``PYTHONOPTIMIZE``.
+    """
+    if not __debug__:
+        raise RuntimeError(
+            f"{check} cannot run under python -O: it asserts its results, and -O strips "
+            f"assert statements, so it would pass vacuously having verified nothing. "
+            f"Re-run without -O (or unset PYTHONOPTIMIZE)."
+        )
+
 #: Qubit count, feature-map repetitions and entanglement pattern of each
 #: configuration the Qiskit cross-check compares, covering one and several
 #: repetitions and all three entanglement patterns.
@@ -94,6 +124,7 @@ def check_pauli_action(n=4, tol=1e-12):
     AssertionError
         If any string disagrees by more than ``tol``.
     """
+    _require_assertions("check_pauli_action")
     rng = np.random.default_rng(SELFTEST_SEED)
     psi = rng.normal(size=1 << n) + 1j * rng.normal(size=1 << n)
     psi /= np.linalg.norm(psi)
@@ -128,6 +159,7 @@ def check_sparse_pauli_sum(n=4, tol=1e-12):
     AssertionError
         If the two matrices disagree by more than ``tol``.
     """
+    _require_assertions("check_sparse_pauli_sum")
     rng = np.random.default_rng(SELFTEST_SEED)
     J, h = rng.uniform(0.5, 1.5, n - 1), rng.uniform(0, 2, n)
     terms = ising_terms(n, J, h, kappa=0.3)
@@ -167,6 +199,7 @@ def check_ground_state(n=4, residual_tol=1e-8, parity_tol=1e-10, energy_tol=1e-9
         If the state is not an eigenvector, is not in the even sector, or is not the
         global minimum.
     """
+    _require_assertions("check_ground_state")
     rng = np.random.default_rng(SELFTEST_SEED)
     J, h = rng.uniform(0.5, 1.5, n - 1), rng.uniform(0, 2, n)
     terms = ising_terms(n, J, h, kappa=0.3)
@@ -204,6 +237,7 @@ def check_walsh_transform(n=6, tol=1e-10):
     AssertionError
         If either residual exceeds ``tol``.
     """
+    _require_assertions("check_walsh_transform")
     rng = np.random.default_rng(SELFTEST_SEED)
     F = rng.normal(size=1 << n)
     coeffs = fwht(F) / (1 << n)
@@ -241,6 +275,7 @@ def check_short_time_limit(n=4, t=0.02, tol=1e-5):
     AssertionError
         If any site deviates from the expansion by more than ``tol``.
     """
+    _require_assertions("check_short_time_limit")
     rng = np.random.default_rng(SELFTEST_SEED)
     J, h = rng.uniform(0.5, 1.5, n - 1), rng.uniform(0, 2, n)
     H = pauli_sum(n, ising_terms(n, J, h, g=np.full(n, 0.5), sign=1.0)).toarray()
@@ -286,6 +321,7 @@ def check_engineered_labels(n_rows=60, n_features=3, sq_tol=1e-6, sc_tol=1e-8):
     AssertionError
         If either complexity misses its target.
     """
+    _require_assertions("check_engineered_labels")
     rng = np.random.default_rng(SELFTEST_SEED)
     X = rng.uniform(0, 1, (n_rows, n_features))
     K_Q, K_C = rbf(X, 5.0), rbf(X, 0.5)
@@ -336,6 +372,7 @@ def check_zz_feature_map(tol=1e-10, cases=ZZ_CROSSCHECK_CASES, draws=3):
     Qiskit's ``zz_feature_map`` function is used when available; the deprecated
     ``ZZFeatureMap`` class is the fallback for Qiskit older than 2.1.
     """
+    _require_assertions("check_zz_feature_map")
     try:                                    # the class is deprecated as of Qiskit 2.1
         from qiskit.circuit.library import zz_feature_map as _zz
     except ImportError:                     # pragma: no cover - older Qiskit

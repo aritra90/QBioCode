@@ -2441,29 +2441,37 @@ def compute_enhanced_complexity_metrics(
         "num_edges_raw": float(H.number_of_edges()),
     }
 
+    # Paired with its own name. Read off the lambda instead, `__name__` is '<lambda>' for
+    # every entry -- so a failure here reported "Metric function <lambda> failed" and said
+    # nothing about which of the fifteen groups had gone to NaN. The groups fall back to
+    # NaN rather than propagating (see setdefault below), so this warning is the only
+    # notice a caller gets, and an unattributable one costs a reader the whole list.
     metric_functions = [
-        lambda graph: compute_size_density_metrics(graph),
-        lambda graph: compute_sparse_spectral_metrics(graph, config=config),
-        lambda graph: compute_adjacency_spectral_metrics(graph, config=config),
-        lambda graph: compute_heat_kernel_traces(graph, config=config),
-        lambda graph: compute_odd_girth_metric(graph, config=config),
-        lambda graph: compute_approx_path_length_metric(graph, config=config),
-        lambda graph: compute_community_metrics(graph, config=config),
-        lambda graph: compute_degree_metrics(graph),
-        lambda graph: compute_centrality_concentration_metrics(graph, config=config),
-        lambda graph: compute_cycle_metrics(graph, config=config),
-        lambda graph: compute_orc_proxy_metrics(graph),
-        lambda graph: compute_wl_compression_ratio(graph, config=config),
-        lambda graph: compute_core_metrics(graph),
-        lambda graph: compute_label_homophily(graph, labels=labels),
-        lambda graph: compute_feature_dirichlet_energy(graph, features=features),
+        ("size_density", lambda graph: compute_size_density_metrics(graph)),
+        ("sparse_spectral", lambda graph: compute_sparse_spectral_metrics(graph, config=config)),
+        ("adjacency_spectral", lambda graph: compute_adjacency_spectral_metrics(graph, config=config)),
+        ("heat_kernel_traces", lambda graph: compute_heat_kernel_traces(graph, config=config)),
+        ("odd_girth", lambda graph: compute_odd_girth_metric(graph, config=config)),
+        ("approx_path_length", lambda graph: compute_approx_path_length_metric(graph, config=config)),
+        ("community", lambda graph: compute_community_metrics(graph, config=config)),
+        ("degree", lambda graph: compute_degree_metrics(graph)),
+        ("centrality_concentration",
+         lambda graph: compute_centrality_concentration_metrics(graph, config=config)),
+        ("cycle", lambda graph: compute_cycle_metrics(graph, config=config)),
+        ("orc_proxy", lambda graph: compute_orc_proxy_metrics(graph)),
+        ("wl_compression", lambda graph: compute_wl_compression_ratio(graph, config=config)),
+        ("core", lambda graph: compute_core_metrics(graph)),
+        ("label_homophily", lambda graph: compute_label_homophily(graph, labels=labels)),
+        ("feature_dirichlet_energy",
+         lambda graph: compute_feature_dirichlet_energy(graph, features=features)),
     ]
 
-    for fn in metric_functions:
+    for name, fn in metric_functions:
         try:
             metrics.update(fn(H))
         except Exception as exc:
-            warnings.warn(f"Metric function {getattr(fn, '__name__', repr(fn))} failed: {exc}")
+            warnings.warn(f"Metric group {name!r} failed, its columns stay NaN: "
+                          f"{type(exc).__name__}: {exc}")
 
     for key in CANDIDATE_ALL_METRICS:
         metrics.setdefault(key, np.nan)
