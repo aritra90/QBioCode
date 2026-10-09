@@ -593,12 +593,65 @@ Troubleshooting
 Checkpoint and Restart
 ======================
 
-When processing large batches of datasets, jobs may be interrupted due to time limits, system failures, or resource constraints. QProfiler provides a checkpoint restart utility to resume processing without recomputing completed datasets.
+When processing large batches of datasets, jobs may be interrupted due to time limits, system failures, or resource constraints. QProfiler offers two ways to resume, at two different granularities:
 
-How It Works
-------------
+.. list-table::
+   :header-rows: 1
+   :widths: 18 22 60
+
+   * - Mechanism
+     - Unit
+     - Use it when
+   * - ``skip_existing``
+     - one (embedding, split, model) cell
+     - A run of one config was interrupted part-way. This is the precise one, and it is the one to reach for first.
+   * - ``checkpoint_restart``
+     - a whole dataset
+     - You are driving many single-dataset runs yourself and want to skip the files already attempted.
+
+Resuming a single run: ``skip_existing``
+----------------------------------------
+
+A run appends to ``ModelResults.csv`` as each model returns, so a job killed at a cluster wall keeps every pass that finished. What it does not keep is the benefit: rerunning the same config opens a **new** run directory and starts again at the first split. Set ``skip_existing`` and the rerun becomes cumulative instead.
+
+.. code-block:: yaml
+
+   skip_existing: false                 # default: compute every pass
+   skip_existing: true                  # resume from the other run directories of this config
+   skip_existing: /abs/path/to/results  # ...or from this directory instead
+
+.. code-block:: bash
+
+   # As a Hydra override -- '++' sets the key whether or not the config defines it
+   qprofiler --config-dir=$(pwd) --config-name=my_config ++skip_existing=true
+
+For every (embedding, split, model) cell an earlier run already holds, the new run copies that row into its own ``ModelResults.csv`` **verbatim**, carries the model's ``oof/``, ``trials/`` and ``val_predictions/`` rows across, and does not fit the model. A pass whose every model is present is skipped whole: no embedding is read and no complexity measure is recomputed. Every adopted cell is listed in ``adopted.csv`` with the run directory it came from.
+
+.. warning::
+   Nothing ties a run directory to a config but its name, so resuming **across an edit to
+   the config** mixes two protocols in one table. Under ``split_mode: manifest`` the rows
+   carry ``dataset_sha256`` and ``manifest_sha256``, and a row that disagrees with the
+   run's is refused and named in the log -- which catches a dataset or a frozen split
+   changing underneath a resume. In internal mode there is no such column: delete the old
+   run directories rather than resume after changing the config.
+
+.. seealso::
+   :ref:`bench-resume` for the cluster workflow (``SKIP_EXISTING=1 ./submit_runs.sh``), and
+   the :doc:`configuration guide <config>` for the full semantics.
+
+Resuming a batch: ``checkpoint_restart``
+----------------------------------------
 
 The ``checkpoint_restart`` function scans a previous results directory and identifies which datasets were fully processed by checking for completion marker files (e.g., ``RawDataEvaluation.csv``). You can then filter your dataset list to process only the remaining incomplete datasets.
+
+.. warning::
+   **The default marker does not mean "finished".** QProfiler writes
+   ``RawDataEvaluation.csv`` as soon as it has profiled a dataset's raw features -- before
+   the first split is drawn and before any model is fitted -- so a dataset killed one
+   minute into a multi-hour run already carries it and is reported here as completed, then
+   skipped for good. Pass ``completion_marker='ModelResults.csv'`` for a marker that at
+   least implies one model finished, and check the row count yourself if you need more.
+   For a resume that is precise about *which* passes finished, use ``skip_existing`` above.
 
 Basic Usage
 -----------

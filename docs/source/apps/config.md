@@ -396,6 +396,52 @@ python -m qbiocode.apps.qprofiler.embedding_cache --check runs/*/*.yaml   # writ
   The job logs a sha256 of the features it used for every pass, so the logs of two jobs
   show whether they saw the same features.
 
+#### Resuming instead of restarting: `skip_existing`
+
+A run appends to `ModelResults.csv` as each model returns, so a job killed at a cluster
+wall keeps every pass that finished. What it does not keep is the benefit: rerunning the
+same config opens a **new** run directory and starts again at the first split, and the
+tooling downstream reads one run directory per config — so a config that needs more than
+one wall never completes, however many times it is resubmitted. On the quantum arms one
+pass is hours, which makes this the difference between a run that converges and one that
+does not.
+
+`skip_existing` makes a rerun cumulative:
+
+```yaml
+skip_existing: false                 # the default: compute every pass
+skip_existing: true                  # resume from the other run directories of this config
+skip_existing: /abs/path/to/results  # ...or from this directory instead
+```
+
+For each (embedding, split, model) cell an earlier run already holds, the new run copies
+that row into its own `ModelResults.csv` **verbatim** — the text, not a re-serialised
+number — carries the model's `oof/`, `trials/` and `val_predictions/` rows across, and
+does not fit the model. A pass whose every model is present is skipped whole: no embedding
+is read and no complexity measure is recomputed. A pass missing some of its models fits
+only those. Every adopted cell is listed in `adopted.csv` with the run directory it came
+from.
+
+- **The path must be absolute**, for the same reason `embedding_cache`'s must be. `true`
+  resolves to the parent of the run directory, which is where hydra puts the sibling runs
+  of one `config_file_name`. The current run directory is never read as an earlier one.
+- **The newest run wins** where several hold the same cell: run directories are named
+  `<backend>_%Y-%m-%d_%H-%M-%S`, so sorting them by name sorts them by time.
+- **What is not checked is that the config did not change.** Nothing ties a run directory
+  to a config but its name. Under `split_mode: manifest` the rows carry `dataset_sha256`
+  and `manifest_sha256`, and a row disagreeing with the run's is refused and named in the
+  log — which catches a dataset or a frozen split changing underneath a resume. In
+  internal mode there is no such column, so **delete the old run directories rather than
+  resume after editing the config.**
+- `results.pkl` of a fully adopted pass is carried over. A partly adopted pass contributes
+  the summary of the models that ran, because one summary describes one set of models;
+  `ModelResults.csv` and the sidecars are complete either way.
+- `embedding_cache` is still required to be complete for the whole run, including the
+  passes that will be adopted. It is a pre-flight contract and resuming does not relax it.
+
+On the cluster, `SKIP_EXISTING=1 ./submit_runs.sh` (or `./submit_array.sh`) passes
+`++skip_existing=true` to every job it submits.
+
 ### Train/Test Split
 
 Configure data splitting and preprocessing.

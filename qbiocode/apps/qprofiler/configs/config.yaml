@@ -73,6 +73,26 @@ n_components: 3
 # written under other split, scaling or embedding settings, stops before fitting anything.
 embedding_cache: null
 
+# Resume instead of recomputing. false (the default): every (embedding, split, model) cell
+# is computed. true: the cells an earlier run of THIS config already wrote are read from
+# the other run directories beside this one -- their rows are copied into this run's
+# ModelResults.csv verbatim, their oof/, trials/ and val_predictions/ rows are carried
+# across, and only the missing models are fitted. An absolute directory looks there instead.
+#
+# Use it when a job was killed at its scheduler wall: a resubmit otherwise starts a new run
+# directory at the first split and throws away the passes that had finished, so a config
+# needing two walls never finishes however often it is resubmitted. On the quantum arms one
+# pass is hours.
+#
+# What it does NOT check is that the earlier run used the same settings; nothing ties a run
+# directory to this config but its name. Under split_mode: manifest the rows carry
+# dataset_sha256 and manifest_sha256 and those ARE checked, so a dataset or a frozen split
+# changing under a resume is refused and named in the log. In internal mode there is nothing
+# comparable to compare, so delete the old run directories rather than resume across an edit
+# to this file. Every adopted row's source is recorded in adopted.csv.
+# See qbiocode.apps.qprofiler.resume.
+skip_existing: false
+
 # ML models to generate
 # parameters to use for each ML method are listed further down in this file
 # 9 classical + 4 quantum. One representative per classical family: linear (lr),

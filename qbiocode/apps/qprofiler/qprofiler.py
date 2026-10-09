@@ -15,7 +15,9 @@
 # ====== Base class imports ======
 import numpy as np
 import pandas as pd
+import contextlib
 import logging
+from collections import Counter
 from collections.abc import Sequence
 import pickle
 import os
@@ -95,6 +97,7 @@ from qbiocode.embeddings import check_embedding_name, is_transductive
 from qbiocode import evaluate
 from qbiocode import model_run
 from qbiocode.apps.qprofiler import embedding_cache as emb_cache
+from qbiocode.apps.qprofiler import resume
 from qbiocode.apps.qprofiler import split_manifest
 from qbiocode.evaluation import protocol
 
@@ -412,6 +415,9 @@ def _validate_config(args, log):
     # Checked here, not when the first cached embedding is read: that is after the first
     # dataset has been loaded and evaluated.
     _embedding_cache_dir(args)
+    # Same reason: a relative skip_existing is an error, and finding that out after the
+    # first pass has been fitted would waste exactly the work the key exists to save.
+    _skip_existing_root(args)
 
     scaler_name = _resolve_scaling(args["scaling"])
     log.info(f"Feature scaling resolved to: {scaler_name}")
@@ -582,6 +588,62 @@ def _embedding_cache_dir(args):
             f"different directory in each job."
         )
     return path
+
+
+def _skip_existing_root(args):
+    """The directory ``skip_existing`` resolves to, or None when nothing is adopted.
+
+    ``skip_existing: true`` resumes from the other run directories of this config -- the
+    siblings of the one hydra is running in. A path names that directory instead, and
+    must be absolute for the reason ``embedding_cache`` must be. False (the default)
+    recomputes every pass. See :mod:`qbiocode.apps.qprofiler.resume`.
+
+    Raises:
+        ValueError: for a relative path, or a value that is neither a flag nor a path
+            (:class:`~qbiocode.apps.qprofiler.resume.ResumeError` is a ValueError).
+    """
+    return resume.resolve_root(args.get("skip_existing"))
+
+
+def _model_label(name, args):
+    """The label ``name``'s results are filed under, which is the ``model`` column.
+
+    ``model_run`` appends ``'_opt'`` to a model it tunes: every classical model under
+    ``grid_search``, and a quantum model only when ``tune_quantum`` is on as well. The
+    rule is duplicated here rather than exported from there because it is the dispatch
+    itself (model_run.py, the ``if grid_search:`` branch) -- and ``skip_existing`` has to
+    name the same label the earlier run wrote, or it would adopt nothing and silently
+    recompute everything.
+    """
+    from qbiocode.evaluation.model_run import QUANTUM_MODELS
+
+    tuned = bool(args.get("grid_search", False)) and (
+        name not in QUANTUM_MODELS or bool(args.get("tune_quantum", False))
+    )
+    return f"{name}_opt" if tuned else name
+
+
+@contextlib.contextmanager
+def _only_models(args, names):
+    """Run the block with ``args['model']`` cut down to ``names``, then put it back.
+
+    ``model_run`` reads the list from the config rather than taking it as an argument, so
+    this is how a resumed pass fits only the models no earlier run holds. Assigning to a
+    key that already exists is allowed even under hydra's struct mode, and the loop is
+    single-threaded, so the swap cannot be seen by anything but the call it wraps.
+    """
+    previous = list(args["model"])
+    if list(names) == previous:
+        # Nothing was adopted, which is every pass of a run without skip_existing. Left
+        # untouched rather than reassigned, so the common path does not put a plain list
+        # where hydra had a ListConfig.
+        yield
+        return
+    args["model"] = list(names)
+    try:
+        yield
+    finally:
+        args["model"] = previous
 
 
 def _input_folder(args):
@@ -871,6 +933,71 @@ def _write_sidecars(summary, test_idx, data_key):
         _write_frame_atomic(frame, os.path.join(directory, f"{data_key}.csv"))
 
 
+#: The sidecar directories of one manifest-mode pass, in the order ``_write_sidecars``
+#: writes them. ``resume.carry_sidecars`` copies an adopted model's rows into the same three.
+_SIDECAR_DIRS = (protocol.OOF_DIR, protocol.TRIALS_DIR, protocol.VAL_PREDICTIONS_DIR)
+
+
+def _append_summary(summary, path='results.pkl'):
+    """Append one pass's summary to ``results.pkl``.
+
+    Dumped to a temporary file and renamed into place rather than opened 'wb' over the
+    live one. This is a read-modify-write of the WHOLE history -- every pass loads the
+    accumulated list, appends one summary, and writes all of it back -- so 'wb' truncated
+    the only copy of every previous pass before writing the new one. A job killed inside
+    that window (an LSF wall kill, an OOM, a Ctrl-C) therefore lost not the pass in flight
+    but the entire dataset's history, and left a half-written pickle whose ``pickle.load``
+    raises UnpicklingError rather than the FileNotFoundError the read below is written to
+    tolerate. The window is small but it is entered once per pass, and the wall kill is
+    exactly the failure a long run is sized against. ``os.replace`` is atomic within a
+    filesystem, so a reader sees either the previous complete pickle or the new one;
+    ``ModelResults.csv`` needs no such care because it is appended to, never rewritten.
+    """
+    try:
+        with open(path, "rb") as pklfile:
+            results = pickle.load(pklfile)
+    except FileNotFoundError:
+        results = []
+    results.append(summary)
+    tmp = f"{path}.tmp"
+    with open(tmp, 'wb') as pklfile:
+        pickle.dump(results, pklfile)
+        pklfile.flush()
+        os.fsync(pklfile.fileno())
+    os.replace(tmp, path)
+
+
+def _adopt_cells(adopted, data_key, dataset, embed, iteration, manifest_mode, log):
+    """Write the cells of one pass that an earlier run already computed.
+
+    The sidecar rows go first and the result rows second, in the order a computed pass
+    writes them, so a pass whose rows are on disk always has its predictions and trials
+    there as well.
+
+    Args:
+        adopted: {model label: (the earlier row, the ModelResults.csv it came from)}.
+        data_key: the pass's data_key, which names its sidecar files.
+        dataset, embed, iteration: the pass, for the ``adopted.csv`` provenance rows.
+        manifest_mode: whether the run writes sidecars at all (internal mode writes none).
+        log: logger.
+    """
+    sources = {label: os.path.dirname(source) for label, (_, source) in adopted.items()}
+    if manifest_mode:
+        carried = resume.carry_sidecars(sources, data_key, adopted, _SIDECAR_DIRS)
+        if carried:
+            log.info(
+                f"{data_key}: carried over "
+                + ", ".join(f"{rows} {name} rows" for name, rows in sorted(carried.items()))
+            )
+    for label in sorted(adopted):
+        _append_model_row('ModelResults.csv', adopted[label][0])
+    resume.record_adopted([
+        {"Dataset": dataset, "embeddings": embed, "iteration": iteration,
+         "model": label, "source_run_dir": sources[label]}
+        for label in sorted(adopted)
+    ])
+
+
 # Begin the main function and instatiate Hydra class
 # config_path=None allows --config-dir to work properly
 def _append_model_row(path, row):
@@ -1041,6 +1168,21 @@ def main(args):
             emb_cache.require(cache_dir, entries)
     host_fields = _host_fields() if split_mode == "manifest" else None
 
+    # Every (embedding, split, model) cell an earlier run of this config already holds.
+    # Read once, before anything is fitted, and from the OTHER run directories only: this
+    # one holds nothing yet, and reading it would make the index grow as the run writes to
+    # it. A root that does not exist is the normal first run, not an error.
+    skip_root = _skip_existing_root(args)
+    completed = resume.scan(skip_root, exclude=[os.getcwd()]) if skip_root else resume.CompletedResults()
+    if skip_root:
+        log.info(
+            f"skip_existing: {len(completed)} result row(s) found in "
+            f"{len(completed.sources)} earlier run(s) under {skip_root}; the "
+            f"(embedding, split, model) cells they cover will not be recomputed. Rows "
+            f"computed from other dataset bytes or other frozen splits are refused per "
+            f"pass below, not adopted."
+        )
+
     # need to populate raw data evaluation for each file, so start an empty list
     appended_raw_data_eval = []
     
@@ -1101,6 +1243,20 @@ def main(args):
             dataset_sha256 = emb_cache.file_sha256(dataset_path)
         if split_mode == "manifest":
             manifest = _dataset_manifest(args, dataset_path, len(X), y_encoded, dataset_sha256)
+
+        # What an adopted row must agree with, checked per dataset because the index is
+        # read once for all of them. In manifest mode that is the dataset bytes and the
+        # frozen splits the earlier run computed from, which is the one disagreement that
+        # would put two different experiments in one results table. Internal-mode rows
+        # carry neither column, so there is nothing to compare and the resume rests on
+        # the config name alone (see resume.py, "What it does NOT check").
+        adopt_require = resume.provenance_require(
+            manifest,
+            dataset_sha256 if (cache_dir or split_mode == "manifest") else None,
+        )
+        # Model name -> the label its results are filed under. Built from the WHOLE list,
+        # before _only_models narrows it for a resumed pass.
+        model_labels = {name: _model_label(name, args) for name in args['model']}
 
         # call and run evaluation functions
         df_dataset = pd.DataFrame(X)
@@ -1185,6 +1341,62 @@ def main(args):
                 else:
                     log.info(f"Feature reduction (embedding) applied with {embed}")
                 data_key = _data_key(file, embed, args["n_components"], iter)
+
+                # skip_existing: the cells of this pass an earlier run already holds, and
+                # the models that are therefore left to fit. Decided before the features
+                # are read and before the complexity measures are recomputed, so a pass
+                # that is already complete costs one dictionary lookup per model.
+                adopted = {}
+                for name, label in model_labels.items():
+                    row, csv_path = completed.get(file, embed, iter, label)
+                    if row is None:
+                        continue
+                    # A row the provenance check rejects is NAMED, not dropped quietly: a
+                    # resume that silently declines to adopt looks exactly like one with
+                    # nothing to adopt, and the difference is whether the dataset or its
+                    # frozen splits changed under the run.
+                    reason = resume.refused(row, adopt_require)
+                    if reason:
+                        log.warning(
+                            f"{data_key}: skip_existing will NOT adopt {label} -- "
+                            f"{reason} (in {csv_path}). It is being recomputed."
+                        )
+                        continue
+                    adopted[label] = (row, csv_path)
+                remaining = [name for name, label in model_labels.items()
+                             if label not in adopted]
+                if adopted:
+                    log.info(
+                        f"{data_key}: skip_existing adopts {sorted(adopted)} from "
+                        f"{sorted({os.path.dirname(src) for _, src in adopted.values()})}; "
+                        f"{remaining if remaining else 'nothing'} left to fit"
+                    )
+                if not remaining:
+                    # The whole pass is already on disk: no embedding is read, no
+                    # complexity measures are recomputed and no model is fitted. Its
+                    # summary comes from the earlier run so this run's results.pkl is as
+                    # complete as its ModelResults.csv.
+                    _adopt_cells(adopted, data_key, file, embed, iter,
+                                 split is not None, log)
+                    # From whichever earlier run supplied most of the pass: its summary is
+                    # the one that describes the models now in this run's rows. Several
+                    # runs only contribute to one pass when an earlier resume was itself
+                    # partial, and then no single summary covers it -- hence "most".
+                    carried = None
+                    for run_dir, _ in Counter(
+                        os.path.dirname(src) for _, src in adopted.values()
+                    ).most_common():
+                        carried = resume.carry_summary(run_dir, file, embed, iter)
+                        if carried is not None:
+                            break
+                    if carried is not None:
+                        _append_summary(carried)
+                    else:
+                        log.info(f"{data_key}: no earlier run left a results.pkl summary "
+                                 f"for this pass, so this run's holds none either; its "
+                                 f"rows and sidecars are complete")
+                    continue
+
                 X_train_emb, X_test_emb, source = _pass_features(
                     cache_dir,
                     data_key,
@@ -1270,7 +1482,11 @@ def main(args):
                     )
                 ]:
                     del summary[stale]
-                summary.update(model_run(X_train_emb, X_test_emb, y_train, y_test, data_key, args, **run_kwargs))
+                # Only the models no earlier run holds. Without skip_existing `remaining`
+                # is the whole list and the context manager is a no-op.
+                with _only_models(args, remaining):
+                    summary.update(model_run(X_train_emb, X_test_emb, y_train, y_test,
+                                             data_key, args, **run_kwargs))
                 if split is not None:
                     summary.update({
                         'train_idx': train_idx, 'fit_idx': fit_idx,
@@ -1299,34 +1515,16 @@ def main(args):
                             row.update(protocol.validation_tiebreak(
                                 summary.get(protocol.TRIALS_PREFIX + outerkey[len("results_"):])))
                         _append_model_row('ModelResults.csv', row)
-                # Read existing summary data from the file, if any
-                try:
-                    with open("results.pkl", "rb") as pklfile:
-                        results = pickle.load(pklfile)
-                except FileNotFoundError:
-                    results = []
-                # #Append the list with new summary data
-                results.append(summary)
-                # Dumped to a temporary file and renamed into place rather than opened
-                # 'wb' over the live one. The three lines above are a read-modify-write of
-                # the WHOLE history -- every pass loads the accumulated list, appends one
-                # summary, and writes all of it back -- so 'wb' truncated the only copy of
-                # every previous pass before writing the new one. A job killed inside that
-                # window (an LSF wall kill, an OOM, a Ctrl-C) therefore lost not the pass
-                # in flight but the entire dataset's history, and left a half-written
-                # pickle whose `pickle.load` raises UnpicklingError rather than the
-                # FileNotFoundError the reader above is written to tolerate. The window is
-                # small but it is entered once per pass, and the wall kill is exactly the
-                # failure this run is sized against. os.replace is atomic within a
-                # filesystem, so a reader sees either the previous complete pickle or the
-                # new one; ModelResults.csv needs no such care because it is appended to,
-                # never rewritten.
-                tmp_pkl = 'results.pkl.tmp'
-                with open(tmp_pkl, 'wb') as pklfile:
-                    pickle.dump(results, pklfile)
-                    pklfile.flush()
-                    os.fsync(pklfile.fileno())
-                os.replace(tmp_pkl, 'results.pkl')
+                # The cells of this pass that were adopted rather than fitted, merged in
+                # after the fresh ones -- rows and sidecar rows alike, so the pass is
+                # complete whichever models ran here. `summary` (and so results.pkl)
+                # describes only the models that did: it is one record per pass naming
+                # every model in it, and the earlier run's record of this pass names a
+                # different set.
+                if adopted:
+                    _adopt_cells(adopted, data_key, file, embed, iter,
+                                 split is not None, log)
+                _append_summary(summary)
             iter_run_time = time.time() - iter_start_time
             first_pass = False
             
