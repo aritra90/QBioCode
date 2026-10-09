@@ -223,64 +223,71 @@ running.
 This is the part that checks `SKIP_EXISTING=1` reaches the job. `submit_runs.sh` selects
 jobs by joining the YAML path you hand it against `MANIFEST.tsv`'s absolute `yaml` column,
 and the shipped manifest holds the paths of the machine the configs were **generated** on.
-If your checkout is somewhere else you get:
+In any other checkout every selection is empty:
 
 ```text
 no config matched the selection (DATASET='' EMB='' MODEL='')
 ```
 
-Check before anything else, and skip to 5c if they differ:
+**Step 1 — let the shell decide which case you are in.** This sets `RUNS` and `CFG` for
+everything below, and prints whether you need step 2:
 
 ```bash
-awk -F'\t' 'NR>1 && $1=="heart_none_nb" {print "manifest:", $13}' runs/MANIFEST.tsv
-echo "yours:    $PWD/runs/heart/heart_none_nb.yaml"
+STORED=$(awk -F'\t' 'NR>1 && $1=="heart_none_nb" {print $13; exit}' runs/MANIFEST.tsv)
+if [ "$STORED" = "$PWD/runs/heart/heart_none_nb.yaml" ]; then
+    export RUNS=$PWD/runs CFG=$PWD/runs/heart/heart_none_nb.yaml
+    echo "MATCHES this checkout -> SKIP step 2, go straight to step 3"
+else
+    echo "manifest was generated elsewhere:"
+    echo "  it says $STORED"
+    echo "  you are $PWD/runs/heart/heart_none_nb.yaml"
+    echo "-> RUN step 2 before step 3"
+fi
 ```
 
-If they match, the shipped tree works directly — `DRY=1` first, which submits nothing:
-
-```bash
-DRY=1 FORCE=1 SPREAD=0 SKIP_EXISTING=1 ./submit_runs.sh runs/heart/heart_none_nb.yaml
-DRY=1 FORCE=1 SPREAD=0                 ./submit_runs.sh runs/heart/heart_none_nb.yaml
-```
-
-**Expect** `++skip_existing=true` at the end of the printed `bsub` command in the first,
-and absent in the second. That one flag is the entire submit-side change. Then drop `DRY=1`
-to submit; the job writes into `runs/heart/results/heart_none_nb/`, which `.gitignore`
-covers (`experiments/**/results/`).
-
-### 5c · A one-job manifest for this checkout
-
-If the paths differ, build a scratch tree whose manifest names *your* YAML. Three commands,
-no editing by hand — the old prefix is read out of the manifest rather than typed:
+**Step 2 — a one-job manifest for this checkout.** Only if step 1 told you to. Three
+commands, nothing typed by hand: the old prefix is read out of the manifest.
 
 ```bash
 mkdir -p $T/runs/heart
-OLDDIR=$(dirname "$(awk -F'\t' 'NR>1 && $1=="heart_none_nb" {print $13; exit}' runs/MANIFEST.tsv)")
-sed "s|$OLDDIR|$T/runs/heart|g" runs/heart/heart_none_nb.yaml > $T/runs/heart/heart_none_nb.yaml
+sed "s|$(dirname "$STORED")|$T/runs/heart|g" \
+    runs/heart/heart_none_nb.yaml > $T/runs/heart/heart_none_nb.yaml
 awk -F'\t' -v OFS='\t' -v new="$T/runs/heart/heart_none_nb.yaml" \
     'NR==1 {print; next} $1=="heart_none_nb" {$13=new; print}' runs/MANIFEST.tsv > $T/runs/MANIFEST.tsv
+export RUNS=$T/runs CFG=$T/runs/heart/heart_none_nb.yaml
+echo "RUNS=$RUNS"; echo "CFG=$CFG"
 ```
 
 That one `sed` moves `hydra.run.dir`, `quantum_param_dir` and `kernel_dump_dir` into `$T`
 as well, since all three sit under the same prefix. `folder_path` is left alone — it points
 at the shared dataset directory, which is correct. `embedding_cache` is also left pointing
-at the generating machine's path and that is harmless here: with `embeddings: ['none']`
-nothing is ever read from it (the log names the directory but every pass says *"No feature
-reduction"* and *"computed in this run"*).
+at the generating machine's path, and that is harmless here: with `embeddings: ['none']`
+nothing is ever read from it (the log names the directory, then every pass says *"No
+feature reduction"* and *"computed in this run"*).
 
-Check what it selected, then submit:
+**Step 3 — the actual check.** Identical either way, because `RUNS` and `CFG` carry the
+difference. `DRY=1` submits nothing:
 
 ```bash
-RUNS=$T/runs DRY=1 FORCE=1 SPREAD=0 SKIP_EXISTING=1 ./submit_runs.sh $T/runs/heart/heart_none_nb.yaml
-RUNS=$T/runs      FORCE=1 SPREAD=0 SKIP_EXISTING=1 ./submit_runs.sh $T/runs/heart/heart_none_nb.yaml
-bjobs -J p10_heart_none_nb
+DRY=1 FORCE=1 SPREAD=0 SKIP_EXISTING=1 ./submit_runs.sh $CFG
+DRY=1 FORCE=1 SPREAD=0                 ./submit_runs.sh $CFG
 ```
 
-**Expect** `submitted 1 jobs (0 quantum, 1 classical)`. Run it **twice**: the second job
-finds the first's run directory as a sibling and adopts all five cells.
+**Expect** `++skip_existing=true` at the end of the printed `bsub` command in the first and
+absent in the second. That one flag is the entire submit-side change.
+
+**Step 4 — submit, twice.** The second job finds the first's run directory as a sibling:
 
 ```bash
-R=$T/runs/heart/results/heart_none_nb
+FORCE=1 SPREAD=0 SKIP_EXISTING=1 ./submit_runs.sh $CFG
+bjobs -J p10_heart_none_nb                 # wait for it to clear, then repeat the line above
+```
+
+**Expect** `submitted 1 jobs (0 quantum, 1 classical)` each time, then all five cells
+adopted by the second:
+
+```bash
+R=$(dirname $CFG)/results/heart_none_nb
 ls -1 $R                                   # two timestamped run directories
 resume_log $R/$(ls -1 $R | tail -1)
 cells      $R/$(ls -1 $R | tail -1)/adopted.csv
@@ -297,12 +304,12 @@ Everything above ran with `FORCE=1`, which **turns this off**. Now test it on it
 
 ### Through `submit_runs.sh`
 
-Phase 5 left a complete run, so ask without `FORCE`. Use whichever tree phase 5 worked in
-— `RUNS=runs` for 5b, or `RUNS=$T/runs` for 5c (shown here):
+Phase 5 left a complete run, so ask without `FORCE`. `RUNS` and `CFG` are still the ones
+5b exported, so this is the same command either way:
 
 ```bash
-./status.py --runs-dir $T/runs $T/runs/heart/heart_none_nb.yaml --list all
-RUNS=$T/runs SKIP_EXISTING=1 SPREAD=0 ./submit_runs.sh $T/runs/heart/heart_none_nb.yaml
+./status.py --runs-dir $RUNS $CFG --list all
+SKIP_EXISTING=1 SPREAD=0 ./submit_runs.sh $CFG
 ```
 
 **Expect** `status.py` to show the config as `done` with `rows 5/5`, and the submit to print
@@ -314,7 +321,7 @@ The decision comes from `status.py --todo`, which prints a path only for a confi
 do":
 
 ```bash
-./status.py --runs-dir $T/runs --no-lsf --todo $T/runs/heart/heart_none_nb.yaml | wc -l   # 0
+./status.py --runs-dir $RUNS --no-lsf --todo $CFG | wc -l          # 0
 ```
 
 ### Through the array runner
@@ -324,15 +331,15 @@ second per finished task instead of a process. `QBC_SKIP_DONE=1` is its default.
 element by hand:
 
 ```bash
-printf '%s\t%s\t%s\t\n' "$T/runs/heart/heart_none_nb.yaml" heart_none_nb "$T/runs/heart" > $T/tasks.tsv
-export QBC_TASKS=$T/tasks.tsv QBC_RUNS=$T/runs QBC_STATUS=$PWD/status.py
+printf '%s\t%s\t%s\t\n' "$CFG" heart_none_nb "$(dirname $CFG)" > $T/tasks.tsv
+export QBC_TASKS=$T/tasks.tsv QBC_RUNS=$RUNS QBC_STATUS=$PWD/status.py
 export QBC_PY=$PY QBC_ENVV="OMP_NUM_THREADS=1" QBC_TASK_OFFSET=0
 
 QBC_TASK_INDEX=1 QBC_SKIP_DONE=1 ./array_task.sh; echo "exit=$?"
 ```
 
 Nothing here reads `MANIFEST.tsv` — the task list is the three columns above — so this part
-works whether or not 5b applied to your checkout.
+works whether or not 5b needed its step 2.
 
 **Expect** `already done (status.py --todo lists it as neither todo, failed nor partial);
 skipping` and **exit 0**, in about a second. With `QBC_SKIP_DONE=0` the same command runs
@@ -344,12 +351,12 @@ A **partially** finished config must *not* be skipped by B — it has to reach t
 can adopt what landed and finish the rest. Truncate the complete results and re-ask:
 
 ```bash
-B=$T/runs/heart/results/heart_none_nb
+B=$(dirname $CFG)/results/heart_none_nb
 R=$B/$(ls -1 $B | tail -1)
 cp $R/ModelResults.csv $T/full_backup.csv
 head -3 $R/ModelResults.csv > $R/tmp && mv $R/tmp $R/ModelResults.csv   # 2 of 5 rows
 
-./status.py --runs-dir $T/runs $T/runs/heart/heart_none_nb.yaml --list all   # partial, rows 2/5
+./status.py --runs-dir $RUNS $CFG --list all          # partial, rows 2/5
 QBC_TASK_INDEX=1 QBC_SKIP_DONE=1 ./array_task.sh 2>&1 | tail -3
 ```
 
@@ -389,7 +396,7 @@ unset QBC_TASKS QBC_RUNS QBC_STATUS QBC_PY QBC_ENVV QBC_TASK_OFFSET
 | `will NOT adopt … its dataset_sha256 is …` | the dataset changed since the earlier run. This is the guard working; it only fires under `split_mode: manifest`, which this test does not use |
 | `adopted.csv` absent after phase 3 | nothing was adopted — usually the truncation in phase 2 did not take, so check `cells $R1/ModelResults.csv` says 2 |
 | `skip_existing must be true, false, or an ABSOLUTE directory` | a relative path was passed. Raised during validation, before any data is read |
-| `no config matched the selection (DATASET='' EMB='' MODEL='')` | **The common one.** `MANIFEST.tsv` stores absolute YAML paths from the machine the configs were generated on, and this checkout is elsewhere. Use **5c**, which builds a one-job manifest naming your path; or regenerate with `generate_pilot_configs.py --layout split`. Phases 1-4, 5a and the array part of 6 need no manifest at all |
+| `no config matched the selection (DATASET='' EMB='' MODEL='')` | **The common one.** `MANIFEST.tsv` stores absolute YAML paths from the machine the configs were generated on, and this checkout is elsewhere. Use **5b step 2**, which builds a one-job manifest naming your path; or regenerate with `generate_pilot_configs.py --layout split`. Phases 1-4, 5a and the array part of 6 need no manifest at all |
 | phase 5: `nothing to submit: every selected config is done` | `FORCE=1` was omitted. That is skip **B**, which phase 5 is not testing — it is the *expected* result in phase 6 |
 | phase 6: the config reads `todo`, not `done` | `--runs-dir` is wrong, or the results are not under `<config dir>/results/<config_file_name>/`. `status.py` globs exactly that, and counts distinct (embedding, iteration, model) rows against `iter x embeddings x models` |
 | phase 6: skipped when you expected it to run | the truncation did not take. `status.py … --list all` must say `partial  rows 2/5` before the runner will run it |
