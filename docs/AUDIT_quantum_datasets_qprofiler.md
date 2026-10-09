@@ -1,7 +1,13 @@
 # Audit — "Simulated Quantum Datasets in QProfiler"
 
 **Scope:** `quantum_datasets_qprofiler` notebook, PDF export dated 24 Sep 2026 (17 pages).
-**Supporting files:** the reference generator `qdata_gen.py`; the audit scripts `audit_diag.py`, `audit_eng.py`, `audit_ql.py`, `audit_te.py`.
+**Supporting files:** the reference generator `qdata_gen.py`; the audit scripts `audit_diag.py`, `audit_eng.py`, `audit_ql.py`, `audit_te.py` — now in [`audit_scripts/`](audit_scripts/).
+
+> **The run below cannot currently be repeated.** `qdata_gen.py` was never committed to
+> this repository, so all four audit scripts fail with `ModuleNotFoundError`. See
+> [`audit_scripts/README.md`](audit_scripts/README.md) for what is missing and what it
+> would take to restore. The physics these scripts cross-check is pinned independently by
+> `qbiocode.data_generation.quantum_selftest`, which does run in CI.
 
 ---
 
@@ -1943,10 +1949,11 @@ python qdata_gen.py gs  --label e2e    --n 6 --N 80 --seed 0 --out /tmp/rep
 python qdata_gen.py gs  --label sparse --n 6 --N 80 --seed 0 --out /tmp/rep
 python qdata_gen.py hl  --n 4 --N 80 --times 0.5 --shots 1000 --seed 0 --out /tmp/rep
 
-python audit_diag.py /tmp/rep/x_view/eng_zz_n4_gq1_s0.csv /tmp/rep/x_view/ql_zz_n4_tau1_s0.csv /tmp/rep/x_view/ql_evo_n4_tau1_s0.csv  # 40 splits, all arms
-python audit_eng.py    # F1: 100 splits, aligned vs reps4 vs scaled vs row-misaligned
-python audit_ql.py     # F1 control: ql_zz aligned vs reps4
-python audit_te.py     # F4, F12: tau ladder over 8 seeds; <r> vs n
+# The four below need qdata_gen.py on sys.path; it is not in the repo (audit_scripts/README.md).
+python docs/audit_scripts/audit_diag.py /tmp/rep/x_view/eng_zz_n4_gq1_s0.csv /tmp/rep/x_view/ql_zz_n4_tau1_s0.csv /tmp/rep/x_view/ql_evo_n4_tau1_s0.csv  # 40 splits, all arms
+python docs/audit_scripts/audit_eng.py    # F1: 100 splits, aligned vs reps4 vs scaled vs row-misaligned
+python docs/audit_scripts/audit_ql.py     # F1 control: ql_zz aligned vs reps4
+python docs/audit_scripts/audit_te.py     # F4, F12: tau ladder over 8 seeds; <r> vs n
 ```
 
 The `data_key` collision (F2) and the low-variance metric (F6) were reproduced directly against the public `main` source.

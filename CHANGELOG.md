@@ -8,6 +8,176 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Resuming instead of restarting: `skip_existing`
+
+- **A job killed at its wall is now cheap to resubmit.** QProfiler appends to
+  `ModelResults.csv` as each model returns, so a wall kill keeps every pass that finished
+  -- but a rerun opened a *new* run directory and started again at the first split, and
+  `collate_results.py` takes one run directory per config. A config needing two walls
+  therefore never completed, however often it was resubmitted; on the quantum arms one
+  pass is hours.
+- **`skip_existing`** (`qbiocode/apps/qprofiler/resume.py`) makes a rerun cumulative. For
+  every (embedding, split, model) cell an earlier run directory of the same config holds,
+  the new run copies that row into its own table **verbatim** -- the text, not a
+  re-serialised number -- carries the model's `oof/`, `trials/` and `val_predictions/`
+  rows across, and does not fit the model. A pass whose every model is present is skipped
+  whole: no embedding is read, no complexity measure recomputed. A pass missing some of
+  its models fits only those, via `_only_models`, which narrows `args['model']` for that
+  one `model_run` call.
+  - `false` (the default, and what the shipped `config.yaml` carries): unchanged
+    behaviour. `true`: the sibling run directories of this config. An absolute path:
+    that directory. The current run directory is never read as an earlier one.
+  - The index is keyed by the label `model_run` files results under, so `_model_label`
+    duplicates that function's `'_opt'` rule -- a mismatch there would adopt nothing while
+    reporting success, which is why it is pinned by a test against every model name.
+  - `adopted.csv` in the new run directory records each adopted cell and the run directory
+    it came from.
+  - **What is not checked** is that the config did not change between the runs; nothing
+    ties a run directory to a config but its name. Under `split_mode: manifest` the rows
+    carry `dataset_sha256` and `manifest_sha256`, and a row that disagrees with the run's
+    is refused and named in the log. Internal mode has no such column, so delete the old
+    run directories rather than resume across an edit.
+  - `SKIP_EXISTING=1 ./submit_runs.sh` (and `./submit_array.sh`) pass
+    `++skip_existing=true` to every job.
+- `tests/test_qprofiler_skip_existing.py` pins the seven properties: the config forms and
+  the relative-path refusal at validation time; the label rule against `model_run`'s
+  dispatch; a complete resume fitting nothing yet writing a complete table with the rows
+  byte for byte; a partial resume fitting only what is missing; the sidecars coming
+  across; a row from other dataset bytes being refused and named; and the whole thing
+  being off unless asked for.
+
+#### Submitting a sweep as job arrays, split between users: `submit_array.sh`
+
+- **`experiments/pilot10/submit_array.sh` and `array_task.sh`.** `submit_runs.sh` sends
+  one job per config, which is right for a few hundred and wrong for a few hundred
+  thousand: every `bsub` is a round trip and a user's pending limit (400 here) fills long
+  before the sweep is in. The new script submits the same configs as **arrays**, waits for
+  the pending count to drain below `PEND_THRESHOLD`, and submits the next round.
+- **LSF and Slurm**, chosen with `SCHED` (`bsub -J name[1-400]%200`, or
+  `sbatch --array=1-400%200 --partition=...`). A slice is submitted as array indices
+  `1..count` with an offset in the environment, because Slurm array ids must stay under
+  `MaxArraySize` (1001 by default) and so cannot be the global task number; the script
+  also caps `MAX_INDEX` at what `scontrol show config` reports.
+- **The work is divided by range.** The configs are frozen once into a numbered
+  `tasks.tsv` beside `MANIFEST.tsv`, in `submit_runs.sh`'s heaviest-first order with the
+  config name as a total tie-break. `./submit_array.sh --count` prints the task total and
+  the list's sha256 for every user to compare before anyone submits; then
+  `./submit_array.sh 1 200000` and `./submit_array.sh 200001 400000` take disjoint halves,
+  or `SHARE=k/n` computes contiguous blocks that partition the list exactly. A later call
+  with different `DATASET=`/`EMB=`/`MODEL=` filters is **refused** rather than renumbering
+  the list under someone mid-submission (`REBUILD=1` forces it).
+- **No invented wall.** An array carries one limit, so each slice takes the longest wall
+  among its own tasks from `MANIFEST.tsv`; a slice whose tasks name none is submitted with
+  no `-W`/`--time` at all, leaving the queue's own policy in force. `WALL=` overrides.
+- `SKIP_DONE=1` (the default) lets an element whose config is already complete exit in
+  under a second instead of starting a process that would do nothing; `SKIP_EXISTING=1`
+  turns on the resume above. The embedding cache is deliberately **not** written here --
+  several users submitting overlapping ranges would each compute it -- so `CACHE_CHECK=1`
+  confirms a range is served and points at `PRECOMPUTE_ONLY=1 ./submit_runs.sh`.
+- Documented in `docs/source/benchmarking/run.md` (a new "Job arrays, and splitting a
+  sweep between users" section and an "As job arrays" tab) and
+  `docs/source/apps/config.md`.
+
+### Fixed
+
+#### Batch mode: the config files it left behind, and the results it never found
+
+- **`qprofiler_batchmode` never deleted its per-dataset configs.** It writes
+  `configs/config_<data_type>_<stamp>__<dataset>.yaml` and cleaned up with a glob for
+  `configs/config_<stamp>*`, which matches none of them -- so every batch run left one
+  config per dataset in the tree for good. Both sides now go through
+  `config_job_name()`.
+- **It looked for results in the wrong place.** The collection step read exactly
+  `results/<type>_batch_<stamp>/dataset=<file>/ModelResults.csv`, which is where the file
+  lands only if `hydra.run.dir` ends at the dataset level. The packaged `config.yaml` adds
+  a `<backend>_<timestamp>` level below it, so with any shipped config nothing was found
+  and every dataset printed "Results not found" while its results sat one directory
+  deeper. It now searches for the file and takes the newest run directory.
+- **A failing dataset looked like a successful one.** `subprocess.run` was called without
+  checking its status, so the only hint was the same "Results not found" line that a
+  path mismatch produces. `run_job` returns the exit status, and the summary names how
+  many datasets failed.
+- The base config is opened `'r'` rather than `'r+'`; nothing was written back through
+  that handle, and `'r+'` additionally refused a read-only (frozen) protocol config.
+
+#### `status.py` crashed on any job array in the queue
+
+- An element of an LSF job array is reported as `12345[7]`, so `int(jobid)` raised
+  `ValueError` and took down the whole status call -- including `--todo`, which
+  `submit_runs.sh` depends on. It now parses the leading number.
+
+#### `submit_runs.sh`: a failing `status.py` read as "nothing to do"
+
+- Step 2 collected `status.py --todo` through `mapfile < <(...)` alone, so a `status.py`
+  that died produced an empty list, which is indistinguishable there from "every config is
+  done" -- the script said exactly that and exited **0**, having submitted nothing and
+  reported success. Its exit status is now checked.
+- The quantum/classical tally used `grep -qP`, and `-P` is not portable: stock BSD grep
+  (macOS `/usr/bin/grep`) rejects it with "invalid option -- P", so the count was silently
+  0 and a `DRY=1` preview printed a usage block per job. Replaced with the same field
+  comparison the ordering step uses.
+
+#### The physics self-test could be compiled away
+
+- **`quantum_selftest`'s checks now refuse to run under `python -O`.** Every `check_*`
+  signals failure with a bare `assert`, and this is library code, so -- unlike the asserts
+  inside a test file, which pytest rewrites into real raises -- `-O` strips them and each
+  check returns its measured quantities no matter how wrong they are.
+  `run_selftest()` has guarded against that since it was written, but
+  `tests/test_quantum_data_generation.py` calls the `check_*` functions **directly** and
+  bypassed it: measured on this tree, `python -O -m pytest -k TestThePhysicsIsRight`
+  reported **7 passed** and only the one test that goes through `run_selftest` failed. The
+  guard (`_require_assertions`) is now on each check, so the same command reports 8 failed,
+  and a normal run is unchanged at 8 passed.
+
+#### A spectral metric family that silently returned NaN: `networkx>=3.0`
+
+- **`networkx` and `scipy` were both unpinned**, and a resolve that lands on networkx 2.x
+  with a modern scipy breaks `nx.normalized_laplacian_matrix`: it calls `sp.errstate`,
+  scipy's long-removed re-export of numpy's. `graph_evaluation` catches per metric family,
+  so `spectral_gap` and its neighbours came back **NaN with only a warning** -- these are
+  meta-features the benchmark regresses its verdicts on. Measured on networkx 2.8.5 +
+  scipy 1.18.1: `compute_graph_complexity_metrics` raised and
+  `test_a_disconnected_graph_has_a_zero_spectral_gap` failed; on networkx 3.7 all 53
+  metrics are finite and that file is 38/38 green. Pinned with the reasoning in the file.
+
+#### A metric failure that did not say which metric
+
+- `compute_enhanced_complexity_metrics` dispatched through a list of 15 bare lambdas and
+  reported `getattr(fn, "__name__", ...)`, which is `'<lambda>'` for every one of them --
+  so `Metric function <lambda> failed` was the only notice that a family had gone to NaN.
+  Each entry now carries its own name, and the warning says the columns stay NaN. (This is
+  what surfaced the networkx incompatibility above.)
+
+#### `generate_community_labels` died with `UnboundLocalError` on a typo
+
+- Each branch guarded one method name, so an unrecognised one fell through all of them
+  with `communities` never assigned and failed at the small-community merge, naming neither
+  the argument at fault nor the values it accepts. `method` is now checked against
+  `COMMUNITY_LABEL_METHODS` up front.
+
+#### The audit scripts in `tests/` could never run
+
+- `audit_te.py`, `audit_eng.py`, `audit_ql.py` and `audit_diag.py` all begin
+  `from qdata_gen import ...`, and **`qdata_gen.py` has never been committed on any
+  branch**; two of them also read hardcoded `/tmp/rep/x_view/*.csv`. Because
+  `python_files = ["test_*.py"]`, pytest never collected them, so nothing ever reported it.
+  They are the cited evidence for `docs/AUDIT_quantum_datasets_qprofiler.md`, so they are
+  moved to `docs/audit_scripts/` beside it rather than deleted, with a README stating
+  exactly what is missing and what restoring it would take; the audit document now says
+  up front that its run cannot currently be repeated.
+
+#### `checkpoint_restart`'s default marker is not a completion marker
+
+- `RawDataEvaluation.csv` is written as soon as QProfiler has profiled a dataset's raw
+  features -- before the first split is drawn and before any model is fitted -- so a
+  dataset killed one minute into a multi-hour run already carries it and was reported as
+  completed, then skipped for good on resume. The behaviour is unchanged (it is a public
+  API), but the docstring now says so and points at `skip_existing`, which resumes per
+  (embedding, split, model) cell instead of per dataset.
+
+### Added
+
 #### Docs: a Benchmarking section, a Dataset metrics page, and a calmer layout
 
 - **Six top-bar sections, each with a left sidebar:** Get started, Tutorials,
