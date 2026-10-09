@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Decide what to do about the duplicate pairs ``curate.py`` reports.
+"""Report the corpus's clusters, and freeze them into the map the analysis needs.
 
 ``curate.py`` ends with a line like::
 
-    duplicates.csv : 4 pair(s) to review
+    duplicates.csv : 1 pair(s) to review
 
-and then leaves the review to a person, because the two possible answers are not
+and leaves the review to a person, because the two possible answers are not
 interchangeable and neither is mechanical:
 
 * **Drop one copy.** Two files holding the same rows are one dataset, and keeping both
@@ -20,25 +20,36 @@ bootstrap in that module clusters on it, and ``benchmark/holdout.py --cluster-ma
 cluster on one side of the hold-out. Counting copies separately inflates the number of
 clusters ``G`` and so every cluster-robust test.
 
-This script does not decide for you. It reports, against a cluster map:
+The 6 cross-source copies that decision covered are now in ``curate.py``'s ``EXCLUDE``, so
+this script's first job is done; what remains is the second. It reports, against a cluster
+map:
 
-1. which corpus datasets the map does **not** list -- the copies an earlier decision
-   removed from it, plus anything genuinely new;
-2. which clusters hold more than one corpus dataset -- the groups already recognised as
-   non-independent;
+1. which corpus datasets the map does **not** list, split into those a naming rule still
+   groups (no action) and those left alone in a cluster (a decision, since each adds one
+   to ``G``);
+2. which clusters hold more than one corpus dataset -- the groups recognised as
+   non-independent -- and the resulting ``G``;
 3. each ``duplicates.csv`` pair, and whether the map already puts it in one cluster;
-4. a ready-to-paste ``EXCLUDE`` snippet for the datasets you choose to drop.
+4. a ready-to-paste ``EXCLUDE`` snippet for the singletons you choose to drop.
+
+Clusters come from :func:`qbiocode.utils.meta_regression.dataset_family`, the function the
+cluster-robust tests call, so what this prints is what they will use.
 
 With ``--emit-cluster-map`` it writes a frozen ``dataset_id,cluster`` CSV covering exactly
-the corpus on disk, which is what ``holdout.py --cluster-map`` wants.
+the corpus on disk. That is the reason to keep running it after the dedup: it is the only
+thing that produces that file, and both consumers want it. ``holdout.py --cluster-map``
+requires those two column names, which ``experiments/cluster_map_draft.csv`` does not have
+(its cluster column is ``cluster_cons``) and which it does not cover the synthetic corpus
+with at all.
 
     python benchmark/review_duplicates.py --datasets $BENCH/data/datasets
     python benchmark/review_duplicates.py --datasets $BENCH/data/datasets \\
         --emit-cluster-map $BENCH/data/clusters.csv
 
-Run it before ``make_splits.py``. The split manifests pin each CSV's sha256, so dropping a
-dataset afterwards leaves a manifest for a file the corpus no longer has, and re-curating
-afterwards invalidates every manifest.
+Run it before ``make_splits.py`` if it might change the corpus. The split manifests pin
+each CSV's sha256, so dropping a dataset afterwards leaves a manifest for a file the corpus
+no longer has, and re-curating afterwards invalidates every manifest. Emitting the cluster
+map changes no dataset, so that is safe at any time.
 """
 
 from __future__ import annotations
@@ -49,6 +60,11 @@ from pathlib import Path
 
 import pandas as pd
 import yaml
+
+try:
+    import qbiocode  # noqa: F401
+except ImportError:  # run outside an env that has QBioCode installed: use this checkout
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 #: The draft shipped with the repository. 91 datasets, and its ``stem`` column is not
 #: unique (``breast_cancer`` is both the libsvm Wisconsin set and the PMLB Ljubljana one),
@@ -79,27 +95,21 @@ def corpus(datasets: Path) -> pd.DataFrame:
 
 
 def cluster_of(datasets_frame: pd.DataFrame, mapping: dict[str, str]) -> pd.Series:
-    """Each dataset's cluster: the mapping where it lists one, else the fallback rules.
+    """Each dataset's cluster: the mapping where it lists one, else the naming rules.
 
-    The rules mirror :func:`qbiocode.utils.meta_regression.dataset_family` so a map that
-    does not cover the whole corpus still yields the clusters the analysis will use --
-    synthetic generators collapse to ``syn_<prefix>``, GAMETES variants to ``GAMETES``,
-    and anything else is its own cluster.
+    Delegates to :func:`qbiocode.utils.meta_regression.dataset_family`, the function the
+    analysis itself calls, rather than reimplementing its rules -- so what this script
+    reports is what the cluster-robust tests will actually use. An earlier copy of those
+    rules here applied them to the *source-stripped* stem and so fell back to
+    ``breast_cancer`` for both ``libsvm__breast_cancer`` (Wisconsin) and
+    ``pmlb__breast_cancer`` (Ljubljana), merging two different datasets into one cluster
+    whenever the map did not happen to list them.
     """
-    from qbiocode.utils.meta_regression import SYNTHETIC_PREFIXES
+    from qbiocode.utils.meta_regression import dataset_family
 
-    def one(row) -> str:
-        if row.dataset_id in mapping:
-            return mapping[row.dataset_id]
-        stem = row.stem
-        for prefix in SYNTHETIC_PREFIXES:
-            if stem.startswith(prefix):
-                return f"syn_{prefix.rstrip('_')}"
-        if stem.startswith("GAMETES"):
-            return "GAMETES"
-        return stem
-
-    return datasets_frame.apply(one, axis=1)
+    return datasets_frame.dataset_id.map(
+        lambda dataset_id: dataset_family(dataset_id, mapping=mapping or None,
+                                          key="dataset_id"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -139,16 +149,41 @@ def main(argv: list[str] | None = None) -> int:
 
     here["cluster"] = cluster_of(here, mapping)
 
-    # 1. Corpus datasets the map omits. Where an earlier dedup decision was recorded by
-    #    leaving a copy out of the map, this is exactly that list.
+    # 1. Corpus datasets the map omits. Those a naming rule still groups are fine and are
+    #    only counted; the ones that end up alone in a cluster are what needs a decision,
+    #    because a singleton cluster adds one to G.
     unlisted = here[~here.dataset_id.isin(mapping)]
+    grouped_by_rule = unlisted[unlisted.cluster != unlisted.dataset_id]
+    singletons = unlisted[unlisted.cluster == unlisted.dataset_id]
     print(f"\n== {len(unlisted)} corpus dataset(s) NOT in the cluster map ==")
-    if len(unlisted):
-        print("   Each is either a copy an earlier decision dropped, or genuinely new.")
-        for row in unlisted.itertuples():
-            twins = here[(here.stem.str.replace("-", "_") == row.stem.replace("-", "_"))
-                         & (here.dataset_id != row.dataset_id)]
-            same_n = here[(here.n == row.n) & (here.dataset_id != row.dataset_id)]
+    if len(grouped_by_rule):
+        by_cluster = grouped_by_rule.groupby("cluster").dataset_id.count().sort_values(ascending=False)
+        print(f"   {len(grouped_by_rule)} of them a naming rule still groups, into "
+              f"{len(by_cluster)} cluster(s) -- no action needed:")
+        for cluster, count in by_cluster.items():
+            print(f"     {cluster:<32} {count:>3} dataset(s)")
+    if len(singletons):
+        print(f"   {len(singletons)} end up ALONE in a cluster. Each is a copy an earlier "
+              f"decision dropped, or genuinely new:")
+        from qbiocode.utils.meta_regression import GENERATED_SOURCES
+
+        # Only the real sources are searched for twins. A generated dataset's n and p are
+        # arguments to its generator, not properties of it -- every shapes set is n=400,
+        # d=8 by construction -- so a collision there is evidence of nothing, and matching
+        # on it listed 92 irrelevant siblings per row. The duplicate question for a
+        # generated corpus is whether two ids got the same SEED, which shows up as equal
+        # file contents, not equal shapes; compare the dataset_sha256 of the manifests.
+        real_only = here[~here.source.isin(GENERATED_SOURCES)]
+        for row in singletons.itertuples():
+            if row.source in GENERATED_SOURCES:
+                print(f"     {row.dataset_id:<44} n={row.n:<6} p={row.p:<6}"
+                      f"   generated: no twin search (n, p are generator arguments)")
+                continue
+            twins = real_only[
+                (real_only.stem.str.replace("-", "_") == row.stem.replace("-", "_"))
+                & (real_only.dataset_id != row.dataset_id)]
+            same_n = real_only[(real_only.n == row.n)
+                               & (real_only.dataset_id != row.dataset_id)]
             hint = ""
             if len(twins):
                 hint = f"   same stem as {list(twins.dataset_id)}"
@@ -184,14 +219,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"\n== no {dup_path} (run curate.py to produce it) ==")
 
-    # 4. The snippet, for the copies you choose to drop.
-    if len(unlisted):
+    # 4. The snippet, for the copies you choose to drop. Only the singletons: a dataset a
+    #    naming rule already grouped is not a duplicate, and nominating all 93 shapes sets
+    #    for deletion was worse than printing nothing.
+    if len(singletons):
         print("\n== to DROP a copy, add it to EXCLUDE in benchmark/curate.py and re-curate ==")
+        print("   Only the datasets alone in a cluster are listed; review each before")
+        print("   pasting, since 'new' and 'duplicate' look the same from here.")
         print("   EXCLUDE = {")
-        for row in unlisted.itertuples():
+        for row in singletons.itertuples():
             print(f'       ("{row.source}", "{row.stem}"),')
-        print("   }   # keep the two already there")
-        print("   Then: re-run curate.py, and delete the stale directories it no longer writes.")
+        print("   }   # merge with the entries already there")
+        print("   Then: re-run curate.py --prune to drop the stale directories too.")
         print("   To KEEP them instead, add a row per dataset to the cluster map so each")
         print("   shares a cluster with its twin.")
 

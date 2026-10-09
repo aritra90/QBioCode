@@ -444,8 +444,51 @@ class TestDatasetFamily:
         with caplog.at_level("WARNING", logger=mr.logger.name):
             assert mr.dataset_family("wdbc.csv", {"kc1": "nasa"}) == "wdbc"
             assert mr.dataset_family("wdbc.csv|umap", {"kc1": "nasa"}) == "wdbc"
-        hits = [r for r in caplog.records if "not in the explicit mapping" in r.message]
+        hits = [r for r in caplog.records if "own cluster" in r.message]
         assert len(hits) == 1
+
+    def test_an_unmapped_dataset_a_rule_groups_is_not_logged(self, caplog, monkeypatch):
+        """The warning names the hazard -- a singleton cluster -- not every missing row.
+
+        A shapes corpus is 93 datasets no mapping lists; warning on each buried the one
+        case that actually inflates G under 93 lines of noise.
+        """
+        monkeypatch.setattr(mr, "_UNMAPPED_LOGGED", set())
+        with caplog.at_level("WARNING", logger=mr.logger.name):
+            assert mr.dataset_family("shapes__checkerboard_k2_d8_n400_s0",
+                                     {"kc1": "nasa"}) == "syn_shapes_checkerboard"
+            assert mr.dataset_family("pmlb__GAMETES_x_EDM_1_1", {"kc1": "nasa"}) == "GAMETES"
+        assert [r for r in caplog.records if "own cluster" in r.message] == []
+
+    def test_the_rules_look_past_the_curated_source_prefix(self):
+        """``curate.py`` ids are ``<source>__<stem>``, which rules 2-4 have to see through.
+
+        Before this, ``'pmlb__GAMETES_...'.startswith('GAMETES')`` was False and every
+        GAMETES variant counted as its own cluster.
+        """
+        names = ["pmlb__GAMETES_Epistasis_2_Way_20atts_0.1H_EDM_1_1.csv",
+                 "pmlb__GAMETES_Heterogeneity_20atts_1600_Het_0.4_0.2_50_EDM_2_001"]
+        assert {mr.dataset_family(n) for n in names} == {"GAMETES"}
+        assert mr.dataset_family("qdata_x_view__te_a_tau1.csv") == "syn_te"
+
+    def test_one_generator_family_is_one_cluster_across_k_and_seed(self):
+        names = [f"shapes__checkerboard_k{k}_d8_n400_s{s}"
+                 for k in (2, 5, 8) for s in (0, 1, 2)]
+        assert {mr.dataset_family(n) for n in names} == {"syn_shapes_checkerboard"}
+        # No k in the id, so the family must come from the _d<digit> boundary instead,
+        # and must keep both words of the name.
+        assert mr.dataset_family("shapes__simple_linear_d8_n400_s1") \
+            == "syn_shapes_simple_linear"
+        assert mr.dataset_family("shapes__perm_parity_k5_d8_n400_s0") \
+            == "syn_shapes_perm_parity"
+        # Two generators of one source stay two clusters.
+        assert mr.dataset_family("quantum__gs_e2e_k0.5_d8_n400_s0") \
+            != mr.dataset_family("quantum__gs_sparse_k0.5_d8_n400_s0")
+
+    def test_two_sources_of_one_stem_stay_two_clusters(self):
+        """breast_cancer is libsvm's Wisconsin set and PMLB's Ljubljana set: not one unit."""
+        assert mr.dataset_family("libsvm__breast_cancer") \
+            != mr.dataset_family("pmlb__breast_cancer")
 
     def test_a_blank_cluster_raises(self):
         with pytest.raises(ValueError, match="no cluster"):

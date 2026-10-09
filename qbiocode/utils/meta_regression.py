@@ -617,6 +617,45 @@ SYNTHETIC_PREFIXES = ("eng_", "gs_", "hl_", "ql_", "te_")
 #: Default cluster column of a mapping CSV: the conservative clustering.
 CLUSTER_COLUMN = "cluster_cons"
 
+#: Sources whose ids ``benchmark/create_synthetic_datasets.py`` writes as
+#: ``<source>__<family>[_k<k>]_d<d>[_bw<bw>]_n<n>_s<seed>``. Every k, d, n and seed of one
+#: family is a draw from one generator, so the family is the cluster: the three seeds of
+#: ``checkerboard_k2_d8_n400`` are replicates, not three independent datasets.
+GENERATED_SOURCES = ("shapes", "quantum")
+#: Family of such an id: everything before the first ``_k<digit>`` or ``_d<digit>``. Matched
+#: non-greedily so ``simple_linear_d8_n400_s0``, which has no ``k``, keeps both words.
+_GENERATED_ID = re.compile(r"^(?P<family>.*?)_(?:k\d|d\d)")
+
+
+def _split_source(stem: str) -> tuple[str, str]:
+    """``'pmlb__GAMETES_x'`` -> ``('pmlb', 'GAMETES_x')``; no ``__`` -> ``('', stem)``.
+
+    ``curate.py`` prefixes every curated id with its source, which the naming rules below
+    have to look past: ``'pmlb__GAMETES_...'`` does not start with ``'GAMETES'``.
+    """
+    source, separator, rest = stem.partition("__")
+    return (source, rest) if separator else ("", stem)
+
+
+def _family_by_name(stem: str) -> str:
+    """The cluster the naming rules give ``stem``, or ``stem`` itself if none applies.
+
+    The fallback is the *full* id, not the source-stripped name: ``breast_cancer`` is both
+    the libsvm Wisconsin set and the PMLB Ljubljana set, which are different datasets and
+    must not be merged into one cluster.
+    """
+    source, bare = _split_source(stem)
+    if source in GENERATED_SOURCES:
+        match = _GENERATED_ID.match(bare)
+        if match:
+            return f"syn_{source}_{match.group('family')}"
+    for prefix in SYNTHETIC_PREFIXES:
+        if bare.startswith(prefix):
+            return "syn_" + prefix.rstrip("_")
+    if bare.startswith("GAMETES"):
+        return "GAMETES"
+    return stem
+
 
 def _dataset_stem(name: str) -> str:
     """``'te_n10_tau0.25.csv|pca'`` -> ``'te_n10_tau0.25'``: drop the pass and ``.csv``."""
@@ -671,17 +710,24 @@ def dataset_family(name: str, mapping: Mapping[str, str] | str | None = None, *,
        first of ``stem``, ``dataset``, ``Dataset``) and the cluster column ``column``.
        A stem the mapping does not list falls through to the rules below, with a
        warning logged once per stem.
-    2. A synthetic-generator prefix (:data:`SYNTHETIC_PREFIXES`): ``eng_*`` ->
+    Rules 2-4 look past the ``<source>__`` prefix that ``curate.py`` puts on every curated
+    id, so they apply to ``pmlb__GAMETES_x`` as they do to a bare ``GAMETES_x``:
+
+    2. A :data:`GENERATED_SOURCES` id (``shapes__``, ``quantum__``): the generator family,
+       ``'syn_shapes_checkerboard'``. Every k, d, n and seed of one family is one cluster.
+    3. A synthetic-generator prefix (:data:`SYNTHETIC_PREFIXES`): ``eng_*`` ->
        ``'syn_eng'``, and likewise for ``gs_``, ``hl_``, ``ql_`` and ``te_``.
-    3. A name starting ``GAMETES``: ``'GAMETES'``, one generator.
-    4. Otherwise the stem itself.
+    4. A name starting ``GAMETES``: ``'GAMETES'``, one generator.
+    5. Otherwise the whole id -- the id, not the source-stripped name, because
+       ``breast_cancer`` is both the libsvm Wisconsin set and the PMLB Ljubljana set.
 
     ``experiments/cluster_map_draft.csv`` (91 datasets; 59 conservative clusters in
-    ``cluster_cons``, 67 liberal ones in ``cluster_lib``) is a DRAFT pending the frozen
-    dedup list: 6 cross-source copies were dropped from it by a manual decision that has
-    not been executed. Its ``stem`` column is also not unique: ``breast_cancer`` is both
-    the libsvm Wisconsin set and the PMLB Ljubljana set, in different clusters, so that
-    file raises unless keyed by ``key='dataset_id'``.
+    ``cluster_cons``, 67 liberal ones in ``cluster_lib``) covers the 78 real curated
+    datasets exactly, the dedup of 6 cross-source copies having been executed in
+    ``curate.py``'s ``EXCLUDE``. Its remaining 13 rows are ``qdata_x_view__*`` sets outside
+    that corpus, and it lists no ``shapes__``/``quantum__`` dataset, so a synthetic corpus
+    relies on rule 2. Its ``stem`` column is also not unique (``breast_cancer``, above), so
+    that file raises unless keyed by ``key='dataset_id'``.
 
     Args:
         name: a ``Dataset`` value, with or without ``.csv`` and a pass suffix.
@@ -697,6 +743,7 @@ def dataset_family(name: str, mapping: Mapping[str, str] | str | None = None, *,
             (NaN) cluster, or a CSV lacks the key or cluster column.
     """
     stem = _dataset_stem(name)
+    unmapped = False
     if mapping is not None:
         if isinstance(mapping, (str, os.PathLike)):
             path = os.fspath(mapping)
@@ -705,16 +752,17 @@ def dataset_family(name: str, mapping: Mapping[str, str] | str | None = None, *,
             table = _cluster_dict(mapping.items(), source="dict")
         if stem in table:
             return table[stem]
-        if stem not in _UNMAPPED_LOGGED:
-            _UNMAPPED_LOGGED.add(stem)
-            logger.warning("dataset_family: %r is not in the explicit mapping; falling back "
-                           "to the naming rules, so it may count as its own cluster", stem)
-    for prefix in SYNTHETIC_PREFIXES:
-        if stem.startswith(prefix):
-            return "syn_" + prefix.rstrip("_")
-    if stem.startswith("GAMETES"):
-        return "GAMETES"
-    return stem
+        unmapped = True
+    cluster = _family_by_name(stem)
+    # Warn only where the fallback leaves the dataset alone in its own cluster, which is
+    # the case that inflates G. A rule that groups it (a generator family, GAMETES) has
+    # done the job the mapping would have, and warning there buried the real hazard under
+    # one line per synthetic dataset -- 93 of them in the shapes corpus.
+    if unmapped and cluster == stem and stem not in _UNMAPPED_LOGGED:
+        _UNMAPPED_LOGGED.add(stem)
+        logger.warning("dataset_family: %r is in neither the explicit mapping nor any "
+                       "naming rule, so it counts as its own cluster", stem)
+    return cluster
 
 
 # ---- the regression design ----------------------------------------------------------
