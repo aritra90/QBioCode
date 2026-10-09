@@ -81,7 +81,7 @@ $BENCH/
 | 4 | Hold out | `benchmark/holdout.py` | `holdout.csv` |
 | 5 | Configure | `generate_pilot_configs.py --split-mode manifest` | `runs_cv/<run>/` |
 | 6 | Embed once | `submit_runs.sh` with `PRECOMPUTE_ONLY=1` | `runs_cv/<run>/embeddings/` |
-| 7 | Run | `submit_runs.sh`, or `qbiocode.apps.qprofiler.cli` | `runs_cv/<run>/<id>/results/` |
+| 7 | Run | `submit_runs.sh`, `submit_array.sh`, or `qbiocode.apps.qprofiler.cli` | `runs_cv/<run>/<id>/results/` |
 | 8 | Collect | `collate_results.py` | `collated/` |
 | 9 | Winners | `select_winners` | per-dataset verdicts |
 | 10 | Kernel geometry | `qbiocode.utils.kernel_diagnostics` | alignment and g tables |
