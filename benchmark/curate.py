@@ -79,11 +79,43 @@ EXCLUDE = {
 #   analcatdata_bankruptcy Company 0.624, clean1 conformation_name 0.608 and
 #   molecule_name 1.000, analcatdata_japansolvent Firm 0.538, backache id 0.511.
 # A listed column that is absent from the raw file fails that dataset: the map is stale.
+#
+# The last two were added 2026-10-09, promoted from suspected_id_columns, which had
+# reported and kept them. Their AUCs are measured on the CURATED csv rather than the raw
+# file, so they are not directly comparable with the five above:
+#
+#   biomed Hospital_identification_number_for_blood_sample  0.784
+#       against a permutation null whose 95th percentile is 0.582 at this n (209) and class
+#       balance (134/75), so it is nowhere near chance. It is a blood-sample identification
+#       number: cases and controls were evidently collected or numbered in blocks. Four real
+#       measurements score higher (ml 0.868, m3 0.809, Age_of_patient 0.795, m4 0.789), which
+#       is not a defence -- a measurement is meant to predict and an identifier is not.
+#   prnn_crabs index  not measured exactly; below 0.625, the 5th-ranked column in the same
+#       run, so plausibly near chance. Dropped on principle rather than on evidence: an
+#       arbitrary row number is not a feature, and keeping it cannot help.
+#
+# What decided biomed was not the scores but the META-FEATURES. evaluate() computes the 141
+# complexity measures on the training split, including this column, and those are the
+# regressors the meta-analysis uses to explain when a quantum arm wins. Measured on a
+# fixture of the same shape, adding one block-allocated id moves: max Fisher discriminant
+# ratio +1194%, condition number +9.6%, effective rank +9.2%. The dataset's row in that
+# design matrix would describe a dataset that does not exist.
+#
+# What did NOT decide it, because it was tested and did not hold: the idea that an
+# axis-aligned leak favours the tree arms over the quantum kernels. Over 40 stratified
+# splits every arm gained about the same (DecisionTree +0.214, RandomForest +0.202,
+# LogisticRegression +0.193, SVC-rbf +0.220 balanced accuracy), so the leak inflates the
+# dataset rather than tilting the comparison. It does compress the spread between arms
+# (0.082 -> 0.068 there), which is its own problem: it costs the dataset the headroom the
+# per-dataset margin test needs. A non-leaking id column cost nothing measurable (+-0.007).
+# SVC-rbf stood in for a global kernel; the fidelity kernels were not themselves tested.
 ID_COLUMNS = {
     ("pmlb", "analcatdata_bankruptcy"): ("Company",),
     ("pmlb", "analcatdata_japansolvent"): ("Firm",),
     ("pmlb", "backache"): ("id",),
+    ("pmlb", "biomed"): ("Hospital_identification_number_for_blood_sample",),
     ("pmlb", "clean1"): ("molecule_name", "conformation_name"),
+    ("pmlb", "prnn_crabs"): ("index",),
 }
 
 # Name tokens that mark a column as a probable identifier in suspected_id_columns. Matched
