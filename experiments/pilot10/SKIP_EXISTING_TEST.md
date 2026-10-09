@@ -177,23 +177,46 @@ $PY -c "import pickle; print(len(pickle.load(open('$T/results/heart_none_nb/run3
 The quickest confirmation that the resume works inside a batch job rather than on the login
 node. Nothing here reads `MANIFEST.tsv`, so it works in any checkout:
 
+`-K` makes `bsub` block until the job finishes, so the checks below it run *after* the
+results exist rather than racing them. And `$RUN` is a fresh directory per submission, for
+the reason in the warning underneath.
+
 ```bash
 mkdir -p $T/lsf_logs
-bsub -J skip_a -q normal -n 1 -R "span[hosts=1] rusage[mem=8]" \
+RUN=lsf_$(date +%H%M%S)
+bsub -K -J skip_a -q normal -n 1 -R "span[hosts=1] rusage[mem=8]" \
      -o $T/lsf_logs/skip_a.%J.out -e $T/lsf_logs/skip_a.%J.err \
      "cd $PWD && export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 && \
       $PY -m qbiocode.apps.qprofiler.cli --config-dir=$PWD/runs/heart \
       --config-name=heart_none_nb ++skip_existing=true \
-      hydra.run.dir=$T/results/heart_none_nb/lsf1"
+      hydra.run.dir=$T/results/heart_none_nb/$RUN"
 
-bjobs -J skip_a            # wait for DONE
-resume_log $T/results/heart_none_nb/lsf1
-cells      $T/results/heart_none_nb/lsf1/adopted.csv
+resume_log $T/results/heart_none_nb/$RUN
+cells      $T/results/heart_none_nb/$RUN/adopted.csv
 ```
 
 **Expect** 5 `adopts … nothing left to fit` lines and 5 rows in `adopted.csv`, as in phase
 4 — run1/2/3 from the earlier phases are its siblings, and run3 is complete. The LSF
 summary in the `.out` file should show a CPU time of a second or two.
+
+Without `-K` the job is queued and the two checks run immediately against a directory that
+does not exist yet:
+
+```text
+grep: …/lsf1/qprofiler.log: No such file or directory
+FileNotFoundError: …/lsf1/adopted.csv
+```
+
+That is the race, not a failure — rerun the two checks once `bjobs` is empty. If `-K`
+blocks longer than you want (a busy queue), Ctrl-C only abandons the wait; the job keeps
+running.
+
+> **Never point two live jobs at one `hydra.run.dir`.** They would both append to the same
+> `ModelResults.csv` and `adopted.csv` and race `results.pkl`, and `skip_existing` would
+> have each adopting rows the other was still writing. `$RUN` above carries a timestamp so
+> a resubmission gets its own directory; `submit_runs.sh` does the same with
+> `${now:%Y-%m-%d_%H-%M-%S}` in the shipped configs. If you do submit twice by accident,
+> `bkill` the second and delete the directory rather than trusting what is in it.
 
 ### 5b · Through `submit_runs.sh`
 
