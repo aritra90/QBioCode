@@ -16,7 +16,10 @@
 # per-job wall and run-named jobs; submit it with RUNS=runs_cv/<run-id> ./submit_runs.sh.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-PY=/dccstor/boseukb/Q/envs/qbc/bin/python
+# Overridable, for the reason given on the same line in submit_runs.sh: a plain assignment
+# discarded an exported PY and handed a collaborator bsub payloads naming an interpreter
+# they cannot execute.
+PY=${PY:-/dccstor/boseukb/Q/envs/qbc/bin/python}
 
 # `normal` is this cluster's default queue and the only Open:Active general one alongside
 # `night` (checked with bqueues). No queue here defines a RUNLIMIT or a MEMLIMIT, so -W

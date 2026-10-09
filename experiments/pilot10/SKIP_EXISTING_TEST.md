@@ -23,12 +23,21 @@ shipped `results/` trees**. Delete the directory and the test is gone.
 
 ```bash
 cd $REPO/experiments/pilot10
-export PY=/dccstor/boseukb/Q/envs/qbc/bin/python     # same interpreter submit_runs.sh uses
+export PY=/dccstor/boseukb/Q/envs/qbc/bin/python     # YOUR interpreter -- see below
 export T=/dccstor/$USER/skip_test                    # scratch; anywhere writable
 : "${T:?set T before continuing}"                    # see the warning below
 mkdir -p $T
 ```
 
+> **`$PY` must be your own interpreter**, and `submit_runs.sh` honours it. That path above
+> is the one the committed scripts default to — replace it with yours (with a venv active,
+> `export PY=$(command -v python)`). The scripts used to assign `PY` unconditionally, so an
+> exported value was discarded and the `bsub` payload named an interpreter you may not be
+> able to execute; that is fixed, but check the `DRY=1` output in 5b step 3 names *your*
+> python before submitting anything. `status.py` and `collate_results.py` still carry a
+> hardcoded shebang, which is why this file runs them as `$PY status.py …` rather than
+> `./status.py`.
+>
 > **Mind the case of `$T`.** Every path in this file hangs off it, and an unset variable
 > expands to nothing rather than erroring — so a stray `rm -fr $t/lsf_logs` (lowercase)
 > becomes `rm -fr /lsf_logs`, and `rm -fr $t/*` would become `rm -fr /*`. The `${T:?…}`
@@ -327,7 +336,7 @@ Phase 5 left a complete run, so ask without `FORCE`. `RUNS` and `CFG` are still 
 5b exported, so this is the same command either way:
 
 ```bash
-./status.py --runs-dir $RUNS $CFG --list all
+$PY status.py --runs-dir $RUNS $CFG --list all
 SKIP_EXISTING=1 SPREAD=0 ./submit_runs.sh $CFG
 ```
 
@@ -340,7 +349,7 @@ The decision comes from `status.py --todo`, which prints a path only for a confi
 do":
 
 ```bash
-./status.py --runs-dir $RUNS --no-lsf --todo $CFG | wc -l          # 0
+$PY status.py --runs-dir $RUNS --no-lsf --todo $CFG | wc -l          # 0
 ```
 
 ### Through the array runner
@@ -375,7 +384,7 @@ R=$B/$(ls -1 $B | tail -1)
 cp $R/ModelResults.csv $T/full_backup.csv
 head -3 $R/ModelResults.csv > $R/tmp && mv $R/tmp $R/ModelResults.csv   # 2 of 5 rows
 
-./status.py --runs-dir $RUNS $CFG --list all          # partial, rows 2/5
+$PY status.py --runs-dir $RUNS $CFG --list all          # partial, rows 2/5
 QBC_TASK_INDEX=1 QBC_SKIP_DONE=1 ./array_task.sh 2>&1 | tail -3
 ```
 

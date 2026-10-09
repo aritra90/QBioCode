@@ -39,7 +39,13 @@
 # job owns every path it writes, so no two jobs share a file.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-PY=/dccstor/boseukb/Q/envs/qbc/bin/python
+# The interpreter the jobs run, and the one status.py is called with. Overridable, unlike
+# every earlier version of this line: it was a plain assignment, so `PY=... ./submit_runs.sh`
+# was silently discarded and a collaborator with their own environment got bsub payloads
+# naming an interpreter they cannot execute -- `env: '...': Permission denied` from the
+# cache step, and a job that dies the moment it is dispatched. Every other knob here is
+# already ${VAR:-default}; this one was the exception.
+PY=${PY:-/dccstor/boseukb/Q/envs/qbc/bin/python}
 # The interpreter of the embedding-cache step (4) only; the jobs always run $PY. A stub
 # here lets a test drive DRY=1 without importing the package per call.
 CACHE_PY=${CACHE_PY:-$PY}
