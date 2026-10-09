@@ -1,8 +1,20 @@
-# Testing `skip_existing` on the cluster
+# Testing the two skips on the cluster
 
-A 15-minute check that a resubmitted job adopts what an earlier run already computed
-instead of recomputing it. Four phases: the mechanism by hand on the login node (fast,
-deterministic, nothing queued), then the LSF submission path.
+A 20-minute check that a resubmitted job does not redo work. There are **two** independent
+skips at two granularities, and they compose — this tests both:
+
+| | Skip | Granularity | Where it lives | Phases |
+|---|---|---|---|---|
+| **A** | `skip_existing` | one (embedding, split, model) **cell** | inside QProfiler | 1-4 |
+| **B** | the done-check | a whole **config** / job | `submit_runs.sh`, `array_task.sh` | 6 |
+
+**B** is the cheap one: it never starts a Python process for a config whose results are
+already complete. **A** is the fine one: it starts the job but adopts the cells an earlier
+run left behind. A config that is *partially* done is deliberately **not** skipped by B —
+it is handed to A to finish, which is the whole point of the pair.
+
+Phases 1-4 run the mechanism by hand on the login node (fast, deterministic, nothing
+queued), phase 5 checks the LSF submission path, phase 6 checks the done-check.
 
 Everything is written under one scratch directory, so **nothing touches `runs/` or the
 shipped `results/` trees**. Delete the directory and the test is gone.
@@ -205,16 +217,88 @@ job's stdout in `runs/heart/lsf_logs/heart_none_nb.*.out` should show the same, 
 > the finer, per-cell one under test. The two compose, so without `FORCE=1` the second
 > submission would not go out at all.
 
-## 6 · Clean up
+## 6 · Skip B: a completed job is never started
+
+Everything above ran with `FORCE=1`, which **turns this off**. Now test it on its own.
+
+### Through `submit_runs.sh`
+
+Phase 5 left `runs/heart/results/heart_none_nb/` complete, so ask without `FORCE`:
+
+```bash
+./status.py --runs-dir runs runs/heart/heart_none_nb.yaml --list all
+SKIP_EXISTING=1 SPREAD=0 ./submit_runs.sh runs/heart/heart_none_nb.yaml
+```
+
+**Expect** `status.py` to show the config as `done` with `rows 5/5`, and the submit to print
+**`nothing to submit: every selected config is done, running or pending`** and exit 0
+having queued nothing. That is skip B: no job, no Python process, no queue slot.
+
+The decision comes from `status.py --todo`, which prints a path only for a config that is
+`todo`, `failed` or `partial`. You can see it directly — empty output means "nothing to
+do":
+
+```bash
+./status.py --runs-dir runs --no-lsf --todo runs/heart/heart_none_nb.yaml | wc -l   # 0
+```
+
+### Through the array runner
+
+`array_task.sh` makes the same check per array element, so a resubmitted range costs a
+second per finished task instead of a process. `QBC_SKIP_DONE=1` is its default. Drive one
+element by hand:
+
+```bash
+printf '%s\t%s\t%s\t\n' "$PWD/runs/heart/heart_none_nb.yaml" heart_none_nb "$PWD/runs/heart" > $T/tasks.tsv
+export QBC_TASKS=$T/tasks.tsv QBC_RUNS=$PWD/runs QBC_STATUS=$PWD/status.py
+export QBC_PY=$PY QBC_ENVV="OMP_NUM_THREADS=1" QBC_TASK_OFFSET=0
+
+QBC_TASK_INDEX=1 QBC_SKIP_DONE=1 ./array_task.sh; echo "exit=$?"
+```
+
+**Expect** `already done (status.py --todo lists it as neither todo, failed nor partial);
+skipping` and **exit 0**, in about a second. With `QBC_SKIP_DONE=0` the same command runs
+the job instead.
+
+### The interaction that matters
+
+A **partially** finished config must *not* be skipped by B — it has to reach the job so A
+can adopt what landed and finish the rest. Truncate the complete results and re-ask:
+
+```bash
+R=runs/heart/results/heart_none_nb/$(ls -1 runs/heart/results/heart_none_nb | tail -1)
+cp $R/ModelResults.csv $T/full_backup.csv
+head -3 $R/ModelResults.csv > $R/tmp && mv $R/tmp $R/ModelResults.csv   # 2 of 5 rows
+
+./status.py --runs-dir runs runs/heart/heart_none_nb.yaml --list all    # -> partial, rows 2/5
+QBC_TASK_INDEX=1 QBC_SKIP_DONE=1 ./array_task.sh 2>&1 | tail -3
+```
+
+**Expect** `partial  heart_none_nb  rows 2/5` from `status.py`, and the runner to **run the
+job** rather than skip it — the two skips layering correctly. Restore afterwards if you
+want to keep the completed results:
+
+```bash
+cp $T/full_backup.csv $R/ModelResults.csv
+```
+
+## 7 · Clean up
 
 ```bash
 rm -rf $T
 ```
 
-If you also ran phase 5 against the shipped tree, remove the run directory it created:
+If you also ran phases 5-6 against the shipped tree, remove the run directories they
+created (that path is gitignored, so this is tidiness rather than hygiene):
 
 ```bash
-rm -rf runs/heart/results/heart_none_nb
+rm -rf runs/heart/results/heart_none_nb runs/heart/lsf_logs/heart_none_nb.*
+```
+
+And unset the array-runner variables if you are staying in the same shell:
+
+```bash
+unset QBC_TASKS QBC_RUNS QBC_STATUS QBC_PY QBC_ENVV QBC_TASK_OFFSET
 ```
 
 ## If a phase does not match
@@ -227,18 +311,29 @@ rm -rf runs/heart/results/heart_none_nb
 | `adopted.csv` absent after phase 3 | nothing was adopted — usually the truncation in phase 2 did not take, so check `cells $R1/ModelResults.csv` says 2 |
 | `skip_existing must be true, false, or an ABSOLUTE directory` | a relative path was passed. Raised during validation, before any data is read |
 | phase 5: `no config matched the selection` | `MANIFEST.tsv` stores absolute YAML paths, and this checkout is not at the path they were generated against. Regenerate with `generate_pilot_configs.py --layout split`, or run phases 1-4 only — they need no manifest |
-| phase 5: `nothing to submit: every selected config is done` | `FORCE=1` was omitted. That is the older per-config skip, not the per-cell one under test |
+| phase 5: `nothing to submit: every selected config is done` | `FORCE=1` was omitted. That is skip **B**, which phase 5 is not testing — it is the *expected* result in phase 6 |
+| phase 6: the config reads `todo`, not `done` | `--runs-dir` is wrong, or the results are not under `<config dir>/results/<config_file_name>/`. `status.py` globs exactly that, and counts distinct (embedding, iteration, model) rows against `iter x embeddings x models` |
+| phase 6: skipped when you expected it to run | the truncation did not take. `status.py … --list all` must say `partial  rows 2/5` before the runner will run it |
 
 ## What this does and does not establish
 
-It establishes that cells are adopted, that adopted rows are byte-identical, that only the
-missing models are fitted, that a complete config costs seconds, and that
-`SKIP_EXISTING=1` reaches the job.
+**Skip A** (`skip_existing`): that cells are adopted, that adopted rows are byte-identical
+to the originals, that only the missing models are fitted, that a fully-adopted config
+costs seconds, and that `SKIP_EXISTING=1` reaches the job.
+
+**Skip B** (the done-check): that a complete config is never submitted and a complete array
+element exits without starting Python, and — the interaction that matters — that a
+*partial* config is **not** skipped by B but handed to A to finish.
 
 It does **not** exercise the sidecar carry-over (`oof/`, `trials/`, `val_predictions/`),
 because those are written only under `split_mode: manifest` and this config is internal
 mode. That path is covered by
 `tests/test_qprofiler_skip_existing.py::TestTheSidecarsComeAcross`; to check it on the
-cluster, run the same four phases against a manifest-mode job from a `runs_cv/<run-id>/`
-tree and additionally confirm each sidecar CSV names **every** model of the pass, not only
-the ones this run fitted.
+cluster, run phases 1-4 against a manifest-mode job from a `runs_cv/<run-id>/` tree and
+additionally confirm each sidecar CSV names **every** model of the pass, not only the ones
+this run fitted.
+
+Nor does it cover `status.py`'s *live* states (`running`, `pending`), which need real
+queued jobs: skip B also drops a config that is currently in flight, so a second
+`./submit_runs.sh` while the first is running queues nothing. Phase 6 exercises only the
+`done` and `partial` paths, which are the ones decided from the result files alone.
