@@ -173,3 +173,15 @@ experiments/**/runs_cv/*/embeddings/
 # not versioned here; the manifests are, once a frozen set is chosen (unignore it then).
 benchmark/datasets/
 benchmark/splits/
+
+# Claude Code's working directory. What lands here today is settings.local.json, the
+# per-machine record of which tool calls this checkout has been allowed to make -- one
+# developer's answers, not a project setting.
+#
+# The whole directory is ignored rather than just that file. If a SHARED convention is
+# ever added -- .claude/settings.json, or a project command or skill under
+# .claude/commands/ or .claude/skills/ -- this rule would hide it silently, and git does
+# not descend into an excluded directory, so a `!` line under this one would not work.
+# Switch to `.claude/*` plus `!.claude/settings.json` (and a `!` per shared path) at that
+# point.
+.claude/
