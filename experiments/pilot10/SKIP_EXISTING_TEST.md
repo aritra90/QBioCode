@@ -25,8 +25,16 @@ shipped `results/` trees**. Delete the directory and the test is gone.
 cd $REPO/experiments/pilot10
 export PY=/dccstor/boseukb/Q/envs/qbc/bin/python     # same interpreter submit_runs.sh uses
 export T=/dccstor/$USER/skip_test                    # scratch; anywhere writable
+: "${T:?set T before continuing}"                    # see the warning below
 mkdir -p $T
 ```
+
+> **Mind the case of `$T`.** Every path in this file hangs off it, and an unset variable
+> expands to nothing rather than erroring — so a stray `rm -fr $t/lsf_logs` (lowercase)
+> becomes `rm -fr /lsf_logs`, and `rm -fr $t/*` would become `rm -fr /*`. The `${T:?…}`
+> line above fails loudly if `T` is unset, and the deletions in step 7 are written
+> `"${T:?}"` for the same reason. Use `$T`, and if a command ever prints a path starting
+> `//` or `/runs`, stop.
 
 The test uses `runs/heart/heart_none_nb.yaml`, deliberately the cheapest shipped config:
 naive Bayes on 270 rows, `embeddings: ['none']`, `iter: 5`. Being unembedded it reads
@@ -370,21 +378,24 @@ cp $T/full_backup.csv $R/ModelResults.csv
 
 ## 7 · Clean up
 
+`"${T:?}"`, not `$T`: if the variable has been lost the command fails instead of deleting
+from `/`.
+
 ```bash
-rm -rf $T
+echo "about to remove: ${T:?set T first}" && rm -rf "${T:?}"
 ```
 
-If you also ran phases 5-6 against the shipped tree, remove the run directories they
-created (that path is gitignored, so this is tidiness rather than hygiene):
+If 5b took the step-1 "MATCHES" branch, phases 5-6 wrote into the shipped tree instead;
+remove those too (the path is gitignored, so this is tidiness rather than hygiene):
 
 ```bash
 rm -rf runs/heart/results/heart_none_nb runs/heart/lsf_logs/heart_none_nb.*
 ```
 
-And unset the array-runner variables if you are staying in the same shell:
+And drop the variables if you are staying in the same shell:
 
 ```bash
-unset QBC_TASKS QBC_RUNS QBC_STATUS QBC_PY QBC_ENVV QBC_TASK_OFFSET
+unset QBC_TASKS QBC_RUNS QBC_STATUS QBC_PY QBC_ENVV QBC_TASK_OFFSET RUNS CFG STORED RUN
 ```
 
 ## If a phase does not match
