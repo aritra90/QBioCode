@@ -296,6 +296,12 @@ FORCE=1 SPREAD=0 SKIP_EXISTING=1 ./submit_runs.sh $CFG
 bjobs -J p10_heart_none_nb                 # wait for it to clear, then repeat the line above
 ```
 
+`submit_runs.sh` does **not** take the `hydra.run.dir` override that phases 1-5a used — it
+uses the one baked into the YAML, under `runs/heart/results/heart_none_nb/`. That is a
+different parent from `$T`, so the first of these two jobs starts with **no siblings** and
+computes all five splits from scratch: five *"computed in this run"* lines and no `adopts`
+line at all. That is correct, not a regression. The resume is what the **second** job does.
+
 **Expect** `submitted 1 jobs (0 quantum, 1 classical)` each time, then all five cells
 adopted by the second:
 
