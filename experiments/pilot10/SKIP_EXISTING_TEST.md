@@ -377,24 +377,35 @@ the job instead.
 ### The interaction that matters
 
 A **partially** finished config must *not* be skipped by B — it has to reach the job so A
-can adopt what landed and finish the rest. Truncate the complete results and re-ask:
+can adopt what landed and finish the rest.
+
+To make it partial you have to shorten **every** run directory, not just the newest.
+`status.py` calls a config done if *any* run directory is complete (`best_run`: "the latest
+complete one, else the fullest"), and step 4 above deliberately left **two** complete ones.
+Shortening only the newest leaves the other one complete, so `status.py` still says
+`done 5/5` and this check silently tests nothing:
 
 ```bash
 B=$(dirname $CFG)/results/heart_none_nb
-R=$B/$(ls -1 $B | tail -1)
-cp $R/ModelResults.csv $T/full_backup.csv
-head -3 $R/ModelResults.csv > $R/tmp && mv $R/tmp $R/ModelResults.csv   # 2 of 5 rows
+mkdir -p $T/backup
+for d in $B/*/; do
+    cp "$d/ModelResults.csv" "$T/backup/$(basename $d).csv"
+    head -3 "$d/ModelResults.csv" > "$d/tmp" && mv "$d/tmp" "$d/ModelResults.csv"
+done
 
 $PY status.py --runs-dir $RUNS $CFG --list all          # partial, rows 2/5
 QBC_TASK_INDEX=1 QBC_SKIP_DONE=1 ./array_task.sh 2>&1 | tail -3
 ```
 
 **Expect** `partial  heart_none_nb  rows 2/5` from `status.py`, and the runner to **run the
-job** rather than skip it — the two skips layering correctly. Restore afterwards if you
-want to keep the completed results:
+job** rather than skip it — the two skips layering correctly. If it says `done 5/5` and the
+runner skips, a run directory was missed; `ls -1 $B` and check each one's row count.
+
+Restore afterwards if you want to keep the completed results:
 
 ```bash
-cp $T/full_backup.csv $R/ModelResults.csv
+for f in $T/backup/*.csv; do cp "$f" "$B/$(basename ${f%.csv})/ModelResults.csv"; done
+$PY status.py --runs-dir $RUNS $CFG --list all          # back to done, rows 5/5
 ```
 
 ## 7 · Clean up
@@ -432,7 +443,7 @@ unset QBC_TASKS QBC_RUNS QBC_STATUS QBC_PY QBC_ENVV QBC_TASK_OFFSET RUNS CFG STO
 | `no config matched the selection (DATASET='' EMB='' MODEL='')` | **The common one.** `MANIFEST.tsv` stores absolute YAML paths from the machine the configs were generated on, and this checkout is elsewhere. 5b step 1 detects it; step 2 works around it for the test, and *Whose paths are in `runs/`?* below is the real fix. Phases 1-4, 5a and the array part of 6 need no manifest at all |
 | phase 5: `nothing to submit: every selected config is done` | `FORCE=1` was omitted. That is skip **B**, which phase 5 is not testing — it is the *expected* result in phase 6 |
 | phase 6: the config reads `todo`, not `done` | `--runs-dir` is wrong, or the results are not under `<config dir>/results/<config_file_name>/`. `status.py` globs exactly that, and counts distinct (embedding, iteration, model) rows against `iter x embeddings x models` |
-| phase 6: skipped when you expected it to run | the truncation did not take. `status.py … --list all` must say `partial  rows 2/5` before the runner will run it |
+| phase 6: skipped when you expected it to run, and `status.py` still says `done 5/5` | a run directory was missed. `best_run` calls the config done if **any** of them is complete, and step 4 leaves two — the truncation loop must cover `$B/*/`, not just the newest. `ls -1 $B` and check each row count |
 
 ## What this does and does not establish
 
