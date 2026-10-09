@@ -1,4 +1,4 @@
-#!/dccstor/boseukb/Q/envs/qbc/bin/python
+#!/usr/bin/env python3
 """Merge the split-layout runs into one ModelResults.csv, and check they belong together.
 
     ./collate_results.py                   everything that has landed, incomplete arms flagged

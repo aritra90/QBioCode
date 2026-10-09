@@ -1,4 +1,4 @@
-#!/dccstor/boseukb/Q/envs/qbc/bin/python
+#!/usr/bin/env python3
 """Aggregate the pilot10 run into the corpus-level tables.
 
 Run this AFTER the 12 LSF jobs finish. It walks the per-dataset result directories,

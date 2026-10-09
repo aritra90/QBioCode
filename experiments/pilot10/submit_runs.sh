@@ -39,13 +39,33 @@
 # job owns every path it writes, so no two jobs share a file.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-# The interpreter the jobs run, and the one status.py is called with. Overridable, unlike
-# every earlier version of this line: it was a plain assignment, so `PY=... ./submit_runs.sh`
-# was silently discarded and a collaborator with their own environment got bsub payloads
-# naming an interpreter they cannot execute -- `env: '...': Permission denied` from the
-# cache step, and a job that dies the moment it is dispatched. Every other knob here is
-# already ${VAR:-default}; this one was the exception.
-PY=${PY:-/dccstor/boseukb/Q/envs/qbc/bin/python}
+# The interpreter the jobs run, and the one status.py is called with.
+#
+# Taken from the environment, not baked in. This line used to be a plain assignment of one
+# person's virtualenv path, which was wrong twice over: an exported PY was silently
+# discarded, and every other user got bsub payloads naming an interpreter they cannot
+# execute -- `env: '...': Permission denied` from the cache step, then a job that dies the
+# moment it is dispatched. Swapping in a different absolute path would only move the
+# problem to the next person, so there is no default path at all: activate the environment,
+# or export PY.
+#
+# It must be ABSOLUTE, because it is substituted into the bsub payload below and that runs
+# on a compute node where the environment is not activated. `command -v` returns an
+# absolute path, and the resolution happens here, on the submitting host.
+#
+# Deliberately NOT verified by importing qbiocode: tests/test_pilot_split_contract.py
+# drives this script with DRY=1 and a stub CACHE_PY, under a PATH whose python need not
+# have the package installed, and an import check would fail those runs for no reason.
+PY=${PY:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null)}
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "no usable python: PY='${PY}'." >&2
+  echo "Activate the environment that has qbiocode, or export PY=/abs/path/to/python." >&2
+  exit 1
+fi
+case $PY in
+  /*) ;;
+   *) PY=$(command -v "$PY") ;;   # the payload runs elsewhere; relative would not resolve
+esac
 # The interpreter of the embedding-cache step (4) only; the jobs always run $PY. A stub
 # here lets a test drive DRY=1 without importing the package per call.
 CACHE_PY=${CACHE_PY:-$PY}

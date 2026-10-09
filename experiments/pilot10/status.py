@@ -1,4 +1,4 @@
-#!/dccstor/boseukb/Q/envs/qbc/bin/python
+#!/usr/bin/env python3
 """Where every split-layout job stands: done, running, pending, partial, failed or todo.
 
     ./status.py                      per-dataset counts and totals

@@ -65,7 +65,16 @@
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-PY=${PY:-/dccstor/boseukb/Q/envs/qbc/bin/python}
+# From the environment, with no baked-in path, and absolute: it is exported to the array
+# elements as QBC_PY and they run on compute nodes where nothing is activated. See the
+# long comment on the same line in submit_runs.sh.
+PY=${PY:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null)}
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "no usable python: PY='${PY}'. Activate the environment that has qbiocode, or" >&2
+  echo "export PY=/abs/path/to/python." >&2
+  exit 1
+fi
+case $PY in /*) ;; *) PY=$(command -v "$PY") ;; esac
 RUNS=${RUNS:-$HERE/runs}
 MANIFEST=$RUNS/MANIFEST.tsv
 TASKS=${TASKS:-$RUNS/tasks.tsv}

@@ -16,10 +16,16 @@
 # per-job wall and run-named jobs; submit it with RUNS=runs_cv/<run-id> ./submit_runs.sh.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-# Overridable, for the reason given on the same line in submit_runs.sh: a plain assignment
-# discarded an exported PY and handed a collaborator bsub payloads naming an interpreter
-# they cannot execute.
-PY=${PY:-/dccstor/boseukb/Q/envs/qbc/bin/python}
+# From the environment, with no baked-in path, and absolute because it is substituted into
+# the bsub payload. See the long comment on the same line in submit_runs.sh for why a
+# hardcoded virtualenv was wrong for everyone but its owner.
+PY=${PY:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null)}
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "no usable python: PY='${PY}'. Activate the environment that has qbiocode, or" >&2
+  echo "export PY=/abs/path/to/python." >&2
+  exit 1
+fi
+case $PY in /*) ;; *) PY=$(command -v "$PY") ;; esac
 
 # `normal` is this cluster's default queue and the only Open:Active general one alongside
 # `night` (checked with bqueues). No queue here defines a RUNLIMIT or a MEMLIMIT, so -W
