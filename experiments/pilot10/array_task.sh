@@ -20,6 +20,11 @@
 #                     check; empty to skip that check
 #   QBC_RUNS          the runs tree, for status.py
 #   QBC_ENVV          the thread-pinning exports, as one string of KEY=VALUE pairs
+#   QBC_UMASK         umask for everything this element writes. Set it to 002 for a run
+#                     several users share: the default 022 makes every result file and
+#                     hydra run directory group-READABLE but not group-writable, so the
+#                     next user cannot resume, re-run or collate another's config. Unset
+#                     leaves the inherited umask alone.
 #
 # Exit status is the job's: 0 when QProfiler finished (or when there was nothing to do),
 # non-zero when it failed, so the scheduler records the element as EXIT/FAILED.
@@ -29,6 +34,11 @@ index=${QBC_TASK_INDEX:-${LSB_JOBINDEX:-${SLURM_ARRAY_TASK_ID:-}}}
 offset=${QBC_TASK_OFFSET:-0}
 tasks=${QBC_TASKS:-}
 PY=${QBC_PY:-python}
+
+# Before anything is written, including the done-check and the logs.
+if [ -n "${QBC_UMASK:-}" ]; then
+  umask "$QBC_UMASK" || { echo "QBC_UMASK='${QBC_UMASK}' is not a valid umask" >&2; exit 2; }
+fi
 
 [ -n "$index" ] || { echo "no array index: none of QBC_TASK_INDEX, LSB_JOBINDEX or SLURM_ARRAY_TASK_ID is set" >&2; exit 2; }
 # Indices start at 1, as submit_array.sh submits them. LSF sets LSB_JOBINDEX=0 for a job

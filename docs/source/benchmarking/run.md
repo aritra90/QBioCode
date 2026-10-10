@@ -241,6 +241,13 @@ per-user pending limit (400 here) is reached long before the sweep is in.
 drain, and submits the next round. It drives LSF (`bsub -J name[1-400]%200`) or Slurm
 (`sbatch --array=1-400%200`).
 
+```{tip}
+For a run several users share a results tree, `experiments/pilot10/SHARED_RUN.md` is the
+step-by-step: making the tree group-writable (which `UMASK=002` alone does not do), the
+smoke test to run before handing the range out, tmux so the submit loop outlives your ssh
+session, and why `status.py` needs `--no-lsf` when someone else's jobs are in flight.
+```
+
 ### Freeze the numbering first
 
 The configs are written once into a numbered task list, `tasks.tsv` beside

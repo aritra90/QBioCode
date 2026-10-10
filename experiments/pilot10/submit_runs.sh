@@ -72,6 +72,13 @@ CACHE_PY=${CACHE_PY:-$PY}
 RUNS=${RUNS:-$HERE/runs}
 MANIFEST=$RUNS/MANIFEST.tsv
 QUEUE=${QUEUE:-normal}
+# UMASK=002 for a run several users share, so the embedding cache this script writes under
+# PRECOMPUTE_ONLY -- and every job it submits -- is group-writable rather than merely
+# group-readable. Set here it applies to this shell and is inherited by bsub, so it covers
+# the jobs too. Unset changes nothing. It does not alter files already written.
+if [ -n "${UMASK:-}" ]; then
+  umask "$UMASK" || { echo "UMASK='${UMASK}' is not a valid umask" >&2; exit 1; }
+fi
 
 # One model, n_jobs 1: one process, one core. The tuners are sequential already
 # (_tuning.py passes n_jobs=1), and catboost's thread_count and xgb's n_jobs are pinned to

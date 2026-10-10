@@ -52,6 +52,14 @@
 #                    results are already complete. Costs one status.py call per element.
 #   DATASET/EMB/MODEL  anchored regexes on MANIFEST.tsv, applied when the list is BUILT
 #   CACHE_CHECK      1 to run embedding_cache --check over the selected range first
+#   UMASK            umask for every element, e.g. UMASK=002 for a run several users
+#                    share. Unset changes nothing. The default 022 leaves one user's
+#                    results group-readable but not group-writable, so a coworker cannot
+#                    resume or re-run that config -- and the failure surfaces late, as a
+#                    permission error inside a job, not at submit time. Setting it here
+#                    covers everyone even if a user's own shell has no umask line; it does
+#                    NOT fix files already written, nor the group they belong to (setgid
+#                    on the directories does that).
 #
 # The embedding cache is NOT written here. Several users submitting overlapping ranges
 # would each compute it, and a job whose files are missing stops before fitting anything --
@@ -268,6 +276,9 @@ export QBC_TASKS="$TASKS" QBC_PY="$PY" QBC_RUNS="$RUNS" QBC_ENVV="$ENVV"
 export QBC_STATUS="$HERE/status.py"
 export QBC_SKIP_EXISTING="${SKIP_EXISTING:-0}"
 export QBC_SKIP_DONE="${SKIP_DONE:-1}"
+# Only when asked: changing a single user's umask under them would be a surprise, while a
+# shared run needs it on every element. See the UMASK note in the header.
+[ -n "${UMASK:-}" ] && export QBC_UMASK="$UMASK"
 
 pending_count() {
   if [ "$SCHED" = "slurm" ]; then
