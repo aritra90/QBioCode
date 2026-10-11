@@ -267,13 +267,36 @@ if [ "${CACHE_CHECK:-1}" = "1" ]; then
   # of them exited 1-125, which is how --check reports a missing or stale file. (xargs,
   # not `mapfile` into an array -- this script stays usable under bash 3.2, which has no
   # mapfile; see submit_runs.sh, which does need bash 4.)
+  # Captured, not streamed: --check reports one line per missing FILE, and a cache that was
+  # never written is ~30 files per embedded pass -- thousands of lines, in which the one
+  # line that says what to do scrolls away. The summary below is per dataset instead.
+  CHECK_LOG=${CHECK_LOG:-$RUNS/cache_check.${USER:-user}.log}
   sed -n "${LO},${HI}p" "$TASKS" | cut -f1 |
-    xargs env $ENVV "$PY" -m qbiocode.apps.qprofiler.embedding_cache --check >&2
+    xargs env $ENVV "$PY" -m qbiocode.apps.qprofiler.embedding_cache --check >"$CHECK_LOG" 2>&1
   if [ $? -ne 0 ]; then
-    echo "!! the embedding cache cannot serve these jobs; write it first with" >&2
-    echo "!!     PRECOMPUTE_ONLY=1 RUNS=$RUNS $HERE/submit_runs.sh" >&2
+    bad=$(grep -c . "$CHECK_LOG" 2>/dev/null || echo "?")
+    echo "!! the embedding cache cannot serve tasks ${LO}-${HI}: $bad problem line(s)." >&2
+    # emb_<dataset>_<embedding>_<n_components>_<split>[__tune].npz -> <dataset>. Anchored at
+    # the end, so a dataset name full of digits and underscores survives (GAMETES_..._EDM_1_1).
+    # The trailing ':' goes first -- --check prints 'MISSING  emb_x_pca_8_1.npz: <path> ...',
+    # so without stripping it the anchored '\.npz$' never matches and every file comes
+    # through as its own 'dataset'.
+    # sed -E, not basic regex: BSD sed does not support \| alternation, so the basic-regex
+    # form matched nothing on a Mac while working on the cluster -- and a silently
+    # unstripped name turns every FILE into its own 'dataset' in the count below.
+    awk '$2 != "" {print $2}' "$CHECK_LOG" |
+      sed -E 's/:$//; s/^emb_//; s/_(pca|umap|none)_[0-9]+_[0-9]+(__tune)?\.npz$//' |
+      sort -u > "$CHECK_LOG.datasets"
+    n_ds=$(grep -c . "$CHECK_LOG.datasets" 2>/dev/null || echo 0)
+    echo "!! $n_ds dataset(s) affected:" >&2
+    head -12 "$CHECK_LOG.datasets" | sed 's/^/!!     /' >&2
+    [ "$n_ds" -gt 12 ] && echo "!!     ... and $((n_ds - 12)) more (full list: $CHECK_LOG.datasets)" >&2
+    echo "!! Write the cache first, then rerun this command:" >&2
+    echo "!!     UMASK=002 PRECOMPUTE_ONLY=1 RUNS=$RUNS $HERE/submit_runs.sh" >&2
+    echo "!! Per-file detail: $CHECK_LOG" >&2
     exit 1
   fi
+  rm -f "$CHECK_LOG" "$CHECK_LOG.datasets"
 fi
 
 # ---------------------------------------------------------------------------
