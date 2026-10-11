@@ -51,7 +51,16 @@
 #   SKIP_DONE        1 (default) to let each element exit immediately when its config's
 #                    results are already complete. Costs one status.py call per element.
 #   DATASET/EMB/MODEL  anchored regexes on MANIFEST.tsv, applied when the list is BUILT
-#   CACHE_CHECK      1 to run embedding_cache --check over the selected range first
+#   CACHE_CHECK      1 (default) to run embedding_cache --check over the selected range
+#                    and REFUSE to submit if it cannot serve them. On by default because
+#                    the alternative is finding out one element at a time: a job whose
+#                    cache files are missing raises EmbeddingCacheError before fitting
+#                    anything, so forgetting the PRECOMPUTE_ONLY step costs one failed
+#                    job per embedded pass -- 156 of them on the first full1 sweep -- and
+#                    none of those failures is distinguishable from a real one without
+#                    reading a log. The check reads the configs in the range, so set
+#                    CACHE_CHECK=0 for a sweep of hundreds of thousands of tasks where
+#                    that scan itself is the slow part.
 #   UMASK            umask for every element, e.g. UMASK=002 for a run several users
 #                    share. Unset changes nothing. The default 022 leaves one user's
 #                    results group-readable but not group-writable, so a coworker cannot
@@ -251,7 +260,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Optional: confirm the embedding cache can serve this range before queueing it.
 # ---------------------------------------------------------------------------
-if [ "${CACHE_CHECK:-0}" = "1" ]; then
+if [ "${CACHE_CHECK:-1}" = "1" ]; then
   echo "checking the embedding cache for tasks ${LO}-${HI}..." >&2
   # Through xargs rather than one argv: a range of a few hundred thousand configs is past
   # ARG_MAX, and xargs splits it into as many calls as it takes. It returns 123 when any

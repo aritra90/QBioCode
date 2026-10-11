@@ -145,14 +145,26 @@ rm -rf $SMOKE
 
 ## 4 · Owner: write the embedding cache, once
 
+**Do not skip this, and do not hand ranges out before it reports clean.**
 `submit_array.sh` deliberately does not write the cache: several users submitting
-overlapping ranges would each compute it, and a job whose cache files are missing stops
-before fitting anything.
+overlapping ranges would each compute it. A job whose cache files are missing raises
+`EmbeddingCacheError` before fitting anything, so forgetting this step costs one failed
+job per embedded pass — on the first `full1` sweep it was 156 of them, none of which is
+distinguishable from a real failure without opening a log.
 
 ```bash
 cd $REPO/experiments/pilot10
 UMASK=002 PRECOMPUTE_ONLY=1 RUNS=$RUNS ./submit_runs.sh
 ```
+
+Wait for `N written, 0 problems`. Only the datasets that got `['pca', 'umap']` need it;
+a `['none']` pass reads nothing, which is why a missing cache fails *part* of a sweep and
+can look like a scattered, dataset-specific problem.
+
+`submit_array.sh` now runs `CACHE_CHECK=1` by default and refuses to queue a range the
+cache cannot serve, so this is caught at submit time rather than one element at a time.
+Do not set `CACHE_CHECK=0` on a shared run to get past that refusal — it is telling you
+this step has not finished.
 
 ## 5 · Everyone: agree one number before anyone submits
 
@@ -183,11 +195,19 @@ Spot-check that a number means the same config for both of you:
 
 ## 6 · Everyone: take a range, in tmux
 
-`submit_array.sh` does not submit and exit — it submits a slice, waits for your pending
-queue to drain below `PEND_THRESHOLD`, submits the next, and so on for as long as your
-range lasts. That can be hours or days, so it must outlive your ssh session.
+**Whether you need tmux for the submit depends on your range, and usually you do not.**
+`submit_array.sh` sends your range as arrays of at most `MAX_INDEX` (400) elements. For a
+range of 400 tasks or fewer that is one array: it submits and exits in seconds, and tmux
+buys nothing. Only when your range needs a *second* slice does it wait for your pending
+queue to drain below `PEND_THRESHOLD` and submit the next — and that wait can last hours,
+so it must then outlive your ssh session. Three users on a 1030-task sweep get ~344 each,
+i.e. one slice and no wait.
 
-tmux is per login node. Note which one you are on; you can only reattach from there.
+Either way, the jobs themselves belong to the scheduler the moment `bsub` returns: losing
+your session can stop *further slices* from being queued, never the elements already in.
+
+What does run for hours is the watching, so that is what to put in tmux. tmux is per login
+node — note which one you are on; you can only reattach from there.
 
 ```bash
 hostname                       # e.g. ccc-login2 -- remember this
@@ -307,7 +327,8 @@ When a pass adds nothing, merge:
 | `Permission denied` in a job log, on another user's directory | umask was `022` when those files were written | section 1, then `chmod -R g+rwX` the affected tree; add `UMASK=002` |
 | Two users' totals disagree in `--count` | different manifest or filters, or someone passed `REBUILD=1` | compare sha256, agree one tree, never rebuild |
 | Elements re-fit work that is already done | the done-check failed — often `status.py` not finding `--runs-dir` | run section 3's re-run check; read the `note: the done-check failed` line in the log |
-| Jobs stop immediately, having fitted nothing | embedding cache missing | section 4; `CACHE_CHECK=1` to verify a range first |
+| `EmbeddingCacheError: ... cannot serve this run`, job exits 1, no wall or memory kill | embedding cache missing or stale — section 4 was skipped, or ran after jobs started | run section 4, wait for `0 problems`, then resubmit your range; `SKIP_DONE` absorbs the successes |
+| Jobs stop immediately, having fitted nothing | same cause | as above; the default `CACHE_CHECK` should now refuse at submit time instead |
 | `status.py` reports a coworker's running config as `failed` | `bjobs` is per-user | `--no-lsf`, and re-judge only when all queues are drained |
 | A config keeps dying at the wall | the array carries one wall for the whole slice | submit that config on its own: `FORCE=1 DATASET='<id>' WALL=… ./submit_runs.sh` |
 | The submit loop died when ssh dropped | not in tmux | section 6 |
