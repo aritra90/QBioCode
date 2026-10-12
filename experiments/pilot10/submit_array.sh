@@ -85,7 +85,16 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # From the environment, with no baked-in path, and absolute: it is exported to the array
 # elements as QBC_PY and they run on compute nodes where nothing is activated. See the
 # long comment on the same line in submit_runs.sh.
-PY=${PY:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null)}
+# Where PY came from is recorded, because the two sources fail in ways that look identical
+# from the outside: a PY set in the user's shell but never EXPORTED is invisible here (a
+# child process inherits only exported variables), so the script silently falls back to
+# PATH while `echo $PY` in that same shell prints the right path.
+if [ -n "${PY:-}" ]; then
+  PY_SOURCE="the PY environment variable"
+else
+  PY=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
+  PY_SOURCE="PATH -- PY was NOT set in this script's environment"
+fi
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   echo "no usable python: PY='${PY}'. Activate the environment that has qbiocode, or" >&2
   echo "export PY=/abs/path/to/python." >&2
@@ -267,12 +276,19 @@ fi
 # resolved from PATH, not from the environment the user believes they are in. Checked
 # here rather than in the cache check, because CACHE_CHECK=0 must not skip it.
 if ! import_err=$("$PY" -c 'import qbiocode' 2>&1); then
-  echo "!! $PY cannot import qbiocode, so every element of this range would fail:" >&2
+  echo "!! $PY cannot import qbiocode, so every element of this range would fail." >&2
+  echo "!! Interpreter came from: $PY_SOURCE" >&2
   printf '%s\n' "$import_err" | tail -8 | sed 's/^/!!   /' >&2
-  echo "!! Activate the environment that has qbiocode, or set PY to its interpreter:" >&2
-  echo "!!     PY=/path/to/env/bin/python UMASK=002 $0 $*" >&2
-  echo "!! If a conda env is also active ('(base)' in your prompt), 'conda deactivate'" >&2
-  echo "!! first -- otherwise conda's python shadows the venv's." >&2
+  echo "!! Fix either way:" >&2
+  echo "!!   1. EXPORT it -- a plain 'PY=...' in your shell does not reach this script," >&2
+  echo "!!      so 'echo \$PY' can print the right path while this falls back to PATH:" >&2
+  echo "!!          export PY=/abs/path/to/env/bin/python" >&2
+  echo "!!      or prefix the command:  PY=/abs/path/... $0 $*" >&2
+  echo "!!   2. Or activate the environment, and check it took:" >&2
+  echo "!!          which python      # must be the env's bin/python, not /usr/bin/python" >&2
+  echo "!! A prompt naming an env proves nothing: 'conda deactivate' restores a PATH" >&2
+  echo "!! snapshot from before a venv was activated, dropping the venv from PATH while" >&2
+  echo "!! leaving its prompt. Re-activate the venv AFTER deactivating conda." >&2
   exit 1
 fi
 
