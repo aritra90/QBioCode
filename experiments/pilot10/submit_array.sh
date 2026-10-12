@@ -258,7 +258,26 @@ if [ "$SCHED" = "slurm" ] && command -v scontrol >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Optional: confirm the embedding cache can serve this range before queueing it.
+# 2b. The interpreter must be able to import qbiocode at all.
+# ---------------------------------------------------------------------------
+# Every element runs "$PY -m qbiocode.apps.qprofiler.cli", so an interpreter that cannot
+# import the package fails all of them identically -- a whole range of jobs spent on one
+# ImportError, with the real message buried in per-element logs. The usual cause is a
+# conda base activated AFTER a venv, which puts conda's python first on PATH; PY is then
+# resolved from PATH, not from the environment the user believes they are in. Checked
+# here rather than in the cache check, because CACHE_CHECK=0 must not skip it.
+if ! import_err=$("$PY" -c 'import qbiocode' 2>&1); then
+  echo "!! $PY cannot import qbiocode, so every element of this range would fail:" >&2
+  printf '%s\n' "$import_err" | tail -8 | sed 's/^/!!   /' >&2
+  echo "!! Activate the environment that has qbiocode, or set PY to its interpreter:" >&2
+  echo "!!     PY=/path/to/env/bin/python UMASK=002 $0 $*" >&2
+  echo "!! If a conda env is also active ('(base)' in your prompt), 'conda deactivate'" >&2
+  echo "!! first -- otherwise conda's python shadows the venv's." >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Confirm the embedding cache can serve this range before queueing it.
 # ---------------------------------------------------------------------------
 if [ "${CACHE_CHECK:-1}" = "1" ]; then
   echo "checking the embedding cache for tasks ${LO}-${HI}..." >&2
@@ -274,7 +293,20 @@ if [ "${CACHE_CHECK:-1}" = "1" ]; then
   sed -n "${LO},${HI}p" "$TASKS" | cut -f1 |
     xargs env $ENVV "$PY" -m qbiocode.apps.qprofiler.embedding_cache --check >"$CHECK_LOG" 2>&1
   if [ $? -ne 0 ]; then
-    bad=$(grep -c . "$CHECK_LOG" 2>/dev/null || echo "?")
+    # --check reports every problem as 'MISSING <name>: ...' or 'STALE <name>: ...', and
+    # nothing else. A log with neither means the checker did not get as far as looking:
+    # it crashed, most often on an import, and then writing the cache fixes nothing. The
+    # summary below used to parse such a traceback as if it were MISSING lines and
+    # reported its fragments ('cannot', 'mod_spec,', '(most') as affected datasets.
+    if ! grep -qE '^(MISSING|STALE)' "$CHECK_LOG"; then
+      echo "!! the embedding-cache check could not RUN: it reported no MISSING/STALE line." >&2
+      echo "!! This is NOT a missing cache, and PRECOMPUTE_ONLY will not fix it." >&2
+      echo "!! Interpreter: $PY" >&2
+      tail -15 "$CHECK_LOG" | sed 's/^/!!   /' >&2
+      echo "!! Full output: $CHECK_LOG" >&2
+      exit 1
+    fi
+    bad=$(grep -cE '^(MISSING|STALE)' "$CHECK_LOG" 2>/dev/null || echo "?")
     echo "!! the embedding cache cannot serve tasks ${LO}-${HI}: $bad problem line(s)." >&2
     # emb_<dataset>_<embedding>_<n_components>_<split>[__tune].npz -> <dataset>. Anchored at
     # the end, so a dataset name full of digits and underscores survives (GAMETES_..._EDM_1_1).
@@ -284,7 +316,7 @@ if [ "${CACHE_CHECK:-1}" = "1" ]; then
     # sed -E, not basic regex: BSD sed does not support \| alternation, so the basic-regex
     # form matched nothing on a Mac while working on the cluster -- and a silently
     # unstripped name turns every FILE into its own 'dataset' in the count below.
-    awk '$2 != "" {print $2}' "$CHECK_LOG" |
+    grep -E '^(MISSING|STALE)' "$CHECK_LOG" | awk '$2 != "" {print $2}' |
       sed -E 's/:$//; s/^emb_//; s/_(pca|umap|none)_[0-9]+_[0-9]+(__tune)?\.npz$//' |
       sort -u > "$CHECK_LOG.datasets"
     n_ds=$(grep -c . "$CHECK_LOG.datasets" 2>/dev/null || echo 0)
