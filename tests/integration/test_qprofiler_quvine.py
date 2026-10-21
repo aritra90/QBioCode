@@ -63,7 +63,7 @@ class TestTheConfigDrivenPath:
 
     def test_the_embedding_width_is_the_requested_dimension(self, quvine_run):
         """The safety net must deliver exactly ``n_components``, whatever SGNS returned."""
-        assert list(quvine_run["# Features"].unique()) == [N_COMPONENTS]
+        assert list(quvine_run["mfe.nr_attr"].unique()) == [N_COMPONENTS]
 
     @pytest.mark.parametrize("column", METRIC_COLUMNS)
     def test_the_metrics_are_finite(self, quvine_run, column):

@@ -907,8 +907,9 @@ def _write_frame_atomic(frame, path):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = f"{path}.{socket.gethostname()}.{os.getpid()}.tmp"
     try:
-        frame.to_csv(tmp, index=False)
-        with open(tmp, 'rb') as handle:
+        with open(tmp, 'w', encoding='utf-8', newline='') as handle:
+            frame.to_csv(handle, index=False)
+            handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     finally:

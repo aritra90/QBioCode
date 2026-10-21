@@ -573,32 +573,43 @@ class TestPerModelHyperparametersReachTheEstimator:
             f"results file records the default as though it had been chosen."
         )
 
-    def test_a_hyperparameter_scikit_learn_has_dropped_is_swallowed_not_forwarded(self):
+    def test_a_hyperparameter_scikit_learn_has_dropped_is_swallowed_not_forwarded(
+        self, monkeypatch
+    ):
         """``lr_args: {multi_class: ovr}`` must neither crash nor claim to have worked.
 
-        scikit-learn removed ``multi_class`` from ``LogisticRegression`` -- it is not
-        in the installed signature at all -- and ``compute_lr`` keeps the parameter in
-        its own signature at ``'deprecated'`` without forwarding it. That is the right
-        shape for a shim: an old config that names it still runs. Both halves need
-        holding, because each has a plausible-looking regression. Forwarding it again
-        turns every such config into a ``TypeError`` from inside sklearn; dropping it
-        from the signature turns the same config into a ``TypeError`` naming
-        ``compute_lr``. And the parameter must stay absent from the recorded
-        parameters, or the results file claims a multiclass strategy that had no
-        effect.
+        Newer scikit-learn versions removed ``multi_class`` from
+        ``LogisticRegression``. ``compute_lr`` still accepts it so old configs run,
+        but omits it from the estimator constructor. Older sklearn versions report
+        their default in ``get_params`` even when no value was forwarded, so inspect
+        the actual constructor call and allow that default in the recorded metadata.
         """
         assert (
             "multi_class"
             in inspect.signature(_compute_fn("lr")).parameters
         ), "compute_lr no longer accepts multi_class, so old configs naming it break"
 
+        learner = inspect.getmodule(_compute_fn("lr"))
+        constructor = learner.LogisticRegression
+        calls = []
+
+        def recording_constructor(*args, **kwargs):
+            calls.append(dict(kwargs))
+            return constructor(*args, **kwargs)
+
+        monkeypatch.setattr(learner, "LogisticRegression", recording_constructor)
         params = _run("lr", lr_args={"multi_class": "ovr"})["results_lr"][0][
             "Model_Parameters"
         ]
-        assert "estimator__multi_class" not in params, (
-            "multi_class reached LogisticRegression, which no longer has that "
-            "parameter -- the shim is meant to absorb it, not pass it on"
+        assert calls, "the dispatch never constructed LogisticRegression"
+        assert all("multi_class" not in kwargs for kwargs in calls), (
+            "the compatibility shim forwarded multi_class to LogisticRegression"
         )
+        defaults = constructor().get_params()
+        if "multi_class" in defaults:
+            assert params["estimator__multi_class"] == defaults["multi_class"]
+        else:
+            assert "estimator__multi_class" not in params
         # The contrast matters: if forwarding were broken for *every* key, the
         # assertion above would be satisfied for the wrong reason.
         live = _run("lr", lr_args={"C": 0.25})["results_lr"][0]["Model_Parameters"]

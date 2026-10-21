@@ -141,7 +141,7 @@ def test_root_requirements_txt_delegates_to_the_tiered_files():
 
 def test_setup_py_declares_no_metadata():
     """pyproject.toml is the single source of metadata; setup.py is a shim."""
-    text = (REPO_ROOT / "setup.py").read_text()
+    text = (REPO_ROOT / "setup.py").read_text(encoding="utf-8")
     assert "setup()" in text
     for field in ("install_requires", "extras_require", "entry_points", "packages="):
         assert field not in text, f"setup.py re-declares {field}, which pyproject.toml owns"

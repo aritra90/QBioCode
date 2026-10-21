@@ -51,7 +51,7 @@ from qbiocode.apps.quvine.api import aliases  # noqa: E402
 
 def _read_requirements(name):
     """Package names from a requirements file, comments and ``-r`` lines dropped."""
-    lines = (REPO_ROOT / "requirements" / name).read_text().splitlines()
+    lines = (REPO_ROOT / "requirements" / name).read_text(encoding="utf-8").splitlines()
     specs = []
     for line in lines:
         line = line.split("#", 1)[0].strip()
@@ -173,7 +173,7 @@ def test_every_third_party_import_under_qbiocode_is_declared():
     stdlib = set(sys.stdlib_module_names)
     roots = set()
     for path in (REPO_ROOT / "qbiocode").rglob("*.py"):
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 roots.update(alias.name.split(".")[0] for alias in node.names)
@@ -229,7 +229,7 @@ def test_every_quvine_directory_is_a_package():
 
 
 def test_pyproject_declares_the_quvine_console_script_and_packaged_config():
-    pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'quvine = "qbiocode.apps.quvine.cli:main"' in pyproject
     assert '"qbiocode.apps.quvine" = ["configs/*.yaml"]' in pyproject
     assert (QUVINE_ROOT / "configs" / "config.yaml").exists()
@@ -299,7 +299,7 @@ def test_fused_names_resolve_and_are_listed(name):
 
 def test_the_cli_default_method_is_one_the_cli_accepts():
     """``--method`` defaulted to ``quvine_fused``, which validation then rejected."""
-    tree = ast.parse((QUVINE_ROOT / "cli.py").read_text())
+    tree = ast.parse((QUVINE_ROOT / "cli.py").read_text(encoding="utf-8"))
     defaults = {}
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "add_argument"):
@@ -340,7 +340,7 @@ def test_documented_method_count_matches_the_code():
     """The docs quote a method count; keep it from going stale silently."""
     total = len(aliases.list_methods())
     for relative in ("docs/source/apps.rst", "docs/source/apps/quvine.rst"):
-        text = (REPO_ROOT / relative).read_text()
+        text = (REPO_ROOT / relative).read_text(encoding="utf-8")
         assert f"{total} named methods" in text or f"{total} method names" in text or \
             f"({total} in total)" in text, f"{relative} does not quote {total} methods"
 

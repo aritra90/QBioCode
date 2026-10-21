@@ -35,9 +35,17 @@ hydra itself composes it.
 import csv
 import functools
 import importlib.util
+import json
+import ntpath
 import os
 import pathlib
+import posixpath
 import re
+import shlex
+import shutil
+import subprocess
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -99,6 +107,138 @@ def generator():
     return _module("generate_pilot_configs")
 
 
+class _BashHarness:
+    """Run the POSIX submitter while its generator and Python stay native."""
+
+    def __init__(self, executable, env):
+        self.command = [str(executable), "--noprofile", "--norc"]
+        self.env = env
+
+    def run(self, args, *, env=None, **kwargs):
+        options = dict(capture_output=True, text=True, timeout=30)
+        options.update(kwargs)
+        return subprocess.run(self.command + args, env=dict(self.env, **(env or {})),
+                              **options)
+
+    def paths(self, paths):
+        # Keep venv executable symlinks: resolving one can select the base interpreter.
+        native = [os.path.abspath(p) for p in paths]
+        if os.name != "nt":
+            return native
+        done = self.run(["-c", 'cygpath -u -a -- "$@"', "--", *native], check=True)
+        converted = done.stdout.splitlines()
+        assert len(converted) == len(native), done.stdout
+        return converted
+
+    def path(self, path):
+        return self.paths([path])[0]
+
+
+@pytest.fixture(scope="module")
+def bash():
+    """Use Git Bash on Windows, never the unrelated WSL bash.exe alias."""
+    override = os.environ.get("QBIOCODE_TEST_BASH")
+    in_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+    if override and not pathlib.Path(override).is_absolute():
+        pytest.fail("QBIOCODE_TEST_BASH must name an absolute native Bash executable path")
+
+    def unavailable(reason):
+        message = f"pilot shell tests require Bash >=4.4: {reason}"
+        if in_ci or override:
+            pytest.fail(message)
+        pytest.skip(message)
+
+    env = dict(os.environ)
+    if os.name == "nt":
+        candidates = [pathlib.Path(override)] if override else []
+        if not override:
+            git = shutil.which("git")
+            if git:
+                candidates.append(pathlib.Path(git).resolve().parents[1] / "bin" / "bash.exe")
+            for variable in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+                base = os.environ.get(variable)
+                if base:
+                    relative = ("Programs", "Git") if variable == "LOCALAPPDATA" else ("Git",)
+                    candidates.append(pathlib.Path(base).joinpath(*relative, "bin", "bash.exe"))
+        executable = None
+        for candidate in candidates:
+            # Git's bin/bash.exe and usr/bin/bash.exe share its usr/bin tools.
+            tools = (candidate.parent if candidate.parent.name.lower() == "bin"
+                     and candidate.parent.parent.name.lower() == "usr"
+                     else candidate.parent.parent / "usr" / "bin")
+            if candidate.is_file() and (tools / "cygpath.exe").is_file():
+                executable = candidate
+                env["PATH"] = os.pathsep.join([str(tools), str(candidate.parent),
+                                               env.get("PATH", "")])
+                break
+        if executable is None:
+            unavailable("Git for Windows Bash and cygpath were not found; set QBIOCODE_TEST_BASH")
+    else:
+        executable = override or shutil.which("bash")
+        if not executable or not pathlib.Path(executable).is_file():
+            unavailable("no Bash executable was found")
+    shell = _BashHarness(executable, env)
+    try:
+        version = shell.run(["-c", 'printf "%s.%s\\n" "${BASH_VERSINFO[0]}" '
+                            '"${BASH_VERSINFO[1]}"'], check=True)
+        major, minor = map(int, version.stdout.strip().split("."))
+        if (major, minor) < (4, 4):
+            unavailable(f"{executable} is Bash {major}.{minor}")
+        # The shell must invoke this environment's native Python, including on Windows.
+        native = shell.run(["-c", 'exec "$1" -c "import json, sys; '
+                            'print(json.dumps([sys.platform, sys.prefix, sys.executable]))"',
+                            "--", shell.path(sys.executable)], check=True)
+        platform, prefix, executable = json.loads(native.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        unavailable(str(exc))
+    assert platform == sys.platform, native.stdout
+    assert os.path.normcase(os.path.abspath(prefix)) == os.path.normcase(sys.prefix), native.stdout
+    assert os.path.normcase(os.path.abspath(executable)) == os.path.normcase(sys.executable), native.stdout
+    return shell
+
+
+def _shell_manifest(bash, root, rows):
+    """Adapt only the temporary TSV's shell-facing column; YAML stays native."""
+    rows = [dict(row, yaml=path) for row, path in
+            zip(rows, bash.paths([r["yaml"] for r in rows]))]
+    with (root / "MANIFEST.tsv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]), delimiter="\t",
+                                lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows
+
+
+def _absolute_path(value):
+    """Read a serialized path in its generating machine's path dialect."""
+    text = str(value)
+    cls = (pathlib.PureWindowsPath if pathlib.PureWindowsPath(text).drive
+           else pathlib.PurePosixPath)
+    path = cls(text)
+    assert path.is_absolute() and ".." not in path.parts, value
+    return path
+
+
+@pytest.fixture(scope="module")
+def manifest():
+    mpath = RUNS_DIR / "MANIFEST.tsv"
+    assert mpath.exists(), "MANIFEST.tsv missing; submit_runs.sh orders and filters by it"
+    with mpath.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t"))
+    assert rows, "MANIFEST.tsv contains no jobs"
+    assert len({r["config"] for r in rows}) == len(rows), "duplicate manifest configs"
+    return {r["config"]: r for r in rows}
+
+
+@pytest.fixture(scope="module")
+def recorded_runs_dir(manifest):
+    roots = {_absolute_path(r["yaml"]).parent.parent for r in manifest.values()}
+    assert len(roots) == 1, f"manifest paths name different runs roots: {roots}"
+    root, = roots
+    assert root.parts[-3:] == ("experiments", "pilot10", "runs"), root
+    return root
+
+
 def _run_dir_root(cfg):
     """hydra.run.dir minus the per-launch ``${backend}_${now:...}`` leaf.
 
@@ -107,8 +247,9 @@ def _run_dir_root(cfg):
     job's own is substituted by hand.
     """
     d = cfg["hydra"]["run"]["dir"].replace("${config_file_name}", cfg["config_file_name"])
-    assert "${config_file_name}" not in d and "$" not in str(pathlib.PurePosixPath(d).parent)
-    return str(pathlib.PurePosixPath(d).parent)
+    parent = _absolute_path(d).parent
+    assert "${config_file_name}" not in d and "$" not in str(parent)
+    return str(parent)
 
 
 class TestTheSplitIsTheSameExperiment:
@@ -155,31 +296,33 @@ class TestTheSplitIsTheSameExperiment:
 
 class TestNoTwoJobsShareAWritablePath:
     @pytest.mark.parametrize("key", ["quantum_param_dir", "kernel_dump_dir", "run_dir"])
-    def test_every_job_owns_its_directory(self, splits, key):
+    def test_every_job_owns_its_directory(self, splits, key, recorded_runs_dir):
+        kind = {"quantum_param_dir": "quantum_tuned_params", "kernel_dump_dir": "kernels",
+                "run_dir": "results"}[key]
         seen = {}
         for path, cfg in splits:
-            where = _run_dir_root(cfg) if key == "run_dir" else cfg[key]
+            where = _absolute_path(_run_dir_root(cfg) if key == "run_dir" else cfg[key])
             assert where not in seen, f"{path.name} and {seen[where]} share {key} {where}"
             seen[where] = path.name
             # ...and it lives under that job's dataset directory, where the scripts look.
-            assert pathlib.PurePosixPath(where).is_relative_to(path.parent), (path.name, where)
+            expected = recorded_runs_dir / path.parent.name / kind / path.stem
+            assert where == expected, (path.name, where, expected)
 
-    def test_no_split_path_reaches_into_the_combined_layouts_directories(self, splits):
+    def test_no_split_path_reaches_into_the_combined_layouts_directories(
+            self, splits, recorded_runs_dir):
         for path, cfg in splits:
             for where in (cfg["quantum_param_dir"], cfg["kernel_dump_dir"], _run_dir_root(cfg)):
-                assert pathlib.PurePosixPath(where).is_relative_to(RUNS_DIR), (path.name, where)
+                assert _absolute_path(where).is_relative_to(recorded_runs_dir), (path.name, where)
 
 
 class TestTheManifestMatchesTheYamls:
-    def test_one_row_per_yaml_with_the_yamls_own_values(self, splits):
-        mpath = RUNS_DIR / "MANIFEST.tsv"
-        assert mpath.exists(), "MANIFEST.tsv missing; submit_runs.sh orders and filters by it"
-        with open(mpath, newline="") as fh:
-            rows = {r["config"]: r for r in csv.DictReader(fh, delimiter="\t")}
-        assert set(rows) == {p.stem for p, _ in splits}
+    def test_one_row_per_yaml_with_the_yamls_own_values(
+            self, splits, manifest, recorded_runs_dir):
+        assert set(manifest) == {p.stem for p, _ in splits}
         for path, cfg in splits:
-            r = rows[path.stem]
-            assert pathlib.Path(r["yaml"]) == path.resolve(), "submit_runs.sh joins on this path"
+            r = manifest[path.stem]
+            expected = recorded_runs_dir / path.relative_to(RUNS_DIR).as_posix()
+            assert _absolute_path(r["yaml"]) == expected, "manifest YAML path has drifted"
             assert r["dataset"] == path.parent.name
             assert [r["embedding"]] == cfg["embeddings"]
             assert [r["model"]] == cfg["classical_model"] + cfg["quantum_model"]
@@ -193,48 +336,57 @@ class TestTheManifestMatchesTheYamls:
 class TestTheShippedYamlsAreFresh:
     """Byte-for-byte what ``generate_pilot_configs.build`` produces from today's template."""
 
-    def _rebuild(self, gen, cfg, composed=False, **job):
+    def _rebuild(self, gen, cfg, recorded_runs_dir, composed=False, **job):
         ds = pathlib.Path(cfg["file_dataset"][0]).stem
         for idx, (folder, csv_name, rows, feats, why) in enumerate(gen.DATASETS, start=1):
             if csv_name[:-4] != ds:
                 continue
-            if composed:
-                return gen.build_job(idx, folder, csv_name, feats, **job)[1]
-            return gen.build(idx, folder, csv_name, rows, feats, why,
-                             n_iter=cfg["iter"], test_size=cfg["test_size"],
-                             n_trials_quantum=cfg["n_trials_quantum"],
-                             embedding_cache=cfg.get("embedding_cache"), **job)[1]
+            # Render with the recorded host's root and separators, without changing
+            # the process-wide os.path or any paths used to read the actual files.
+            path_module = (ntpath if isinstance(recorded_runs_dir, pathlib.PureWindowsPath)
+                           else posixpath)
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(gen, "HERE", str(recorded_runs_dir.parent))
+                patch.setattr(gen, "os", SimpleNamespace(path=path_module))
+                job.setdefault("runs_dir", str(recorded_runs_dir))
+                if composed:
+                    return gen.build_job(idx, folder, csv_name, feats, **job)[1]
+                return gen.build(idx, folder, csv_name, rows, feats, why,
+                                 n_iter=cfg["iter"], test_size=cfg["test_size"],
+                                 n_trials_quantum=cfg["n_trials_quantum"],
+                                 embedding_cache=cfg.get("embedding_cache"), **job)[1]
         raise AssertionError(f"{ds} is not in the generator's DATASETS")
 
-    def test_combined(self, generator, parents):
+    def test_combined(self, generator, parents, recorded_runs_dir):
         stale = [p.name for p, cfg in parents.values()
-                 if p.read_text() != self._rebuild(generator, cfg)]
+                 if p.read_text(encoding="utf-8") != self._rebuild(
+                     generator, cfg, recorded_runs_dir)]
         assert not stale, f"regenerate: python generate_pilot_configs.py ... ({stale})"
 
-    def test_split(self, generator, splits):
+    def test_split(self, generator, splits, recorded_runs_dir):
         # Either layout: a directory with a protocol holds job files over it (the default),
         # one without holds self-contained configs (--self-contained; the pilot's runs/).
         stale = []
         for path, cfg in splits:
             model = (cfg["classical_model"] + cfg["quantum_model"])[0]
             composed = (path.parent / f"{generator.PROTOCOL}.yaml").exists()
-            body = self._rebuild(generator, cfg, composed=composed, emb=cfg["embeddings"][0],
-                                 model=model, runs_dir=str(path.parent.parent))
-            if path.read_text() != body:
+            body = self._rebuild(generator, cfg, recorded_runs_dir, composed=composed,
+                                 emb=cfg["embeddings"][0], model=model)
+            if path.read_text(encoding="utf-8") != body:
                 stale.append(path.name)
         assert not stale, f"regenerate with --layout split ({len(stale)} stale, e.g. {stale[:5]})"
 
-    def test_protocols(self, generator):
+    def test_protocols(self, generator, recorded_runs_dir):
         stale = [p.parent.name
                  for p in sorted(RUNS_DIR.glob(f"*/{generator.PROTOCOL}.yaml"))
-                 if p.read_text() != self._rebuild(generator, _load(p), protocol=True,
-                                                   runs_dir=str(p.parent.parent))]
+                 if p.read_text(encoding="utf-8") != self._rebuild(
+                     generator, _load(p), recorded_runs_dir, protocol=True)]
         assert not stale, f"regenerate with --layout split (stale protocols: {stale})"
 
     def test_the_shots_comment_no_longer_claims_the_statevector_is_exact(self, parents):
         # StatevectorSampler (V2) always samples; only the estimator arms are exact.
         for p, _ in parents.values():
-            assert "Ignored by the exact statevector" not in p.read_text(), p.name
+            assert "Ignored by the exact statevector" not in p.read_text(encoding="utf-8"), p.name
 
 
 #: The keys a composed job file sets. n_jobs and hydra's run.dir are the same for every job
@@ -368,7 +520,7 @@ class TestTheComposedLayoutRunsTheSameConfig:
             == datasets
         # submit_runs.sh submits what the manifest lists, and status and collate_results
         # count what find_configs finds: both must be the job files, and only those.
-        with open(tmp_path / "MANIFEST.tsv", newline="") as fh:
+        with open(tmp_path / "MANIFEST.tsv", encoding="utf-8", newline="") as fh:
             listed = sorted(r["yaml"] for r in csv.DictReader(fh, delimiter="\t"))
         jobs = status.find_configs(str(tmp_path))
         assert listed == jobs
@@ -415,7 +567,7 @@ class TestTheEmbeddingIsAFunctionOfTheSplit:
         np.testing.assert_array_equal(a_te, b_te)
 
     def test_qprofiler_seeds_the_embedding_with_the_split_seed(self):
-        src = (ROOT / "qbiocode" / "apps" / "qprofiler" / "qprofiler.py").read_text()
+        src = (ROOT / "qbiocode" / "apps" / "qprofiler" / "qprofiler.py").read_text(encoding="utf-8")
         call = re.search(r"get_embeddings\((.*?)\n\s*\)", src, re.S)
         assert call and "random_state=split_seed" in call.group(1)
 
@@ -584,7 +736,7 @@ def _manifest_run(generator, monkeypatch, tmp_path, *extra, run_id="t1", with_ma
         *extra])
     generator.main()
     root = runs / run_id
-    with open(root / "MANIFEST.tsv", newline="") as fh:
+    with open(root / "MANIFEST.tsv", encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh, delimiter="\t"))
     return root, rows
 
@@ -663,7 +815,7 @@ class TestTheManifestModeGenerator:
                 assert gone not in cfg, gone
             ds = r["dataset"]
             assert cfg["file_dataset"] == [f"{ds}.csv"]
-            assert cfg["folder_path"].endswith(f"/datasets/{ds}")
+            assert pathlib.Path(cfg["folder_path"]).parts[-2:] == ("datasets", ds)
             if r["group"] == "classical":
                 assert len(cfg["classical_model"]) == 9 and cfg["quantum_model"] == []
             else:
@@ -817,7 +969,7 @@ class TestTheManifestModeReviewFixes:
     def test_the_comments_say_what_this_mode_does(self, generator, monkeypatch, tmp_path):
         _, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
                                 "--models", "pqk", "--splits", "1")
-        body = pathlib.Path(rows[0]["yaml"]).read_text()
+        body = pathlib.Path(rows[0]["yaml"]).read_text(encoding="utf-8")
         assert "which no quantum space is" not in body
         assert "Where the frozen parameters are cached" not in body
         assert "classical RNG: splits" not in body
@@ -901,54 +1053,109 @@ class TestCollateAndStatusOnAManifestRun:
             (line,) = [x for x in out.splitlines() if r["config"] in x]
             assert f"wall {r['wall']}" in line
 
+    def test_status_works_without_sigpipe(self, landed, monkeypatch, capsys):
+        root, rows = landed
+        status = _module("status")
+
+        def unexpected_signal(*args):
+            pytest.fail("SIGPIPE is unavailable; signal.signal must not be called")
+
+        monkeypatch.setattr(status, "signal", SimpleNamespace(
+            SIG_DFL=object(), signal=unexpected_signal))
+        monkeypatch.setattr(sys, "argv", ["status.py", "--runs-dir", str(root), "--no-lsf",
+                                          "--list", "all"])
+        status.main()
+        out = capsys.readouterr().out
+        for row in rows:
+            (line,) = [line for line in out.splitlines() if row["config"] in line]
+            assert f"wall {row['wall']}" in line
+
+    def test_collate_reports_absolute_paths_across_drives(self, landed, monkeypatch,
+                                                          tmp_path, capsys):
+        root, _ = landed
+        collate = _module("collate_results")
+        out = tmp_path / "collated"
+
+        def different_drive(path):
+            raise ValueError("path is on another drive")
+
+        # Replace only this module's view: patching os.path.relpath globally can break
+        # pytest's own reporting on Windows.
+        path_proxy = SimpleNamespace(**vars(os.path))
+        path_proxy.relpath = different_drive
+        os_proxy = SimpleNamespace(**vars(os))
+        os_proxy.path = path_proxy
+        monkeypatch.setattr(collate, "os", os_proxy)
+        self._collate(monkeypatch, root, out)
+        assert all((out / name).is_file() for name in
+                   ("ModelResults.csv", "oof.csv", "trials.csv"))
+        output = capsys.readouterr().out
+        assert f"--results-root {out.resolve()} --kernels-root {root.resolve()}" in output
+
 
 class TestSubmitRunsDryOnAManifestRun:
+    @pytest.mark.parametrize("spaced_python", [False, True],
+                             ids=["native-python", "spaced-python"])
     def test_each_job_gets_its_wall_and_a_run_aware_name(self, generator, monkeypatch,
-                                                         tmp_path):
-        import shutil
-        import subprocess
-
-        if not shutil.which("bash"):
-            pytest.skip("no bash")
-        root, rows = _manifest_run(generator, monkeypatch, tmp_path, *SHORT, run_id="dry1")
+                                                         tmp_path, bash, spaced_python):
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path / "shell workspace data",
+                                   *SHORT, run_id="dry1")
+        rows = _shell_manifest(bash, root, rows)
         # A stub for the cache step: this checks the bsub lines, not embedding_cache.
-        stub = tmp_path / "stub_py"
-        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub = tmp_path / "cache helper's python"
+        stub.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$0.args"\nexit 0\n',
+                        encoding="utf-8", newline="\n")
         stub.chmod(0o755)
-        env = dict(os.environ, DRY="1", FORCE="1", SPREAD="0", RUNS=str(root),
-                   CACHE_PY=str(stub))
-        done = subprocess.run(["bash", str(PILOT / "submit_runs.sh")], env=env,
-                              capture_output=True, text=True, timeout=120)
+        # FORCE=1 leaves PY unexecuted. The second case additionally checks quoting an
+        # existing interpreter-shaped executable path containing spaces and an apostrophe.
+        python = bash.path(stub if spaced_python else sys.executable)
+        env = dict(DRY="1", FORCE="1", SPREAD="0", RUNS=bash.path(root),
+                   CACHE_PY=bash.path(stub), PY=python)
+        done = bash.run([bash.path(PILOT / "submit_runs.sh")], env=env, timeout=120)
         assert done.returncode == 0, done.stderr[-2000:]
-        subs = [x for x in done.stdout.splitlines() if "bsub" in x]
+        subs = [shlex.split(line) for line in done.stdout.splitlines()
+                if line.startswith("bsub ")]
         assert len(subs) == len(rows)
-        for r in rows:
-            (line,) = [x for x in subs if f"-J p10_dry1_{r['config']} " in x]
-            assert f"-W {r['wall']} " in line
+        jobs = {args[args.index("-J") + 1]: args for args in subs}
+        for row in rows:
+            args = jobs[f"p10_dry1_{row['config']}"]
+            assert args[args.index("-W") + 1] == row["wall"]
+            directory = posixpath.dirname(row["yaml"])
+            assert args[args.index("-o") + 1] == f"{directory}/lsf_logs/{row['config']}.%J.out"
+            assert args[args.index("-e") + 1] == f"{directory}/lsf_logs/{row['config']}.%J.err"
+            payload = shlex.split(args[-1])
+            assert payload[:3] == ["cd", directory, "&&"]
+            start = max(i for i, token in enumerate(payload) if token == "&&") + 1
+            assert payload[start:] == [python, "-m", "qbiocode.apps.qprofiler.cli",
+                                       f"--config-dir={directory}",
+                                       f"--config-name={row['config']}"]
         assert "would precompute the embedding cache for 80 configs" in done.stderr
         assert "WARNING: the embedding cache cannot serve" not in done.stderr
+        cache_args = pathlib.Path(f"{stub}.args").read_text(encoding="utf-8").splitlines()
+        assert cache_args[:3] == ["-m", "qbiocode.apps.qprofiler.embedding_cache", "--check"]
+        assert len(cache_args[3:]) == len(rows)
+        assert set(cache_args[3:]) == {row["yaml"] for row in rows}
 
     def test_a_cache_the_check_finds_incomplete_warns(self, generator, monkeypatch,
-                                                      tmp_path):
+                                                      tmp_path, bash):
         """DRY=1 runs the cache step's --check, so a missing file still warns."""
-        import shutil
-        import subprocess
-
-        if not shutil.which("bash"):
-            pytest.skip("no bash")
-        root, _ = _manifest_run(generator, monkeypatch, tmp_path, *SHORT, run_id="dry2")
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path / "shell workspace data",
+                                   *SHORT, run_id="dry2")
+        rows = _shell_manifest(bash, root, rows)
         # Stands in for embedding_cache --check finding a missing file (exit 1).
-        stub = tmp_path / "stub_py"
-        stub.write_text('#!/bin/sh\necho "$@" > "$0.args"\nexit 1\n')
+        stub = tmp_path / "cache helper's python"
+        stub.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$0.args"\nexit 1\n',
+                        encoding="utf-8", newline="\n")
         stub.chmod(0o755)
-        env = dict(os.environ, DRY="1", FORCE="1", SPREAD="0", RUNS=str(root),
-                   CACHE_PY=str(stub))
-        done = subprocess.run(["bash", str(PILOT / "submit_runs.sh")], env=env,
-                              capture_output=True, text=True, timeout=120)
+        env = dict(DRY="1", FORCE="1", SPREAD="0", RUNS=bash.path(root),
+                   CACHE_PY=bash.path(stub), PY=bash.path(sys.executable))
+        done = bash.run([bash.path(PILOT / "submit_runs.sh")], env=env, timeout=120)
         assert done.returncode == 0, done.stderr[-2000:]
         assert "WARNING: the embedding cache cannot serve these jobs yet" in done.stderr
-        args = (tmp_path / "stub_py.args").read_text().split()
+        args = pathlib.Path(f"{stub}.args").read_text(encoding="utf-8").splitlines()
         assert args[:3] == ["-m", "qbiocode.apps.qprofiler.embedding_cache", "--check"]
+        assert len(args[3:]) == len(rows)
+        assert set(args[3:]) == {row["yaml"] for row in rows}
 
 
 # ---------------------------------------------------------------------------

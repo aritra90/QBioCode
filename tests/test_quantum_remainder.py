@@ -88,10 +88,11 @@ qiskit-machine-learning's are separate objects, and the variational models read 
 second), which made these two models reproducible for the first time.
 ``tests/test_quantum_models.py`` guards the same-seed half of that directly -- its
 same-seed check is parametrized over ``pqk``, ``qsvc``, ``vqc`` and ``qnn``, so the two
-variational models are no longer excluded from it. What it has no counterpart for is the
-other half: that varying ``q_seed`` alone *changes* the answer. Without that, "two runs
-agree" is satisfied just as well by a ``q_seed`` that never reaches the optimizer, since
-``seed`` alone already seeds numpy. Both halves live here, over one set of memoized runs.
+variational models are no longer excluded from it. The complementary check here varies
+``q_seed`` alone and observes the initial point passed to the real optimizer. Different
+initial points can converge to the same predictions, so seed sensitivity is checked at
+initialization while same-seed reproducibility also covers the final answer. Both checks
+use one set of memoized real fits.
 
 Everything except the CLI run is on the statevector simulator, at 14 rows (the
 projection models) or 24 (the variational pair) and two features throughout.
@@ -1002,9 +1003,8 @@ class TestTheWarmCacheSeedLookup:
 # vqc and qnn reproducibility
 # ======================================================================================
 
-#: The three quantum seeds the tests below run at. 7 twice (same answer required) and
-#: two others (at least one different answer required). Fixed values, so the outcome of
-#: every assertion here is fixed too: nothing in this section samples a seed.
+#: The three quantum seeds the tests below run at. 7 twice (same initialization and
+#: answer required) and two others (at least one different initialization required).
 SAME_SEED = 7
 OTHER_SEEDS = (99, 1234)
 
@@ -1036,7 +1036,8 @@ def variational_run(variational_data):
     at the same seed -- the whole point of the first test -- from a cache hit.
     """
     X_train, X_test, y_train, y_test = variational_data
-    cache: dict[tuple, tuple] = {}
+    cache: dict[tuple, dict] = {}
+    get_optimizer = qutils.get_optimizer
 
     def run(model, q_seed, repeat=0):
         key = (model, q_seed, repeat)
@@ -1050,10 +1051,39 @@ def variational_run(variational_data):
                 "q_seed": q_seed,
                 "model": [model],
             }
-            out = model_run(X_train, X_test, y_train, y_test, "variational", args)
+            initial_points = []
+
+            def recording_optimizer(*optimizer_args, **optimizer_kwargs):
+                optimizer = get_optimizer(*optimizer_args, **optimizer_kwargs)
+                minimize = optimizer.minimize
+
+                def recording_minimize(*minimize_args, **minimize_kwargs):
+                    initial_points.append(np.asarray(minimize_kwargs["x0"]).copy())
+                    return minimize(*minimize_args, **minimize_kwargs)
+
+                optimizer.minimize = recording_minimize
+                return optimizer
+
+            # n_jobs=1 keeps the real fit in this process. Only observe the optimizer's
+            # input; its implementation, arguments, settings and result stay unchanged.
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(qutils, "get_optimizer", recording_optimizer)
+                out = model_run(X_train, X_test, y_train, y_test, "variational", args)
+            assert len(initial_points) == 1, (
+                f"expected one optimizer initial point for {model}, got {len(initial_points)}"
+            )
+            initial_point = initial_points[0]
+            assert (
+                initial_point.ndim == 1
+                and initial_point.size > 0
+                and np.isfinite(initial_point).all()
+            ), f"{model} received an invalid optimizer initial point: {initial_point}"
             row = out[f"results_{model}"][0]
             predictions = tuple(np.asarray(out[f"y_predicted_{model}"][0]).tolist())
-            cache[key] = (row["accuracy"], row["f1_score"], predictions)
+            cache[key] = {
+                "initial_point": tuple(initial_point.tolist()),
+                "outcome": (row["accuracy"], row["f1_score"], predictions),
+            }
         return cache[key]
 
     return run
@@ -1068,58 +1098,38 @@ class TestTheVariationalModelsAreReproducible:
     ``_call_with_global_seeds`` seeded both, VQC and QNN started from OS entropy and two
     runs at the same ``q_seed`` disagreed.
 
-    ``tests/test_quantum_models.py`` guards the same-seed half of that itself:
-    ``TestTheSeedReachesTheQuantumStack::test_two_runs_at_the_same_seed_agree`` is
-    parametrized over ``pqk``, ``qsvc``, ``vqc`` and ``qnn``, on a fixture built the same
-    way as ``variational_data`` below, and compares predictions as well as accuracy. The
-    two variational models are named there deliberately, as the models that check exists
-    for. So ``test_two_runs_at_the_same_quantum_seed_agree[vqc]`` and ``[qnn]`` overlap it,
-    and the overlap is not the reason this class exists.
-
-    The second test is. Nothing in that file varies ``q_seed`` and requires the *answer*
-    to change: its other seed tests assert on ``_call_with_global_seeds`` -- which
-    singletons it writes -- and never on a model's output. That matters because "two runs
-    agree" is satisfied exactly as well by a ``q_seed`` that never reaches the optimizer
-    at all, ``seed`` alone being enough to make a run repeatable through numpy. The pair
-    is also why the same-seed case is kept here rather than deferred upward: both halves
-    read one memoized ``variational_run``, so the agreeing runs and the differing ones are
-    provably the same computation at three seeds, which a control drawn from another
-    module's fixture would not be.
+    The optimizer's actual initial point tests whether the seed reaches the fit, without
+    assuming different starts must produce different final labels. On six test rows,
+    distinct fits can predict exactly the same labels and therefore have equal metrics.
+    Both tests share real fits: repeated seeds must reproduce initialization and final
+    output, while varying only ``q_seed`` must change the initialization.
     """
 
     @pytest.mark.parametrize("model", VARIATIONAL_MODELS)
     def test_two_runs_at_the_same_quantum_seed_agree(self, model, variational_run):
-        """Same input, same ``q_seed``, same answer -- predictions included.
-
-        The predictions are compared rather than only the metrics because a variational
-        fit that started from a different point often lands on a *nearby* accuracy: on
-        6 test rows there are only seven possible values, so metric equality alone would
-        pass by coincidence a good fraction of the time.
-        """
+        """Same input and ``q_seed`` reproduce the starting point and final answer."""
         first = variational_run(model, SAME_SEED, repeat=0)
         second = variational_run(model, SAME_SEED, repeat=1)
-        assert first == second, (
+        assert first["initial_point"] == second["initial_point"], (
+            f"two {model} runs at q_seed={SAME_SEED} started from different points "
+            f"({first['initial_point']} vs {second['initial_point']})"
+        )
+        assert first["outcome"] == second["outcome"], (
             f"two {model} runs at q_seed={SAME_SEED} disagreed; the quantum seed is not "
             "reaching every global RNG the variational stack reads "
-            f"({first} vs {second})"
+            f"({first['outcome']} vs {second['outcome']})"
         )
 
     @pytest.mark.parametrize("model", VARIATIONAL_MODELS)
-    def test_the_quantum_seed_is_what_that_answer_depends_on(self, model, variational_run):
-        """The other half: a seed that is ignored would also reproduce perfectly.
-
-        ``seed`` is held fixed across these runs, so only ``q_seed`` differs -- which
-        makes this the one assertion in the file that fails if ``q_seed`` stops reaching
-        the optimizer while ``np.random`` keeps being seeded. Two of three seeds are
-        allowed to coincide: with a two-parameter ansatz on 6 test rows a collision is
-        ordinary, and requiring all three to differ would pin a qiskit version rather
-        than QBioCode's behaviour.
-        """
-        outcomes = {q_seed: variational_run(model, q_seed) for q_seed in (SAME_SEED, *OTHER_SEEDS)}
-        assert len(set(outcomes.values())) > 1, (
-            f"{model} produced the same answer at q_seed "
-            f"{sorted(outcomes)} -- args['q_seed'] is not reaching the optimizer, so "
-            "the reproducibility above is vacuous"
+    def test_the_quantum_seed_controls_the_optimizer_initial_point(self, model, variational_run):
+        """Hold ``seed`` fixed and vary only the quantum initialization seed."""
+        initial_points = {
+            q_seed: variational_run(model, q_seed)["initial_point"]
+            for q_seed in (SAME_SEED, *OTHER_SEEDS)
+        }
+        assert len(set(initial_points.values())) > 1, (
+            f"{model} started from the same optimizer point at q_seed "
+            f"{sorted(initial_points)} -- args['q_seed'] is not controlling initialization"
         )
 
 

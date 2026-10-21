@@ -8,9 +8,9 @@ dependency is (file content, repeat, fold id). These manifests make that explici
 records the sha256 of the CSV it was computed from, and QProfiler re-checks that hash
 under ``split_mode: manifest`` before using it.
 
-Protocol (make_splits/2.0, manifest schema_version 2): stratified k-fold repeated
-``--repeats`` times, repeat r shuffled with seed + r, so repeat 0 is exactly the
-make_splits/1.0 assignment for the same seed. Each fold record carries its validation
+Protocol (make_splits/2.0.1, manifest schema_version 2): stratified k-fold repeated
+``--repeats`` times, repeat r shuffled with seed + r. For ungrouped data, repeat 0 is
+exactly the make_splits/1.0 assignment for the same seed. Each fold record carries its validation
 rows explicitly: under ``next_fold`` (TabZilla) the validation rows of fold f are the test
 rows of fold (f + 1) mod k, and the tuning trials fit on ``train \\ val``. The schema is
 documented in qbiocode/apps/qprofiler/split_manifest.py, and every manifest written here
@@ -43,7 +43,7 @@ except ImportError:  # run outside an env that has QBioCode installed: use this 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from qbiocode.apps.qprofiler import split_manifest
 
-GENERATOR_VERSION = "make_splits/2.0"
+GENERATOR_VERSION = "make_splits/2.0.1"
 SCHEMA_VERSION = split_manifest.SCHEMA_VERSION
 VALIDATION = "next_fold"
 
@@ -133,8 +133,15 @@ def _repeat_folds(frame: pd.DataFrame, y: np.ndarray, k: int, seed: int,
         # next_fold the validation rows are a whole test fold, so they stay group-
         # disjoint from the fit rows too.
         groups = frame[group_col].to_numpy()
-        splitter = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed)
-        return list(splitter.split(np.zeros(n), y, groups=groups)), "StratifiedGroupKFold"
+        # Older sklearn versions shuffle the per-group class counts without remapping
+        # the group codes, assigning rows using another group's class distribution.
+        # Shuffle the codes ourselves and leave the splitter's shuffle off, keeping
+        # every group's rows tied to its own counts on both old and fixed versions.
+        unique_groups, codes = np.unique(groups, return_inverse=True)
+        permutation = np.random.RandomState(seed).permutation(len(unique_groups))
+        shuffled_groups = np.argsort(permutation)[codes]
+        splitter = StratifiedGroupKFold(n_splits=k, shuffle=False)
+        return list(splitter.split(np.zeros(n), y, groups=shuffled_groups)), "StratifiedGroupKFold"
     splitter = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
     return list(splitter.split(np.zeros(n), y)), "StratifiedKFold"
 
@@ -144,7 +151,7 @@ def split_one(dataset_dir: Path, k: int, seed: int, repeats: int = 3) -> tuple[d
 
     Repeat r is a StratifiedKFold (StratifiedGroupKFold with a group_col) shuffled with
     ``seed + r``. Per-repeat seeds rather than one RepeatedStratifiedKFold stream make each
-    repeat regenerable on its own, and keep repeat 0 identical to make_splits/1.0.
+    repeat regenerable on its own, and keep ungrouped repeat 0 identical to make_splits/1.0.
 
     Args:
         dataset_dir: ``<datasets>/<dataset_id>`` holding ``<dataset_id>.csv`` and meta.yaml.
@@ -406,8 +413,10 @@ def main(argv: list[str] | None = None) -> int:
             "each CSV's sha256, row count and per-side class coverage against its manifest. "
             "Under split_mode=internal QProfiler ignores these files and splits with "
             "train_test_split itself.",
-            "Repeat r uses StratifiedKFold(shuffle=True, random_state=seed + r); repeat 0 "
-            "equals the make_splits/1.0 (splits/v1) assignment for the same seed.",
+            "For ungrouped data, repeat r uses StratifiedKFold(shuffle=True, "
+            "random_state=seed + r); repeat 0 equals the make_splits/1.0 (splits/v1) "
+            "assignment for the same seed. Grouped data uses StratifiedGroupKFold "
+            "with group codes shuffled by seed + r before splitting.",
             "validation=next_fold: the val rows of fold f are the test rows of fold "
             "(f + 1) mod k; tuning trials fit on train minus val and score on val, the "
             "chosen configuration is refit on train and tested once.",
