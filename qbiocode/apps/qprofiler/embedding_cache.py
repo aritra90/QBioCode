@@ -168,7 +168,7 @@ def embedding_spec(args, dataset, dataset_sha256, embedding, iteration, scaler_n
     Args:
         args: the run config (a dict or an OmegaConf DictConfig).
         dataset (str): the CSV's file name, as ``file_dataset`` lists it.
-        dataset_sha256 (str): :func:`file_sha256` of that CSV.
+        dataset_sha256 (str): :func:`file_sha256` of that dataset file.
         embedding (str): the embedding name, as the config writes it.
         iteration (int): the split, 1-based (the global iteration in manifest mode).
         scaler_name (str): what ``_validate_config`` resolved ``scaling`` to.
@@ -534,7 +534,12 @@ def _compose(config_path):
 
 
 def _dataset(loaded, path, index_col):
-    """``(X, y_encoded, sha256)`` of one CSV, read once however many configs name it."""
+    """``(X, y_encoded, sha256)`` of one dataset, read once however many configs name it.
+
+    Read through ``qprofiler._read_dataset``, so it accepts every input format QProfiler
+    does (``.csv``, ``.parquet``) and the cache key is the resolved path -- not the
+    extension -- exactly as the run's own loader sees it.
+    """
     from qbiocode.apps.qprofiler import qprofiler as qp
 
     key = (os.path.realpath(path), bool(index_col))
@@ -591,7 +596,7 @@ def precompute(config_paths, check_only=False, force=False, out=print):
             dataset_path = os.path.join(path_to_input, file)
             X, y_encoded, sha256 = _dataset(loaded, dataset_path, args.get("index_col", False))
             # Under split_mode: manifest the rows come from the dataset's manifest, which
-            # is checked against the CSV here exactly as the job will check it.
+            # is checked against the dataset file here exactly as the job will check it.
             manifest = (
                 qp._dataset_manifest(args, dataset_path, len(X), y_encoded, sha256)
                 if manifest_mode else None

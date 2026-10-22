@@ -16,7 +16,31 @@ embedding, model) where the untuned run does 5.
 This module implements the middle option: **search once on the first resample, reuse
 that configuration for the rest.** Cost falls from ``iter * n_trials`` to
 ``n_trials + (iter - 1)`` per arm -- at iter=5, n_trials_quantum=32, from 160 fits to 36
--- while every arm still runs at a searched configuration rather than a default one.
+-- while every arm still runs at a searched configuration rather than a default one::
+
+    freeze_quantum_params: False      # regular, and this module's default
+      split 1 -> optimise projection -> evaluate
+      split 2 -> optimise projection -> evaluate
+
+    freeze_quantum_params: True       # fast
+      split 1 -> optimise projection -> evaluate
+      split 2 -> reuse split 1's params -> evaluate
+
+What it does NOT freeze
+-----------------------
+Only the parameters a ``compute_<m>_opt`` function *searches*: the feature map and
+ansatz settings -- ``encoding``, ``reps``, ``entanglement``, ``data_map``, ``bandwidth``
+and the like. ``compute_pqk`` and ``compute_qpl`` fit classical heads on the resulting
+projection, and each of those heads runs its own ``RandomizedSearchCV`` inside every
+fit, on that split's projected training rows. Those searches are untouched by this
+module and still run independently on every resample.
+
+That split is deliberate rather than incidental. The expensive half of a projected-kernel
+fit is the projection -- one circuit simulation per row -- so freezing it is where the
+saving is; the head searches are a few hundred cheap fits on an already-projected matrix,
+and freezing them would buy little while reporting a head fitted at another resample's
+hyperparameters. A frozen payload therefore holds projection keys only, which
+``tests/test_projection_freeze_across_splits.py`` pins.
 
 What it costs scientifically
 ----------------------------

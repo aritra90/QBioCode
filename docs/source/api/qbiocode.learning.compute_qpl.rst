@@ -7,7 +7,7 @@ qbiocode.learning.compute_qpl module
 .. currentmodule:: qbiocode.learning.compute_qpl
 
 .. automodule:: qbiocode.learning.compute_qpl
-    :members: CATBOOST_AVAILABLE, TABPFN_MAX_CLASSES, XGBOOST_AVAILABLE, compute_qpl, compute_qpl_opt, create_catboost_model, create_lr_model, create_mlp_model, create_rf_model, create_svc_model, create_tabpfn_model, create_xgb_model
+    :members: CATBOOST_AVAILABLE, HEAD_CV, HEAD_N_ITER, QPL_DEFAULT_HEADS, QPL_HEADS, TABPFN_MAX_CLASSES, XGBOOST_AVAILABLE, build_head, compute_qpl, compute_qpl_opt, create_catboost_model, create_lr_model, create_mlp_model, create_rf_model, create_svc_model, create_tabpfn_model, create_xgb_model
     :undoc-members:
     :show-inheritance:
     :member-order: bysource
@@ -20,6 +20,7 @@ qbiocode.learning.compute_qpl module
     .. autosummary::
         :nosignatures:
 
+        build_head
         compute_qpl
         compute_qpl_opt
         create_catboost_model

@@ -809,10 +809,19 @@ class TestTheQplHeads:
         ``compute_qpl`` warns and drops an unavailable head, so defaulting TabPFN on
         would make every ordinary QPL run emit a warning about an extra the user never
         asked for.
+
+        Asserted on the declared head lists rather than on a source substring. The
+        substring version pinned the literal ``'["rf", "mlp", ...]'`` as it appeared in
+        the head loop, so it broke when the default list was lifted into a named
+        constant -- having pinned the spelling instead of the behaviour, exactly as
+        ``test_the_qpl_head_report_tolerates_an_unsearched_head`` below describes.
         """
-        source = inspect.getsource(sys.modules["qbiocode.learning.compute_qpl"])
-        assert '["rf", "mlp", "svc", "lr", "xgb", "catboost"]' in source
-        assert '"tabpfn"' in source, "tabpfn must still be selectable"
+        from qbiocode.learning.compute_qpl import QPL_DEFAULT_HEADS, QPL_HEADS
+
+        assert QPL_DEFAULT_HEADS == ("rf", "mlp", "svc", "lr", "xgb", "catboost")
+        assert "catboost" in QPL_DEFAULT_HEADS
+        assert "tabpfn" in QPL_HEADS, "tabpfn must still be selectable"
+        assert "tabpfn" not in QPL_DEFAULT_HEADS, "an optional extra is not a default"
 
     def test_the_catboost_head_pins_its_bootstrap_scheme(self):
         """Its grid varies ``subsample``, so an unpinned scheme breaks on multiclass."""
@@ -893,10 +902,25 @@ class TestTheQplHeads:
 
     @pytest.mark.parametrize("head", ["catboost", "tabpfn"])
     def test_an_unavailable_head_is_dropped_rather_than_fatal(self, head):
-        """One unusable head must not waste a projection that already cost real time."""
+        """One unusable head must not waste a projection that already cost real time.
+
+        Asserted on the head registry and the drop branch's condition rather than on the
+        ``elif method == ...`` chain the dispatch used to be: that chain is now a single
+        ``build_head`` call, so the substring version pinned an implementation shape
+        rather than the property that matters -- the head is still selectable, and an
+        install that cannot provide it drops that head alone.
+        """
+        from qbiocode.learning.compute_qpl import QPL_HEADS, build_head
+
+        assert head in QPL_HEADS, "the head must still be selectable"
+        # Still reachable through the one dispatch, whatever this install can load.
+        try:
+            assert build_head(head, 42) is not None
+        except ImportError:
+            pass  # that library is unusable here, which is the case being dropped
+        # The drop is per-head and leaves the rest of the list running.
         source = inspect.getsource(sys.modules["qbiocode.learning.compute_qpl"])
         assert f'classical_models = [m for m in classical_models if m != "{head}"]' in source
-        assert f'elif method == "{head}":' in source
 
 
 class TestTheSageSurrogate:

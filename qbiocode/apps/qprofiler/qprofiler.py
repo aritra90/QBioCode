@@ -100,6 +100,7 @@ from qbiocode.apps.qprofiler import embedding_cache as emb_cache
 from qbiocode.apps.qprofiler import resume
 from qbiocode.apps.qprofiler import split_manifest
 from qbiocode.evaluation import protocol
+from qbiocode.utils import dataset_io
 
 #: Config keys ``main`` reads unconditionally. Reported together rather than one
 #: KeyError at a time, so a hand-written config can be fixed in a single pass.
@@ -667,13 +668,19 @@ def _input_folder(args):
 
 
 def _input_files(args, path_to_input):
-    """The CSVs in ``path_to_input`` that ``file_dataset`` selects, in the order they run.
+    """The input datasets in ``path_to_input`` that ``file_dataset`` selects, in run order.
+
+    Every format :data:`qbiocode.utils.dataset_io.SUPPORTED_SUFFIXES` lists is
+    discoverable, so a folder of ``.parquet`` files is found exactly as a folder of
+    ``.csv`` files is. Discovery and reading consult that one list, which is what keeps a
+    file from being readable but invisible (a run that succeeds and profiles nothing).
 
     Raises:
         ValueError: if it selects none.
     """
+    available = dataset_io.dataset_files(path_to_input)
     if args['file_dataset'] == 'ALL':
-        input_files = [file for file in os.listdir(path_to_input) if file.endswith('csv')]
+        input_files = available
     else:
         # A single name given as a string (qprofiler_batchmode, a command-line override)
         # is matched exactly. `file in <str>` was a substring test, so 'art.csv' was also
@@ -681,12 +688,12 @@ def _input_files(args, path_to_input):
         wanted = args['file_dataset']
         if isinstance(wanted, str):
             wanted = [wanted]
-        input_files = [file for file in os.listdir(path_to_input) if file in wanted and file.endswith('csv')]
+        input_files = [file for file in available if file in wanted]
     if not input_files:
         # Previously this produced a successful run with no output whatsoever,
         # which reads exactly like a run whose models all silently failed.
         selector = (
-            "every .csv file" if args['file_dataset'] == 'ALL'
+            f"every {dataset_io.describe_supported()} file" if args['file_dataset'] == 'ALL'
             else f"file_dataset={args['file_dataset']!r}"
         )
         raise ValueError(
@@ -697,17 +704,17 @@ def _input_files(args, path_to_input):
 
 
 def _read_dataset(path, args, log=None):
-    """``(X, y, y_encoded)`` from one input CSV: the features, the label column as read,
-    and the labels ordinal-encoded to ``0 .. k-1``. The label is the last column."""
-    # Load data with optional index column support
-    if args.get('index_col', False):
-        # First column contains row names/IDs
-        rawdata = pd.read_csv(path, sep=r'\t|,', index_col=0)
-        if log is not None:
-            log.info(f"Loaded dataset with row names from first column")
-    else:
-        # Standard loading without index column
-        rawdata = pd.read_csv(path, sep=r'\t|,')
+    """``(X, y, y_encoded)`` from one input dataset: the features, the label column as
+    read, and the labels ordinal-encoded to ``0 .. k-1``. The label is the last column.
+
+    The file is read by :func:`qbiocode.utils.dataset_io.read_table`, which selects a
+    reader from the extension (``.csv`` or ``.parquet``) and normalises the result, so
+    everything below this line -- feature and label selection, encoding, and every
+    downstream stage -- is format-independent and unchanged.
+    """
+    rawdata = dataset_io.read_table(path, args=args)
+    if args.get('index_col', False) and log is not None:
+        log.info(f"Loaded dataset with row names from first column")
 
     X = rawdata.iloc[:, :-1].to_numpy()
     y = rawdata.iloc[:,-1:].to_numpy()

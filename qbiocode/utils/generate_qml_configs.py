@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from qbiocode.utils.dataset_io import dataset_files, read_table
+
 
 def generate_qml_experiment_configs(
     template_config_path: str,
@@ -204,9 +206,11 @@ def generate_qml_experiment_configs(
     config_idx = 1
 
     for data_dir in data_dirs:
-        # Get all CSV files in directory
-        csv_files = [f for f in os.listdir(data_dir) if f.endswith(".csv")]
-        csv_files.sort()
+        # Every input dataset in the directory, in whatever format QProfiler reads
+        # (.csv, .parquet) -- the generated configs name these as `file_dataset`, so
+        # discovering less here than the run itself would silently generate no config
+        # for a Parquet dataset. See qbiocode.utils.dataset_io.
+        csv_files = dataset_files(data_dir)
 
         # Remove previously used files
         csv_files = list(set(csv_files) - set(used_files))
@@ -230,7 +234,9 @@ def generate_qml_experiment_configs(
         for _, params in param_subset.iterrows():
             for csv_file in csv_files:
                 config_path = os.path.join(output_dir, f"exp_{config_idx}.yaml")
-                key = f"{params['method']}_{csv_file.replace('.csv', '')}"
+                # splitext, not a '.csv' replace: the latter left '.parquet' in the key,
+                # and so in the results directory name.
+                key = f"{params['method']}_{os.path.splitext(csv_file)[0]}"
 
                 # Create config from template
                 config = cfg_template.copy()
@@ -242,8 +248,10 @@ def generate_qml_experiment_configs(
                 config["hydra"]["run"] = config["hydra"].get("run", {})
                 config["hydra"]["run"]["dir"] = os.path.join("results", f"qmlgridsearch_{key}")
 
-                # Check if embedding should be 'none' based on feature count
-                df = pd.read_csv(os.path.join(data_dir, csv_file))
+                # Check if embedding should be 'none' based on feature count. Read
+                # through the shared loader so the count is the one the run will see,
+                # whatever format the dataset is stored in.
+                df = read_table(os.path.join(data_dir, csv_file))
                 orig_features = df.shape[1] - 1  # Subtract label column
 
                 if params["n_components"] >= orig_features:

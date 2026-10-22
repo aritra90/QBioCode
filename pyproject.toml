@@ -97,6 +97,13 @@ mps = [
     "quimb>=1.11",
     "cotengra>=0.7",
 ]
+# Parquet input datasets (qbiocode.utils.dataset_io). An extra rather than a base
+# dependency because a `.csv` dataset needs nothing beyond pandas, and `import qbiocode`
+# never imports pyarrow; `read_table` raises an ImportError naming this extra if a
+# `.parquet` dataset is read without it.
+parquet = [
+    "pyarrow>=14.0",
+]
 # TabPFN classical learner (qbiocode.learning.compute_tabpfn). An extra rather than a base
 # dependency because of its weight -- it brings torch's ecosystem plus mlx, lightgbm,
 # huggingface-hub and safetensors, and `import qbiocode` must not pull torch in. No API
@@ -153,7 +160,7 @@ dev = [
 ]
 # Union of every extra above. Keep in sync when adding to any tier.
 all = [
-    "qbiocode[apps,quvine,tabpfn,mps,docs,dev]",
+    "qbiocode[apps,quvine,tabpfn,mps,parquet,docs,dev]",
 ]
 
 [project.scripts]

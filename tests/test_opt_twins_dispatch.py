@@ -915,25 +915,25 @@ def test_the_default_head_list_is_what_this_file_assumes():
     noticed. That is exactly what happened: the list carried a seventh head, ``tabpfn``,
     that the default has never included, and every assertion built on it still passed.
 
-    Reading the default out of the source keeps the premise honest, and the QPL tests
+    Reading the default out of the library keeps the premise honest, and the QPL tests
     below now assert set equality against it so that a head which stops running fails too.
     Both halves are needed and neither substitutes for the other: equality catches a head
     vanishing from a run, and this test catches the constant drifting away from the
-    source. If someone adds a head to ``compute_qpl``, this one fails and points at the
+    library. If someone adds a head to ``compute_qpl``, this one fails and points at the
     constant above rather than letting six label assertions quietly cover one fewer model
     than they claim.
+
+    Read from ``QPL_DEFAULT_HEADS`` rather than scraped out of ``compute_qpl``'s source
+    with a regex. The regex matched ``classical_models = [...]`` anywhere in the function,
+    so once the default moved into a named constant it bound to the first *other*
+    assignment of that name instead -- the warn-and-drop list comprehension -- and
+    reported ``compute_qpl``'s default heads as
+    ``('m for m in classical_models if m != "xgb',)``. A premise pinned by a regex over
+    source is itself an unpinned premise.
     """
-    import inspect
-    import re
+    from qbiocode.learning.compute_qpl import QPL_DEFAULT_HEADS
 
-    # `qbiocode.learning.compute_qpl` is the re-exported FUNCTION, not the module of the
-    # same name, so inspect the function directly rather than reaching through a module.
-    from qbiocode.learning import compute_qpl
-
-    source = inspect.getsource(compute_qpl)
-    match = re.search(r"classical_models\s*=\s*\[([^\]]*)\]", source)
-    assert match, "compute_qpl no longer assigns a default classical_models list"
-    declared = tuple(name.strip().strip("\"'") for name in match.group(1).split(",") if name.strip())
+    declared = tuple(QPL_DEFAULT_HEADS)
 
     assert declared == DEFAULT_QPL_HEADS, (
         f"compute_qpl's default heads are {declared}, but this file assumes "

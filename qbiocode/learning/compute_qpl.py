@@ -5,6 +5,7 @@ import logging
 import math
 import time
 import warnings
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -56,6 +57,29 @@ _SEARCH_N_JOBS = min(os.cpu_count() or 1, 8)
 
 logger = logging.getLogger(__name__)
 
+#: How many candidates each searched head's ``RandomizedSearchCV`` draws, and over how
+#: many folds. Named rather than repeated per factory: the seven factories below used to
+#: spell ``n_iter=40, cv=5`` individually, so a head could silently drift from its
+#: siblings and a QPL run would be comparing heads on unequal budgets.
+HEAD_N_ITER = 40
+HEAD_CV = 5
+
+#: The downstream classical models QPL can fit on a quantum projection, in the order the
+#: default head list runs them. ``'tabpfn'`` is selectable but deliberately not a
+#: default; see :func:`compute_qpl`.
+#:
+#: This is the one place the set is written down. The dispatch used to be a seven-branch
+#: ``if/elif`` chain inside the head loop, with the valid names repeated as prose in two
+#: error messages and the default list repeated again -- four copies that had already
+#: drifted (the "Valid options" text named every head, including ones a given install
+#: cannot provide).
+QPL_HEADS = ("rf", "mlp", "svc", "lr", "xgb", "catboost", "tabpfn")
+
+#: What ``classical_models`` means when it is not given. Every head but TabPFN, which
+#: needs the optional ``[tabpfn]`` extra -- defaulting it on would make an ordinary
+#: install warn on every QPL run. Unchanged from the list this function has always used.
+QPL_DEFAULT_HEADS = ("rf", "mlp", "svc", "lr", "xgb", "catboost")
+
 # from qiskit.primitives import Sampler
 from functools import reduce
 
@@ -72,6 +96,7 @@ from qbiocode.evaluation.model_evaluation import (
     modeleval,
 )
 from qbiocode.learning.compute_pqk import _resolve_data_map
+from qbiocode.learning._grid import build_param_grid, to_plain
 from qbiocode.learning._tuning import (
     build_search_space,
     record_tuned_params,
@@ -91,11 +116,132 @@ from qbiocode.learning.compute_fold import (
 # optional extra is present costs neither the tabpfn import nor torch's OpenMP
 # runtime. See qbiocode.learning.compute_tabpfn.
 from qbiocode.learning.compute_tabpfn import (
+    TABPFN_DEFAULT_VERSION,
     TABPFN_MAX_CLASSES,
     _explain_weight_access_failure,
     _load_tabpfn_classifier,
+    resolve_model_path,
     tabpfn_is_available,
 )
+
+
+def _resolve_heads(classical_models):
+    """Validate and normalise the requested downstream models.
+
+    Accepts one name or several, so a config may write ``classical_models: svc`` as
+    well as ``['svc']``. Checked up front, before the quantum projection is computed:
+    an unknown name used to be warned about and skipped *inside* the head loop, which
+    meant a typo in the only requested head paid for the whole projection and then
+    raised "none of the requested classical models could be fitted", naming the typo
+    only in passing.
+
+    Args:
+        classical_models (list, tuple, str or None): What the caller asked for. None
+            means :data:`QPL_DEFAULT_HEADS`.
+
+    Returns:
+        list: The head names, in the order given.
+
+    Raises:
+        ValueError: If the list is empty, names an unknown head, or repeats one.
+    """
+    if classical_models is None:
+        return list(QPL_DEFAULT_HEADS)
+    # to_plain first: these come off OmegaConf, where a YAML list is a ListConfig that
+    # is not a `list`. A bare string is a one-head selection, not a sequence of letters.
+    classical_models = to_plain(classical_models)
+    if isinstance(classical_models, str):
+        classical_models = [classical_models]
+    if not isinstance(classical_models, (list, tuple, set, frozenset)):
+        raise ValueError(
+            f"classical_models must be a head name or a list of them, got "
+            f"{classical_models!r}. Valid heads: {list(QPL_HEADS)}."
+        )
+    # A set is accepted (the head loop has always iterated whatever it was handed) but
+    # sorted, because set iteration order is not the insertion order and the heads decide
+    # the order of the result rows. An unordered selection should at least be stable.
+    if isinstance(classical_models, (set, frozenset)):
+        classical_models = sorted(classical_models)
+    heads = [str(head) for head in classical_models]
+    if not heads:
+        raise ValueError(
+            f"classical_models is empty, so QPL has no downstream model to fit on the "
+            f"quantum projection. Name at least one of {list(QPL_HEADS)}, or leave it "
+            f"unset for the default {list(QPL_DEFAULT_HEADS)}."
+        )
+    unknown = [head for head in heads if head not in QPL_HEADS]
+    if unknown:
+        raise ValueError(
+            f"Unknown QPL downstream model(s) {unknown} in classical_models. Valid "
+            f"heads: {list(QPL_HEADS)}. The default is {list(QPL_DEFAULT_HEADS)}; "
+            f"'tabpfn' is selectable but needs the optional [tabpfn] extra."
+        )
+    # A repeat has nowhere to put its second result: every head writes one
+    # `results_<model>_<head>` column, and model_run's melt/pivot fold-up raises
+    # "Index contains duplicate entries, cannot reshape" on a duplicate -- after the
+    # projection and every head search had run. Same reasoning as model_run applies to
+    # args['model'].
+    duplicated = sorted({head for head in heads if heads.count(head) > 1})
+    if duplicated:
+        raise ValueError(
+            f"Duplicate QPL downstream model(s) {duplicated} in classical_models; each "
+            f"may be named at most once, because each writes one results column. "
+            f"Requested: {heads}."
+        )
+    return heads
+
+
+def _resolve_head_args(classical_models_args, heads):
+    """Validate the per-head override blocks and drop the ones no head will read.
+
+    Args:
+        classical_models_args (Mapping or None): ``{head: {param: values}}``.
+        heads (list): The selected heads, for the unused-block warning.
+
+    Returns:
+        dict: head -> its override mapping, for the selected heads only.
+
+    Raises:
+        ValueError: If a key is not a known head, or a block is not a mapping.
+    """
+    if not classical_models_args:
+        return {}
+    blocks = to_plain(classical_models_args)
+    if not isinstance(blocks, Mapping):
+        raise ValueError(
+            f"classical_models_args must map a head name to its settings, as in "
+            f"{{'svc': {{'C': [1, 10]}}}}, got {blocks!r}."
+        )
+    unknown = sorted(set(blocks) - set(QPL_HEADS))
+    if unknown:
+        raise ValueError(
+            f"classical_models_args names unknown QPL downstream model(s) {unknown}. "
+            f"Valid heads: {list(QPL_HEADS)}."
+        )
+    for head, block in blocks.items():
+        if not isinstance(block, Mapping):
+            raise ValueError(
+                f"classical_models_args[{head!r}] must be a mapping of settings, got "
+                f"{block!r}. For a searched head it replaces that head's "
+                f"hyperparameter grid, as in {{'C': [1, 10], 'kernel': ['rbf']}}."
+            )
+        # Build each searched head's grid now and throw the result away, so a malformed
+        # one -- a `{low, high}` range, which a RandomizedSearchCV cannot sample -- is
+        # reported before the quantum projection is computed rather than after. Without
+        # this the same ValueError still arrived, but from inside the head loop, having
+        # paid for the projection first. TabPFN's block is constructor settings rather
+        # than a grid, so there is nothing to build for it.
+        if head != "tabpfn" and block:
+            build_param_grid(f"qpl head {head!r}", block)
+    # A block for a head that is not running is silently dead otherwise, and the usual
+    # cause is a head missing from `classical_models` -- worth a line, not an error.
+    unused = sorted(set(blocks) - set(heads))
+    if unused:
+        logger.info(
+            "classical_models_args has blocks for %s, which are not in classical_models "
+            "%s, so they are not used.", unused, heads,
+        )
+    return {head: dict(blocks[head]) for head in heads if head in blocks}
 
 
 def compute_qpl(
@@ -115,6 +261,7 @@ def compute_qpl(
     data_map="unit",
     bandwidth=1.0,
     *,
+    classical_models_args=None,
     head_scoring=None,
     head_max_iter=None,
 ):
@@ -132,6 +279,36 @@ def compute_qpl(
     It leverages quantum computing to enhance feature extraction and classification performance on complex datasets.
     The function returns the performance results, including accuracy, F1-score, AUC, runtime, as well as model parameters, and other relevant metrics.
 
+    QPL is the generalised PQK: both project the rows through the same quantum feature
+    map, and where :func:`qbiocode.learning.compute_pqk.compute_pqk` then fits one SVC,
+    this fits a *configurable* set of downstream classical models and reports one row per
+    model, labelled ``<model>_<head>`` (``qpl_svc``, ``qpl_rf``, ``qpl_tabpfn``, ...).
+
+    **Two distinct optimisations, which should not be confused.** The projection itself
+    -- ``encoding``, ``reps``, ``entanglement``, ``data_map``, ``bandwidth`` -- is *not*
+    optimised here; this function runs it at whatever it is given.
+    :func:`compute_qpl_opt` is what searches those, with Optuna, scoring a candidate
+    projection by the mean tuning metric across the heads. Independently of that, each
+    downstream model *is* hyperparameter-optimised here, inside this one fit: every head
+    but TabPFN is a ``RandomizedSearchCV`` over its own model-specific grid (see
+    :func:`build_head`). So an untuned QPL run still tunes its downstream models; what
+    ``compute_qpl_opt`` adds is a search over the projection.
+
+    **The projection is computed once and reused by every head.** The expensive part --
+    one circuit simulation per row -- happens before the head loop is entered, and the
+    loop reads the resulting ``projections_train``/``projections_test`` arrays. Adding a
+    head costs one classical search, never another projection::
+
+                            quantum projection (once)
+                                      |
+                       ---------------+---------------
+                       |              |              |
+                      SVC            RF            TabPFN
+                       |              |              |
+                      tune           tune        (no search)
+                       |              |              |
+                    evaluate       evaluate       evaluate
+
     Args:
         X_train (np.ndarray): Training data features.
         X_test (np.ndarray): Test data features.
@@ -145,12 +322,27 @@ def compute_qpl(
         primitive (str): Primitive type to use, default is 'estimator'.
         entanglement (str): Entanglement strategy, default is 'linear'.
         reps (int): Number of repetitions for the feature map, default is 2.
-        classical_models (list): List of classical models to train on quantum projections.
-            Defaults to ``['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost']``. ``'tabpfn'`` is
-            also accepted but is deliberately absent from the default: it needs the
-            optional ``[tabpfn]`` extra, so defaulting it on would make every QPL run warn
-            in an ordinary install. Name it explicitly to use it. It needs no API token:
-            QBioCode pins the ungated ``v2`` weights.
+        classical_models (list or str): Which downstream classical models to fit on the
+            quantum projection -- one name or several, from :data:`QPL_HEADS`
+            (``'rf'``, ``'mlp'``, ``'svc'``, ``'lr'``, ``'xgb'``, ``'catboost'``,
+            ``'tabpfn'``). A bare string is accepted as a one-model list, so
+            ``classical_models: svc`` and ``['svc']`` mean the same thing. Each selected
+            model gets its own ``results_<model>_<head>`` row, and the projection is
+            computed once for all of them. Defaults to :data:`QPL_DEFAULT_HEADS`,
+            ``['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost']``. ``'tabpfn'`` is accepted
+            but deliberately absent from the default: it needs the optional ``[tabpfn]``
+            extra, so defaulting it on would make every QPL run warn in an ordinary
+            install. Name it explicitly to use it. It needs no API token -- QBioCode
+            pins the ungated ``v2`` weights.
+        classical_models_args (dict or None): Per-head overrides, ``{head: {...}}``.
+            Keyword-only. For a searched head the mapping *replaces* that head's default
+            hyperparameter grid, validated exactly as a ``gridsearch_<model>_args`` block
+            is (:func:`qbiocode.learning._grid.build_param_grid`), so a list is a list of
+            values to try, a bare scalar is a one-value list, and ``None``/``[]`` leaves
+            the estimator's own default in force. For the TabPFN head, which has no
+            grid, the mapping is its constructor settings (``model_version``,
+            ``n_estimators``, ...). A head not named here keeps its default grid, so
+            omitting this argument reproduces the shipped behaviour exactly.
         data_map (str or bool): How features become gate angles, as in
             :func:`qbiocode.learning.compute_pqk.compute_pqk`. ``'unit'`` (the default,
             and QPL's historical map) keeps every multiplicative factor of a feature at
@@ -161,7 +353,8 @@ def compute_qpl(
             (:func:`qbiocode.utils.qutils.apply_bandwidth`). Default 1.0, the unscaled
             map; any other value is part of the projection cache key.
         head_scoring (str or None): Metric every searched head's ``RandomizedSearchCV``
-            (40 candidates x 5 folds on the projections) picks its config by. None (the
+            (:data:`HEAD_N_ITER` candidates x :data:`HEAD_CV` folds on the projections)
+            picks its config by. None (the
             default) is sklearn's, each estimator's ``score`` (accuracy).
             ``compute_qpl_opt`` sets the run's tuning metric under ``split_mode:
             manifest``. The head searches are part of this one fit -- one trial of an
@@ -170,15 +363,23 @@ def compute_qpl(
             (the default) is libsvm's -1, no cap. No other head reads it.
 
     Returns:
-        modeleval (pd.DataFrame): A DataFrame containing evaluation metrics and model parameters for all models.
+        modeleval (pd.DataFrame): A DataFrame containing evaluation metrics and model
+        parameters for all models -- one ``results_<model>_<head>`` column per selected
+        downstream model.
 
     Raises:
-        ValueError: If ``data_map`` is not ``'unit'``, ``'qiskit'`` or a bool.
+        ValueError: If ``data_map`` is not ``'unit'``, ``'qiskit'`` or a bool; if
+            ``classical_models`` names an unknown model, is empty, or repeats a name; if
+            ``classical_models_args`` names an unknown model or is malformed; or if no
+            selected model could be fitted.
     """
 
     # Set default classical models if not provided
-    if classical_models is None:
-        classical_models = ["rf", "mlp", "svc", "lr", "xgb", "catboost"]
+    classical_models = _resolve_heads(classical_models)
+    # Validated here, with the head list, so a typo in a per-head block is reported
+    # before the projection is computed rather than after -- the projection is the
+    # expensive half, and an unknown head name is not worth paying for it to discover.
+    classical_models_args = _resolve_head_args(classical_models_args, classical_models)
 
     # Checked before the projection directory is created, so a typo leaves no trace.
     data_map = _resolve_data_map(data_map)
@@ -246,6 +447,22 @@ def compute_qpl(
     file_projection_test = os.path.join(
         projection_dir,
         "qpl_projection_" + data_key + "_" + feature_map_fingerprint + "_test.npy",
+    )
+
+    # Each file paired with the rows it holds, so the loops below never have to work out
+    # which split a path belongs to. They used to do that with `"train" in f_tr` -- on
+    # the WHOLE path, directory included -- so any projection directory whose path
+    # contained "train" (`~/runs/trained/`, a pytest tmp_path for a test whose name says
+    # "train", a dataset directory called "training_data") made the *test* file match the
+    # train branch and be filled with the TRAINING rows. The result is not a crash where
+    # the two splits differ in size -- it surfaces much later and somewhere else, as
+    # `ValueError: Found input variables with inconsistent numbers of samples` from
+    # inside a head's fit, naming neither the cache nor the path that caused it. Where
+    # they happen to be the same size it is worse: no error at all, and every head
+    # silently scored on its own training rows.
+    projection_targets = (
+        (file_projection_train, X_train),
+        (file_projection_test, X_test),
     )
 
     def _validate_projection_file(path, expected_len):
@@ -323,10 +540,10 @@ def compute_qpl(
                 entanglement=entanglement, backend=projection_backend,
                 data_map_func=data_map_func,
             )
-            for f_tr in [file_projection_train, file_projection_test]:
+            for f_tr, split in projection_targets:
                 if os.path.exists(f_tr):
                     continue
-                dat = X_train.copy() if "train" in f_tr else X_test.copy()
+                dat = split.copy()
                 projections = projector.project(
                     dat, progress_every=100, n_jobs=args.get("projection_n_jobs", 1)
                 )
@@ -368,13 +585,10 @@ def compute_qpl(
             # Set the global phase to 0 to avoid header size issues
             circuit.global_phase = 0
         
-            for f_tr in [file_projection_train, file_projection_test]:
+            for f_tr, split in projection_targets:
                 if not os.path.exists(f_tr):
                     projections = []
-                    if "train" in f_tr:
-                        dat = X_train.copy()
-                    else:
-                        dat = X_test.copy()
+                    dat = split.copy()
 
                     # Identity operator on all qubits
                     id = "I" * feat_dimension
@@ -515,11 +729,14 @@ def compute_qpl(
             )
             classical_models = [m for m in classical_models if m != "tabpfn"]
 
-    # If no models remain after filtering, raise an error
+    # If no models remain after filtering, raise an error. Unlike the up-front
+    # validation in `_resolve_heads`, reaching this means every NAMED head was dropped
+    # as unavailable, so the list is the thing to report rather than the valid names.
     if not classical_models:
         raise ValueError(
-            "No valid classical models specified. Please provide at least one model "
-            "from: 'rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost', 'tabpfn'"
+            f"Every requested QPL downstream model was dropped as unavailable, so there "
+            f"is nothing to fit on the quantum projection. See the warnings above for "
+            f"why each was skipped. Valid heads: {list(QPL_HEADS)}."
         )
 
     # `estimator`, not `model`, inside this loop. It used to rebind `model` -- the label
@@ -530,28 +747,22 @@ def compute_qpl(
     # None unless compute_qpl_opt asked for the tuning metric: RandomizedSearchCV's own
     # default, so an internal-mode head search is unchanged.
     scoring = head_scorer(head_scoring, args)
+    # Every head reads the SAME `projections_train`/`projections_test` computed above.
+    # The loop builds and fits one downstream model per iteration and never touches the
+    # projection path, which is what makes a multi-head run cost one projection.
     for method in classical_models:
-        if method == "rf":
-            estimator = create_rf_model(args["seed"], scoring=scoring)
-        elif method == "svc":
-            estimator = create_svc_model(args["seed"], scoring=scoring, max_iter=head_max_iter)
-        elif method == "mlp":
-            estimator = create_mlp_model(args["seed"], scoring=scoring)
-        elif method == "lr":
-            estimator = create_lr_model(args["seed"], scoring=scoring)
-        elif method == "xgb":
-            estimator = create_xgb_model(args["seed"], scoring=scoring)
-        elif method == "catboost":
-            estimator = create_catboost_model(args["seed"], scoring=scoring)
-        elif method == "tabpfn":
-            estimator = create_tabpfn_model(args["seed"])
-        else:
-            warnings.warn(
-                f"Unknown model type '{method}' skipped. Valid options: 'rf', 'mlp', "
-                f"'svc', 'lr', 'xgb', 'catboost', 'tabpfn'",
-                UserWarning,
-            )
-            continue
+        # One dispatch for every head, in place of the seven-branch if/elif this used to
+        # be: `build_head` owns which estimator and which model-specific grid each name
+        # means, so a head cannot be added to QPL_HEADS and then silently fall through
+        # to the unknown-name branch. `max_iter` is read by the svc head alone and
+        # `search_args` is empty unless the config overrode that head's grid.
+        estimator = build_head(
+            method,
+            args["seed"],
+            scoring=scoring,
+            max_iter=head_max_iter,
+            search_args=classical_models_args.get(method),
+        )
 
         # Built from the `model` label rather than hardcoded to "qpl_". The hardcoded
         # form threw away the argument, so `compute_qpl_opt` passing model="qpl_opt" had
@@ -611,6 +822,12 @@ def compute_qpl(
             hyperparameters["head_scoring"] = head_scoring
         if head_max_iter is not None and method == "svc":
             hyperparameters["head_max_iter"] = head_max_iter
+        # Only for a head whose grid (or TabPFN's settings) the config replaced, so a
+        # default run's rows are byte-identical to earlier ones. Recorded because
+        # `best_params` alone cannot say what was searched to find it: a narrowed grid
+        # and the default grid can report the same winner for very different reasons.
+        if classical_models_args.get(method):
+            hyperparameters["head_search_args"] = classical_models_args[method]
         model_params = hyperparameters
 
         model_res.append(
@@ -644,132 +861,267 @@ def compute_qpl(
     return model_res
 
 
-def create_xgb_model(seed, scoring=None):
-    # Initialize the XGBoost Classifier
-    if not XGBOOST_AVAILABLE:
-        raise ImportError(
-            "XGBoost is not properly installed or configured.\n"
-            f"Error: {_XGBOOST_ERROR}\n\n"
-            "On macOS, you may need to install OpenMP:\n"
-            "  brew install libomp\n\n"
-            "Then reinstall XGBoost:\n"
-            "  pip install --force-reinstall xgboost\n\n"
-            "See installation documentation for more details."
-        )
-    # random_state=seed, like every sibling create_*_model here: the search grid
-    # below varies `subsample` and `colsample_bytree`, both of which sample rows and
-    # columns at random, so an unseeded estimator made this model irreproducible even
-    # though the search itself was seeded.
-    # n_jobs=1 because the RandomizedSearchCV below runs several fits at once. sklearn's
-    # own estimators get their thread pools limited inside a joblib worker by
-    # threadpoolctl; XGBoost drives its own OpenMP pool and does not, so every worker
-    # would otherwise claim every core at once. Unpinned on a 128-core host that
-    # oversubscribes by the worker count and the search is either unusably slow or killed
-    # outright by the OOM reaper. One thread per fit keeps the outer parallelism, which is
-    # the useful one -- see _SEARCH_N_JOBS for the cap on how many workers that is.
-    xgb = XGBClassifier(  # type: ignore
-        objective="binary:logistic", eval_metric="logloss", random_state=seed, n_jobs=1
-    )
+def _head_search_spaces():
+    """Each head's default hyperparameter grid, name -> {param: values}.
 
-    xgb_param_distributions = {
-        "n_estimators": [100, 200, 300],
-        "learning_rate": [0.01, 0.1, 0.2],
-        "max_depth": [3, 5, 7],
-        "subsample": [0.7, 0.8, 1.0],
-        "colsample_bytree": [0.7, 0.8, 1.0],
-        "min_child_weight": [1, 3, 5],
+    The grids every ``create_<head>_model`` below has always searched, lifted out so
+    that :func:`build_head` can hand them to the library's shared candidate validation
+    (:func:`qbiocode.learning._grid.build_param_grid`) and so a config can override one
+    per head. A function rather than a module constant because the random-forest entry
+    builds numpy ranges, and a mutable default shared across calls is a trap.
+
+    TabPFN is absent on purpose and has no grid: its weights are pretrained and frozen,
+    so it exposes inference settings rather than training hyperparameters. See
+    :func:`create_tabpfn_model`.
+    """
+    return {
+        "rf": {
+            "n_estimators": np.arange(100, 1000, 100),
+            "max_depth": np.arange(5, 20),
+            "min_samples_split": np.arange(2, 10),
+            "min_samples_leaf": np.arange(1, 5),
+            "bootstrap": [True, False],
+        },
+        "mlp": {
+            "hidden_layer_sizes": [(128, 64, 32, 10), (64, 32, 10), (128, 64, 32)],
+            "activation": ["identity", "logistic", "tanh", "relu"],
+            "solver": ["lbfgs", "sgd", "adam"],
+            "alpha": [0.00005, 0.0005],
+        },
+        "svc": {
+            "C": [0.1, 1, 10, 100],
+            "gamma": [0.001, 0.01, 0.1, 1],
+            "kernel": ["linear", "rbf", "poly", "sigmoid"],
+        },
+        "lr": {
+            "C": [0.001, 0.01, 0.1, 1, 10, 100],
+            "penalty": ["l1", "l2"],
+            "solver": ["liblinear", "saga"],
+        },
+        "xgb": {
+            "n_estimators": [100, 200, 300],
+            "learning_rate": [0.01, 0.1, 0.2],
+            "max_depth": [3, 5, 7],
+            "subsample": [0.7, 0.8, 1.0],
+            "colsample_bytree": [0.7, 0.8, 1.0],
+            "min_child_weight": [1, 3, 5],
+        },
+        "catboost": {
+            "iterations": [100, 200, 300],
+            "learning_rate": [0.01, 0.1, 0.2],
+            "depth": [3, 5, 7],
+            "l2_leaf_reg": [1.0, 3.0, 9.0],
+            "subsample": [0.7, 0.8, 1.0],
+        },
     }
 
-    # Initialize RandomizedSearchCV
-    xgb_model = RandomizedSearchCV(
-        estimator=xgb,
-        param_distributions=xgb_param_distributions,
-        n_iter=40,
-        cv=5,
+
+def _head_estimator(head, seed, max_iter=None):
+    """The unfitted estimator a searched head wraps, with its non-searched settings.
+
+    The per-head constructor settings that are deliberately NOT hyperparameters: the
+    seed, and the thread and quiet pins whose reasons are given at each branch. Split
+    out from the grid so :func:`build_head` can pair any grid with the right estimator.
+    """
+    if head == "rf":
+        return RandomForestClassifier(random_state=seed)
+    if head == "mlp":
+        return MLPClassifier(random_state=seed)
+    if head == "svc":
+        # max_iter only when given, so the default head is unchanged.
+        return (
+            SVC(random_state=seed) if max_iter is None
+            else SVC(random_state=seed, max_iter=max_iter)
+        )
+    if head == "lr":
+        return LogisticRegression(random_state=seed, max_iter=1000)
+    if head == "xgb":
+        if not XGBOOST_AVAILABLE:
+            raise ImportError(
+                "XGBoost is not properly installed or configured.\n"
+                f"Error: {_XGBOOST_ERROR}\n\n"
+                "On macOS, you may need to install OpenMP:\n"
+                "  brew install libomp\n\n"
+                "Then reinstall XGBoost:\n"
+                "  pip install --force-reinstall xgboost\n\n"
+                "See installation documentation for more details."
+            )
+        # random_state=seed, like every sibling head: the grid varies `subsample` and
+        # `colsample_bytree`, both of which sample rows and columns at random, so an
+        # unseeded estimator made this model irreproducible even though the search
+        # itself was seeded.
+        # n_jobs=1 because the RandomizedSearchCV below runs several fits at once.
+        # sklearn's own estimators get their thread pools limited inside a joblib worker
+        # by threadpoolctl; XGBoost drives its own OpenMP pool and does not, so every
+        # worker would otherwise claim every core at once. Unpinned on a 128-core host
+        # that oversubscribes by the worker count and the search is either unusably slow
+        # or killed outright by the OOM reaper. One thread per fit keeps the outer
+        # parallelism, which is the useful one -- see _SEARCH_N_JOBS for its cap.
+        return XGBClassifier(  # type: ignore
+            objective="binary:logistic", eval_metric="logloss",
+            random_state=seed, n_jobs=1,
+        )
+    if head == "catboost":
+        if not CATBOOST_AVAILABLE:
+            raise ImportError(
+                "CatBoost is not properly installed or configured.\n"
+                f"Error: {_CATBOOST_ERROR}\n\n"
+                "CatBoost is a core QBioCode dependency, so this is a broken install. "
+                "Reinstall it with:\n"
+                "  pip install --force-reinstall catboost"
+            )
+        # `bootstrap_type` is pinned to 'Bernoulli' rather than left unset. The grid
+        # varies `subsample`, which CatBoost accepts under Bernoulli/MVS/Poisson but
+        # rejects under the Bayesian bootstrap -- and Bayesian is exactly what it
+        # defaults to once the target has more than two classes. Unpinned, this head
+        # would work on a binary projection and raise CatBoostError on a multiclass one.
+        #
+        # `allow_writing_files=False` keeps every fit from dropping a `catboost_info/`
+        # directory into the working directory; `verbose=False` silences the
+        # per-iteration training log. The search fits several of these at once, so both
+        # matter more here than in a single fit.
+        #
+        # `thread_count=1` for the same reason xgb pins `n_jobs=1`: CatBoost manages its
+        # own thread pool, which joblib cannot see and threadpoolctl does not limit.
+        #
+        # random_state=seed because the grid varies `subsample`, which samples at random.
+        return CatBoostClassifier(  # type: ignore
+            random_state=seed,
+            bootstrap_type="Bernoulli",
+            verbose=False,
+            allow_writing_files=False,
+            thread_count=1,
+        )
+    raise ValueError(
+        f"Unknown QPL head {head!r}. Valid heads: {list(QPL_HEADS)}."
+    )
+
+
+def build_head(head, seed, scoring=None, max_iter=None, search_args=None):
+    """The downstream model for one QPL head, searched over its own hyperparameters.
+
+    Every head but TabPFN is a ``RandomizedSearchCV`` over that head's own grid --
+    :data:`HEAD_N_ITER` candidates over :data:`HEAD_CV` folds of the quantum
+    projection. Which hyperparameters those are is model-specific and comes from
+    :func:`_head_search_spaces`, unless ``search_args`` overrides it.
+
+    An override goes through :func:`qbiocode.learning._grid.build_param_grid`, the same
+    validation every classical ``compute_*_opt`` uses, so a QPL head and a standalone
+    model reject the same malformed block with the same message: a ``{low, high}``
+    range (which only the Optuna engine can sample, and a ``RandomizedSearchCV`` cannot)
+    is refused rather than passed to the estimator as a literal value, a bare scalar is
+    accepted as a one-value list, and a key set to ``None`` or ``[]`` means "not
+    searched" and leaves the estimator's default in force.
+
+    Args:
+        head (str): One of :data:`QPL_HEADS`.
+        seed (int or None): ``random_state`` of both the estimator and the search.
+        scoring (str, callable or None): What the search selects on. ``None`` (the
+            default) is sklearn's, each estimator's ``score`` (accuracy).
+        max_iter (int or None): libsvm iteration cap, read by the ``svc`` head only.
+        search_args (Mapping or None): Replaces that head's default grid, as
+            ``{param: values}``. ``None`` or empty keeps the default grid, so the
+            shipped behaviour is unchanged.
+
+    Returns:
+        A ``RandomizedSearchCV``, or for ``'tabpfn'`` a bare classifier (see
+        :func:`create_tabpfn_model`).
+
+    Raises:
+        ImportError: If the head's library is unusable -- ``compute_qpl`` filters those
+            heads out beforehand, so reaching this means a direct call.
+        ValueError: If ``head`` is not a known head, or ``search_args`` is malformed.
+    """
+    if head == "tabpfn":
+        # No search: the weights are frozen, so there are no training hyperparameters
+        # to vary. `search_args` for this head is its own constructor settings.
+        return create_tabpfn_model(seed, **dict(search_args or {}))
+
+    estimator = _head_estimator(head, seed, max_iter=max_iter)
+    search_args = dict(search_args or {})
+    if search_args:
+        # `gridsearch_qpl_heads_args.<head>`, so the message names the block to edit.
+        # `build_param_grid` and not `build_search_space`: the head searches are
+        # RandomizedSearchCV, which enumerates values and cannot sample a range.
+        distributions = build_param_grid(f"qpl head {head!r}", search_args)
+    else:
+        distributions = _head_search_spaces()[head]
+
+    return RandomizedSearchCV(
+        estimator=estimator,
+        param_distributions=distributions,
+        n_iter=HEAD_N_ITER,
+        cv=HEAD_CV,
         random_state=seed,
         n_jobs=_SEARCH_N_JOBS,
         # None (the default) is the estimator's own score, accuracy; see compute_qpl.
         scoring=scoring,
     )
 
-    return xgb_model
+
+def create_xgb_model(seed, scoring=None):
+    """The searched XGBoost head. See :func:`build_head`, which this delegates to."""
+    return build_head("xgb", seed, scoring=scoring)
 
 
 def create_catboost_model(seed, scoring=None):
-    """A searched CatBoost head, matching how the other tree-based heads are built.
+    """The searched CatBoost head. See :func:`build_head`, which this delegates to.
 
-    Two CatBoost-specific points:
+    Three CatBoost-specific points, all applied by :func:`_head_estimator`:
 
     * ``bootstrap_type`` is pinned to ``'Bernoulli'`` rather than left unset. The grid
-      below varies ``subsample``, which CatBoost accepts under Bernoulli/MVS/Poisson
-      but rejects under the Bayesian bootstrap -- and Bayesian is exactly what it
+      varies ``subsample``, which CatBoost accepts under Bernoulli/MVS/Poisson but
+      rejects under the Bayesian bootstrap -- and Bayesian is exactly what it
       defaults to once the target has more than two classes. Unpinned, this head would
       work on a binary projection and raise ``CatBoostError`` on a multiclass one.
 
     * ``allow_writing_files=False`` keeps every fit from dropping a ``catboost_info/``
       directory into the working directory; ``verbose=False`` silences the
-      per-iteration training log. The search below fits several of these at once, so
+      per-iteration training log. The search fits several of these at once, so
       both matter more here than in a single fit.
 
     * ``thread_count=1`` for the same reason ``create_xgb_model`` pins ``n_jobs=1``:
       CatBoost manages its own thread pool, which joblib cannot see and threadpoolctl
       does not limit, so unpinned every parallel worker would claim every core.
     """
-    if not CATBOOST_AVAILABLE:
-        raise ImportError(
-            "CatBoost is not properly installed or configured.\n"
-            f"Error: {_CATBOOST_ERROR}\n\n"
-            "CatBoost is a core QBioCode dependency, so this is a broken install. "
-            "Reinstall it with:\n"
-            "  pip install --force-reinstall catboost"
-        )
-    # random_state=seed for the same reason as create_xgb_model: the grid varies
-    # `subsample` and `rsm`, both of which sample at random.
-    catboost = CatBoostClassifier(  # type: ignore
-        random_state=seed,
-        bootstrap_type="Bernoulli",
-        verbose=False,
-        allow_writing_files=False,
-        thread_count=1,
-    )
-
-    catboost_param_distributions = {
-        "iterations": [100, 200, 300],
-        "learning_rate": [0.01, 0.1, 0.2],
-        "depth": [3, 5, 7],
-        "l2_leaf_reg": [1.0, 3.0, 9.0],
-        "subsample": [0.7, 0.8, 1.0],
-    }
-
-    # Initialize RandomizedSearchCV
-    catboost_model = RandomizedSearchCV(
-        estimator=catboost,
-        param_distributions=catboost_param_distributions,
-        n_iter=40,
-        cv=5,
-        random_state=seed,
-        n_jobs=_SEARCH_N_JOBS,
-        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
-        scoring=scoring,
-    )
-
-    return catboost_model
+    return build_head("catboost", seed, scoring=scoring)
 
 
-def create_tabpfn_model(seed):
+def create_tabpfn_model(seed, model_version=TABPFN_DEFAULT_VERSION, model_path="auto",
+                        **settings):
     """A bare TabPFN head -- the only one here that is not wrapped in a search.
 
-    Every sibling factory returns a ``RandomizedSearchCV`` because its estimator has
-    training hyperparameters worth searching. TabPFN has none: the weights are
-    pretrained and frozen, ``fit`` only memorises the training rows, and what it
-    exposes are inference settings that move accuracy very little. Wrapping it as the
-    others are would cost ``n_iter * cv`` transformer forward passes -- 200 at the
+    Every sibling head is a ``RandomizedSearchCV`` because its estimator has training
+    hyperparameters worth searching. TabPFN has none: the weights are pretrained and
+    frozen, ``fit`` only memorises the training rows, and what it exposes are
+    inference settings that move accuracy very little. Wrapping it as the others are
+    would cost ``HEAD_N_ITER * HEAD_CV`` transformer forward passes -- 200 at the
     settings used above -- per projection, per embedding, per split, to choose between
     near-identical candidates. Running it once at its defaults is both the honest
     configuration and the affordable one, which is rather the point of the model.
 
+    ``model_path`` is resolved through
+    :func:`qbiocode.learning.compute_tabpfn.resolve_model_path` rather than left at
+    upstream's ``'auto'``. That matters for more than tidiness: upstream's ``'auto'``
+    resolves to its own default version, which is ``v3`` -- whose weights are
+    non-commercial, non-production, and reachable only after an interactive licence
+    acceptance. So this head used to ignore QBioCode's pinned ``v2`` and reach for a
+    gated checkpoint, which either failed with a licence error after the quantum
+    projection had already been paid for, or silently ran a differently-licensed model
+    than ``compute_tabpfn`` did on the same data. The two now agree.
+
     The caller reads ``best_params_`` off the returned object; ``compute_qpl`` falls
     back to ``get_params()`` for exactly this head.
+
+    Args:
+        seed (int or None): ``random_state`` of the classifier.
+        model_version (str): Which pretrained checkpoint to pin. Defaults to
+            QBioCode's :data:`~qbiocode.learning.compute_tabpfn.TABPFN_DEFAULT_VERSION`,
+            the only one whose weights permit commercial use; selecting another warns.
+        model_path (str): ``'auto'`` resolves from ``model_version``; an explicit path
+            wins and is the way to run fully offline.
+        **settings: Any other ``TabPFNClassifier`` inference setting, passed through --
+            how ``classical_models_args: {tabpfn: {...}}`` reaches this head.
 
     Raises:
         ImportError: If the optional ``[tabpfn]`` extra is absent. ``compute_qpl``
@@ -777,110 +1129,34 @@ def create_tabpfn_model(seed):
             this means the factory was called directly.
     """
     classifier_cls = _load_tabpfn_classifier()
-    return classifier_cls(random_state=seed)
+    return classifier_cls(
+        random_state=seed,
+        model_path=resolve_model_path(model_path, model_version),
+        **settings,
+    )
 
 
 def create_lr_model(seed, scoring=None):
-    # Initialize the Logistic Regression Classifier
-    lr = LogisticRegression(random_state=seed, max_iter=1000)
-
-    lr_param_distributions = {
-        "C": [0.001, 0.01, 0.1, 1, 10, 100],
-        "penalty": ["l1", "l2"],
-        "solver": ["liblinear", "saga"],
-    }
-
-    # Initialize RandomizedSearchCV
-    lr_model = RandomizedSearchCV(
-        estimator=lr,
-        param_distributions=lr_param_distributions,
-        n_iter=40,
-        cv=5,
-        random_state=seed,
-        n_jobs=_SEARCH_N_JOBS,
-        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
-        scoring=scoring,
-    )
-
-    return lr_model
+    """The searched logistic-regression head. See :func:`build_head`."""
+    return build_head("lr", seed, scoring=scoring)
 
 
 def create_rf_model(seed, scoring=None):
-    # Initialize the Random Forest Classifier
-    rf = RandomForestClassifier(random_state=seed)
-
-    rf_param_distributions = {
-        "n_estimators": np.arange(100, 1000, 100),
-        "max_depth": np.arange(5, 20),
-        "min_samples_split": np.arange(2, 10),
-        "min_samples_leaf": np.arange(1, 5),
-        "bootstrap": [True, False],
-    }
-
-    # Initialize RandomizedSearchCV
-    rf_model = RandomizedSearchCV(
-        estimator=rf,
-        param_distributions=rf_param_distributions,
-        n_iter=40,
-        cv=5,
-        random_state=seed,
-        n_jobs=_SEARCH_N_JOBS,
-        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
-        scoring=scoring,
-    )
-
-    return rf_model
+    """The searched random-forest head. See :func:`build_head`."""
+    return build_head("rf", seed, scoring=scoring)
 
 
 def create_mlp_model(seed, scoring=None):
-    mlp_param_distributions = {
-        "hidden_layer_sizes": [(128, 64, 32, 10), (64, 32, 10), (128, 64, 32)],
-        "activation": ["identity", "logistic", "tanh", "relu"],
-        "solver": ["lbfgs", "sgd", "adam"],
-        "alpha": [0.00005, 0.0005],
-    }
-
-    # Initialize the MLP Classifier
-    mlp = MLPClassifier(random_state=seed)
-
-    # Initialize RandomizedSearchCV
-    mlp_model = RandomizedSearchCV(
-        estimator=mlp,
-        param_distributions=mlp_param_distributions,
-        n_iter=40,
-        cv=5,
-        random_state=seed,
-        n_jobs=_SEARCH_N_JOBS,
-        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
-        scoring=scoring,
-    )
-
-    return mlp_model
+    """The searched MLP head. See :func:`build_head`."""
+    return build_head("mlp", seed, scoring=scoring)
 
 
 def create_svc_model(seed, scoring=None, max_iter=None):
-    svc_param_distributions = {
-        "C": [0.1, 1, 10, 100],
-        "gamma": [0.001, 0.01, 0.1, 1],
-        "kernel": ["linear", "rbf", "poly", "sigmoid"],
-    }
+    """The searched SVC head. See :func:`build_head`.
 
-    # Initialize the SVC. max_iter only when given, so the default head is unchanged.
-    svc = SVC(random_state=seed) if max_iter is None else SVC(random_state=seed, max_iter=max_iter)
-
-    # Initialize RandomizedSearchCV
-    svc_model = RandomizedSearchCV(
-        estimator=svc,
-        param_distributions=svc_param_distributions,
-        n_iter=40,
-        cv=5,
-        random_state=seed,
-        n_jobs=_SEARCH_N_JOBS,
-        # None (the default) is the estimator's own score, accuracy; see compute_qpl.
-        scoring=scoring,
-    )
-
-    return svc_model
+    ``max_iter`` caps libsvm's iterations; None (the default) is libsvm's -1, no cap.
+    """
+    return build_head("svc", seed, scoring=scoring, max_iter=max_iter)
 
 def compute_qpl_opt(
     X_train,
@@ -903,6 +1179,7 @@ def compute_qpl_opt(
     data_map=None,
     bandwidth=None,
     *,
+    classical_models_args=None,
     n_trials=10,
     validation_split=0.25,
     validation=None,
@@ -923,6 +1200,16 @@ def compute_qpl_opt(
     ``tune_quantum: True``. Tuning against a real device is refused unless
     ``allow_hardware_tuning: True`` -- every trial would be a queued job.
 
+    **Across splits.** With ``freeze_quantum_params: True`` the projection search runs on
+    the first resample only and its winner is reused by the rest, cutting the cost from
+    ``iter * n_trials`` to ``n_trials + (iter - 1)``; ``False`` (the key's own default)
+    searches the projection on every split, each on its own training rows. Only the
+    *projection* is frozen: each downstream model's own ``RandomizedSearchCV`` still runs
+    on every split, and a reusing split projects its own rows through the frozen feature
+    map rather than reusing the first split's projected features. See
+    :mod:`qbiocode.learning._param_cache`, which also explains why a frozen arm's later
+    scores are optimistic rather than conservative.
+
     Args:
         X_train (array-like): Training data features. Split again internally to score
             candidates; the final model is refitted on all of it.
@@ -942,13 +1229,21 @@ def compute_qpl_opt(
         bandwidth (list or dict): Input scales to search (see :func:`compute_qpl`). None
             leaves it at 1.0.
             None leaves it at the default.
-        classical_models (list, optional): Which classical heads to fit on the quantum
-            projection. **Not** a hyperparameter to search -- it selects which models
-            run, so it is a list of heads rather than a list of candidate values, and
-            every trial fits all of them. Forwarded to ``compute_qpl`` unchanged, so
-            None means its default six heads. ``model_run`` fills this in from
-            ``qpl_args``, the same block the untuned path reads, so turning
+        classical_models (list, optional): Which downstream classical models to fit on
+            the quantum projection. **Not** a hyperparameter to search -- it selects
+            which models run, so it is a list of heads rather than a list of candidate
+            values, and every trial fits all of them. Forwarded to ``compute_qpl``
+            unchanged, so None means its default six heads. ``model_run`` fills this in
+            from ``qpl_args``, the same block the untuned path reads, so turning
             ``tune_quantum`` on does not change which heads run.
+        classical_models_args (dict, optional): Per-head hyperparameter grids, as in
+            :func:`compute_qpl`. Also **not** searched, and passed to every trial for
+            the same reason ``classical_models`` is: the objective is the mean tuning
+            metric across the heads, so a trial whose heads were searched over different
+            grids than the refit's would be scoring a different pipeline. Note the two
+            levels this creates -- the outer Optuna study searches the *projection*,
+            while each head's own ``RandomizedSearchCV`` searches that *downstream
+            model*, once per trial.
         n_trials (int): Trial budget, default 10 -- an order of magnitude below the
             classical default because each trial is a quantum fit. Lowered
             automatically when the configured values describe fewer combinations.
@@ -991,14 +1286,20 @@ def compute_qpl_opt(
     # trials as well as to the final fit is what keeps the two consistent: the objective
     # is the MEAN tuning_metric across heads (see _tuning._metric_of), so scoring candidates
     # on the default six while the final fit ran a different set would have chosen the
-    # projection that suited heads the config excluded.
+    # projection that suited heads the config excluded. `classical_models_args` rides
+    # along for the same reason: it changes what each head's own search covers, so a
+    # trial without it would be scoring a different downstream pipeline than the refit.
     fixed = {"classical_models": classical_models}
+    if classical_models_args is not None:
+        fixed["classical_models_args"] = classical_models_args
     compute_fn = compute_qpl
     trial_frames = None
     if validation is not None:
         # An explicit head list wins; None falls back to the configured one (qpl_args),
         # which default_params carries, rather than to compute_qpl's six.
         explicit = {} if classical_models is None else {"classical_models": classical_models}
+        if classical_models_args is not None:
+            explicit["classical_models_args"] = classical_models_args
         fixed = fold_fixed("qpl", candidates, default_params,
                            function_param_names(compute_qpl), explicit)
         # Every searched head's hidden 40 x 5 RandomizedSearchCV picks by the tuning

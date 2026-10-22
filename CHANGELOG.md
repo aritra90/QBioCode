@@ -8,6 +8,167 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Parquet input datasets, wherever a CSV is accepted
+
+An input dataset may now be stored as `.csv` or `.parquet`, named with its extension. The
+reader is selected from the extension and the two are interchangeable everywhere
+`file_dataset` is -- one name, a list, mixed formats in one list, or `'ALL'`. The same
+data in either format gives the same features, labels, splits and scores, through every
+downstream path (QPL, PQK, the classical learners, the quantum learners), which is
+asserted rather than asserted-of: the new tests run real QPL/PQK/classical fits from both
+formats and compare.
+
+- **`qbiocode.utils.dataset_io`** is the one place a dataset file becomes a frame
+  (`read_table`) and the one place a folder is scanned for datasets (`dataset_files`).
+  Both read the same `SUPPORTED_SUFFIXES`, so a format cannot be readable but
+  undiscoverable -- which would produce a run that succeeds and profiles nothing. Both are
+  exported from `qbiocode.utils`.
+- **The CSV-only assumptions are gone from six places**, all of which now defer to that
+  module: `qprofiler._read_dataset` (was a bare `pd.read_csv`), `qprofiler._input_files`
+  (was `endswith('csv')`, including its "every .csv file" error text), and four
+  `endswith('csv')` filters in `qprofiler_batchmode`. `embedding_cache` loads through
+  `_read_dataset`, so it followed without a change. Already format-agnostic and left
+  alone: `_data_key`, `manifest_path` and `file_sha256` (all extension-stripping or
+  byte-level).
+- **`pip install "qbiocode[parquet]"`** (new extra, mirrored in
+  `requirements/requirements-parquet.txt`) provides the engine. A `.csv` needs nothing
+  beyond pandas and `import qbiocode` never imports pyarrow, so an install without the
+  extra behaves exactly as before; reading a `.parquet` without it raises an error naming
+  the extra and the file, rather than pandas' own "Unable to find a usable engine" over a
+  dozen package names.
+- **Unsupported extensions are refused** with a message naming the file and listing the
+  formats that work. `.tsv`/`.txt` are deliberately *not* added: discovery has always
+  matched `.csv` alone, so such a file was silently skipped, and reading them now would
+  start consuming files existing runs ignore. A tab-separated file still reads under a
+  `.csv` name, as the CSV reader's separator has always been the regex `\t|,`.
+
+**Two format differences are normalised at the reader** so they cannot reach the pipeline:
+
+- **Typed columns.** Parquet stores a dtype per column, so a nullable `Int64`/`Float64`/
+  `boolean` column reads straight back as one and `DataFrame.to_numpy()` over it yields an
+  **object** array -- which reaches the scalers and the quantum feature maps without
+  complaint, far from anything that names the file. CSV is untyped and cannot produce one.
+  Numeric extension dtypes are converted to the numpy dtypes the CSV parser would have
+  given, including an integer column with nulls becoming `float64` exactly as an empty CSV
+  cell does. Text and categorical columns are left untouched: every string dtype renders
+  as `object` under `to_numpy()` and ordinal-encodes identically, and pandas 3 reads a CSV
+  text column as `StringDtype`, so converting them would mean changing the *CSV* path.
+- **The index.** `index_col: True` means "the first column holds row names". For CSV that
+  is a parsing instruction, since a CSV has no index. A Parquet file may carry a real
+  index instead, and then *that* is the row names and no column is promoted -- promoting
+  one as well would silently consume a feature. A Parquet file written with no index (or
+  with a bare `RangeIndex`) promotes its first column, so a CSV converted to Parquet
+  column-for-column behaves identically. All three cases are pinned against the CSV
+  result.
+
+QBioCode's own **output** tables (`ModelResults.csv`, `RawDataEvaluation.csv`, the
+`qc_winner_finder` outputs) stay CSV: they are an output contract that downstream tooling
+and published analyses already read, not a user-supplied input whose format is the user's
+choice.
+
+#### QPL: configurable downstream models, each tuned over its own hyperparameters
+
+QPL is the generalised PQK -- the same quantum projection, then a downstream classical
+model rather than PQK's single fixed SVC -- but which downstream models ran, and how each
+was searched, was effectively hardcoded.
+
+- **`qpl_args.classical_models` selects one or several downstream models** from `rf`,
+  `mlp`, `svc`, `lr`, `xgb`, `catboost` and now `tabpfn`. A bare name is accepted as well
+  as a list (`classical_models: svc`), and the default is unchanged:
+  `['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost']`, with `tabpfn` selectable but not a
+  default because it needs the optional `[tabpfn]` extra. Each selected model keeps its
+  existing `qpl_<model>` result label.
+- **`qpl_args.classical_models_args` replaces an individual model's hyperparameter
+  grid**, `{model: {param: values}}`, validated through `_grid.build_param_grid` -- the
+  same function every classical `gridsearch_<model>_args` block goes through -- so a QPL
+  downstream grid and a standalone model's grid now reject the same malformed block with
+  the same message. A `{low, high}` range is refused here, because the downstream
+  searches enumerate values rather than sampling them. For `tabpfn`, which has no grid,
+  the block is its inference settings. Both keys are read whether or not tuning is on
+  (`_QUANTUM_PASSTHROUGH`), for the reason `classical_models` already needed that.
+- **The two levels of optimisation are now documented as distinct**, because conflating
+  them is how a run gets reported as tuned when it was not. `gridsearch_qpl_args` searches
+  the **projection** (`encoding`, `reps`, `entanglement`, `data_map`, `bandwidth`) and only
+  under `tune_quantum: True`; each downstream model's own `RandomizedSearchCV` tunes that
+  **model**, always, inside every QPL fit. An untuned QPL run therefore still tunes its
+  downstream models.
+- **The seven `create_*_model` factories are now one `build_head` dispatch** over a
+  `QPL_HEADS` registry, with the per-model grids in `_head_search_spaces` and the shared
+  budget named once (`HEAD_N_ITER`, `HEAD_CV`). The dispatch used to be a seven-branch
+  `if/elif` with the valid names repeated as prose in two error messages and the default
+  list repeated again -- four copies that had already drifted. The factories remain as thin
+  delegates, so `create_svc_model(42)` and friends are unchanged for outside callers.
+- **An invalid QPL configuration is refused before the projection is computed.** An
+  unknown model name used to be warned about and skipped *inside* the model loop, so a typo
+  in the only requested model paid for the whole quantum projection and then raised a
+  message about nothing having been fitted. Unknown, empty and duplicated model lists, and
+  malformed per-model blocks, are now all rejected up front. (A duplicate was not caught at
+  all before: two entries write one `results_qpl_<model>` column, which `model_run`'s
+  melt/pivot fold-up then rejects with "Index contains duplicate entries, cannot reshape"
+  -- after every fit had run.)
+
+#### Projection freezing across splits is now pinned for QPL and PQK specifically
+
+No behaviour change -- `freeze_quantum_params` has implemented per-split ("regular") and
+search-once ("fast") projection optimisation since it was added, and both modes already
+worked for every quantum arm. What was missing was coverage and documentation of the
+*interaction* with the two-level projected-kernel models, which is the part that is easy
+to get wrong and was asserted nowhere.
+
+- **`tests/test_projection_freeze_across_splits.py`** runs real QPL and PQK arms across
+  three resamples in both modes and counts the work with spies: Optuna studies created
+  (projection-level searches) and backend sessions opened (projections computed). It pins
+  that regular mode runs one study per split and fast mode runs exactly one study, on the
+  *first* split; that later splits reuse those parameters unchanged (and report
+  `tuning_reused: True`); that a reusing split still projects its own rows rather than
+  loading the first split's projection; and that the frozen payload holds projection keys
+  only. `tests/test_quantum_param_freeze.py` already covered the cache mechanism against
+  a stub -- key scoping, staleness, corruption, the cost claim -- and is unchanged.
+- **The projection/downstream distinction is now documented and tested.**
+  `freeze_quantum_params` freezes the projection search only; each downstream classical
+  model's own `RandomizedSearchCV` still runs independently on every split, and QPL still
+  computes one projection per split and shares it across every selected downstream model
+  in both modes. The flag's docs said neither, which left "freezes the quantum search" to
+  be read as freezing everything inside a QPL arm.
+- Documented in `docs/source/apps/config.md`, the shipped `config.yaml` comment and
+  `_param_cache.py`'s module docstring, each with the per-split diagram for the two modes.
+  The shipped sweep config keeps `freeze_quantum_params: True` (its cost model depends on
+  it); the key's own default, when absent, remains `False` -- regular, per-split
+  optimisation -- and both are now pinned by tests.
+
+Also noted while testing: `data_key` defaults to `''`, not `None`, so a *direct* caller
+that enables freezing and loops over splits without passing one gets a single shared
+cache entry for all of them. `qprofiler` always passes a real per-pass key, so this is
+unreachable through the apps; it is pinned with the reasoning in the new test file.
+
+### Fixed
+
+#### QPL wrote the training rows into the test projection for some cache paths
+
+`compute_qpl`'s two projection-writing loops decided which split a file was for with
+`"train" in f_tr` -- against the **whole path**, directory included. Any projection
+directory whose path contained "train" (`~/runs/trained/`, a `training_data` dataset
+directory, a `qpl_projection_dir` under a job name containing the word) therefore matched
+the train branch for the *test* file too, and the test projection was filled with the
+training rows.
+
+Where the two splits differ in size this surfaced far from its cause, as
+`ValueError: Found input variables with inconsistent numbers of samples` from inside a
+downstream model's fit, naming neither the cache nor the path responsible. Where they
+happened to match in size there was **no error at all** and every downstream model was
+scored on its own training rows. Each file is now paired with the rows it holds, so the
+split is never re-derived from a path string.
+
+#### The QPL TabPFN head loaded a licence-gated checkpoint instead of QBioCode's pinned one
+
+`create_tabpfn_model` left `model_path` at upstream's `'auto'`, which resolves to
+*upstream's* default version -- `v3`, whose weights are non-commercial, non-production,
+and reachable only after an interactive licence acceptance. So the QPL head ignored the
+`v2` checkpoint `compute_tabpfn` pins and reached for a gated one, either failing with a
+licence error *after* the quantum projection had been paid for, or quietly running a
+differently-licensed model than the standalone `tabpfn` arm did on the same data. It now
+resolves through `resolve_model_path`, so the two agree.
+
 #### Resuming instead of restarting: `skip_existing`
 
 - **A job killed at its wall is now cheap to resubmit.** QProfiler appends to

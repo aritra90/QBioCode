@@ -8,10 +8,21 @@ folder_path: 'tutorial_test_data/lower_dim_datasets'
 file_dataset: 'ALL'
 # or use a list as below, to only select a few datasets
 # file_dataset: ['file1', 'file2', 'file3', etc]
+#
+# Input datasets may be .csv or .parquet, named with the extension; the reader is chosen
+# from it and the two are interchangeable here. 'ALL' discovers both. The same data in
+# either format gives the same features, labels, splits and scores.
+#   file_dataset: 'dataset.parquet'
+#   file_dataset: ['a.csv', 'b.parquet']
+# Parquet needs an engine:  pip install "qbiocode[parquet]"
+# A .csv needs nothing extra. Any other extension is refused, naming what is accepted.
+# (QBioCode's own OUTPUT tables -- ModelResults.csv, RawDataEvaluation.csv -- stay CSV.)
 
-# Set to True if your CSV files have row names in the first column
+# Set to True if your dataset files have row names in the first column
 # If True, the first column will be used as index and excluded from features
 # If False (default), all columns except the last are treated as features
+# For a .parquet that already carries a real index, that index IS the row names and no
+# column is promoted -- so an indexed Parquet file keeps all of its features.
 index_col: False
 
 # choose a backend for the QML methods
@@ -179,6 +190,22 @@ n_trials_quantum: 32
 # fits per arm into `n_trials_quantum + (iter - 1)` -- at iter: 5 and
 # n_trials_quantum: 32, from 160 quantum fits to 36.
 #
+#   False (the key's own default) -- regular: every split searches its own projection
+#       split 1 -> optimise projection -> evaluate
+#       split 2 -> optimise projection -> evaluate
+#   True  (this file) -- fast: search on split 1, reuse for the rest
+#       split 1 -> optimise projection -> evaluate
+#       split 2 -> reuse split 1's projection params -> evaluate
+#
+# It freezes the PROJECTION only -- encoding, reps, entanglement, data_map, bandwidth.
+# For pqk and qpl the downstream classical model(s) fitted on the projection keep their
+# own RandomizedSearchCV, which still runs independently on EVERY split: split 2 reuses
+# split 1's feature map, projects its own rows through it, and then tunes its own SVC/RF.
+# Freezing those too would save almost nothing (they are cheap fits on an already-
+# projected matrix) and would report a head fitted at another split's hyperparameters.
+# Within a split, qpl still computes the projection once and shares it across every
+# model in qpl_args.classical_models, in both modes.
+#
 # It is not a free lunch, and the bias is OPTIMISTIC for the frozen (quantum) arm, not a
 # handicap. The resamples are overlapping random holdouts: in the pilot, 73-87% of a
 # later iteration's test rows were training rows of iteration 0, the rows the frozen
@@ -246,7 +273,9 @@ splits: all
 # !!! To fix a value while tuning, write it in the gridsearch block as a one-value list
 # !!! (thread_count: [1]). Under split_mode: manifest the block IS read: searched names
 # !!! are trial 0, other keys are fixed for every trial and the refit.
-# !!! qpl_args.classical_models is read in both modes.
+# !!! qpl_args.classical_models and .classical_models_args are read in both modes: they
+# !!! select which downstream models QPL runs and how each is searched, which is not a
+# !!! candidate value to tune.
 #
 # A tuned argument may be written either way:
 #   a list  -- ['linear', 'rbf']        one of these values is chosen
@@ -424,7 +453,7 @@ gridsearch_tabpfn_args: {'model_version': 'v2',
 #### Begin QML function parameters
 # !!! The tuning warning above applies here too: with tune_quantum: True and
 # !!! split_mode: internal these <model>_args blocks are not read
-# !!! (qpl_args.classical_models excepted).
+# !!! (qpl_args.classical_models and .classical_models_args excepted).
 
 # Begin QNN arguments
 # add SPSA
@@ -464,7 +493,49 @@ pqk_args: {'encoding': ZZ,
            'primitive': 'estimator',
            'reps': 4
            }
-           
+
+# Begin QPL arguments
+# QPL is the generalised PQK: the same quantum projection, then a CONFIGURABLE set of
+# downstream classical models instead of PQK's single fixed SVC. The projection keys
+# below mirror pqk_args; the two selection keys are QPL's own.
+#
+# 'qpl' is not in the `model` list above (see the note there), so this block documents
+# the keys rather than driving this sweep. Add 'qpl' to `model` to use it.
+#
+# classical_models -- which downstream models to fit on the projection. One name or
+# several; each gets its own results row, named <projection>_<model>: 'qpl_svc',
+# 'qpl_rf', 'qpl_tabpfn'. The projection is computed ONCE and reused by all of them, so
+# adding a model costs one classical search, not another projection. Defaults to
+# ['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost']. 'tabpfn' is selectable but not a
+# default: it needs the optional [tabpfn] extra. Both spellings work:
+#   classical_models: ['svc', 'rf']   -- several
+#   classical_models: svc             -- one
+#
+# Every downstream model is hyperparameter-tuned over its OWN grid inside each QPL fit,
+# whether or not tune_quantum is on. Those two optimisations are separate and stack:
+# gridsearch_qpl_args (below) searches the PROJECTION, while each model's own search
+# tunes that DOWNSTREAM MODEL. TabPFN is the one exception and has no search -- its
+# weights are pretrained and frozen, so it exposes inference settings rather than
+# training hyperparameters.
+#
+# classical_models_args -- optional per-model overrides, {model: {...}}. For a searched
+# model the mapping REPLACES that model's default grid and is validated exactly as a
+# gridsearch_<model>_args block is, so every entry must be a list of values (or a bare
+# scalar); a {low, high} range is Optuna-only syntax and is refused here. For 'tabpfn',
+# which has no grid, the mapping is its constructor settings. A model not named keeps
+# its default grid, so omitting this key entirely is the shipped behaviour.
+#
+# Both keys are read whether tuning is on or off (see the warning block above).
+qpl_args: {'encoding': ZZ,
+           'entanglement': 'pairwise',
+           'primitive': 'estimator',
+           'reps': 4,
+           'classical_models': ['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost'],
+           # 'classical_models_args': {'svc': {'C': [0.1, 1, 10], 'kernel': ['rbf']},
+           #                           'tabpfn': {'n_estimators': 4}},
+           }
+
+
 # set hydra output directories
 hydra:
   run:

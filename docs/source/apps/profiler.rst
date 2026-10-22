@@ -77,7 +77,7 @@ For processing multiple datasets in parallel:
 
    qprofiler-batch
 
-This will process all CSV files in the configured input directory and generate combined results.
+This will process every supported dataset file (``.csv`` or ``.parquet``) in the configured input directory and generate combined results.
 
 **Configuration File Location**
 
@@ -240,26 +240,40 @@ Key Configuration Sections
 
 .. code-block:: yaml
 
-    # Process all CSV files in folder
+    # Process every supported dataset file in the folder (.csv and .parquet)
     folder_path: 'test_data/'
     file_dataset: 'ALL'
-    
-    # Or select specific files
-    file_dataset: ['dataset1.csv', 'dataset2.csv']
-    
+
+    # Or select specific files -- either format, and they may be mixed
+    file_dataset: ['dataset1.csv', 'dataset2.parquet']
+
     # Handle datasets with row names/IDs in first column
     index_col: False  # Set to True if first column contains row identifiers
-    
+
     # Reproducibility seeds
     seed: 42        # Classical algorithms
     q_seed: 42      # Quantum algorithms
 
+.. note::
+    **Input formats.** A dataset may be stored as ``.csv`` or ``.parquet``; the reader is
+    selected from the extension by :func:`qbiocode.utils.read_table`, and the two are
+    interchangeable -- the same data in either format gives the same features, labels,
+    splits and scores. Parquet needs an engine
+    (``pip install "qbiocode[parquet]"``); a ``.csv`` needs nothing beyond pandas. Any
+    other extension is refused with a message listing the formats that work. QProfiler's
+    own output tables (``ModelResults.csv``, ``RawDataEvaluation.csv``) are CSV
+    regardless.
+
 .. important::
-    **Row Names Support:** If your CSV files have row identifiers (sample IDs, patient IDs, etc.) in the first column, set ``index_col: True``. This will:
-    
+    **Row Names Support:** If your dataset files have row identifiers (sample IDs, patient IDs, etc.) in the first column, set ``index_col: True``. This will:
+
     - Use the first column as row index (excluded from features)
     - Properly handle datasets with sample identifiers
     - Maintain data integrity for downstream analysis
+
+    For a ``.parquet`` file that already carries a real index, that index *is* the row
+    names and no column is promoted, so an indexed Parquet file keeps all of its
+    features.
     
     **Example dataset with row names:**
     
@@ -435,8 +449,13 @@ Available models:
 
 Each classical model has an ``_opt`` twin selected by ``grid_search: True`` rather than
 by naming it in ``model``; see **Hyperparameter Configuration** below. The classical
-learners are also available as heads on a quantum projection through ``qpl``, whose
-``classical_models`` defaults to ``['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost']``.
+learners are also available as *downstream* models on a quantum projection through
+``qpl`` -- the generalised PQK, which fits one fixed SVC. Its ``classical_models``
+selects one or several of ``rf``, ``mlp``, ``svc``, ``lr``, ``xgb``, ``catboost`` and
+``tabpfn``, defaulting to ``['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost']``
+(``tabpfn`` needs the optional ``[tabpfn]`` extra). Each selected model gets its own
+``qpl_<model>`` row, each is hyperparameter-tuned over its own grid, and the quantum
+projection is computed once and shared by all of them.
 
 **6. Hyperparameter Configuration**
 
@@ -477,7 +496,9 @@ Ranges need ``tuner: optuna``; under ``tuner: grid`` every entry must be a list.
     **To fix a setting while tuning,** write it in ``gridsearch_<model>_args`` as a
     one-value list (``thread_count: [1]``). **Under** ``split_mode: manifest`` **the block
     IS read:** its searched names are trial 0 and its other keys are fixed for every trial
-    and the refit. ``qpl_args.classical_models`` is read in both modes.
+    and the refit. ``qpl_args.classical_models`` and ``.classical_models_args`` are read
+    in both modes: they select which downstream models QPL runs and how each is
+    searched, neither of which is a candidate value to tune.
 
 .. important::
     **For quantum models:** they now tune through the same ``gridsearch_<model>_args``

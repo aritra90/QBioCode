@@ -51,6 +51,7 @@ Usage
 
 from .combine_evals_results import combine_results, track_progress
 from .dataset_checkpoint import checkpoint_restart
+from .dataset_io import SUPPORTED_SUFFIXES, dataset_files, read_table
 from .find_duplicates import find_duplicate_files
 from .find_string import find_string_in_files
 from .generate_qml_configs import generate_qml_experiment_configs
@@ -101,6 +102,10 @@ __all__ = [
     "describe_token_source",
     "load_tabpfn_token",
     "write_token_template",
+    # Input datasets: one reader per supported format, chosen by extension
+    "read_table",
+    "dataset_files",
+    "SUPPORTED_SUFFIXES",
     # Data preprocessing
     "scaler_fn",
     "feature_encoding",

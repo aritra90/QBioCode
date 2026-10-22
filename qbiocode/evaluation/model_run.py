@@ -24,8 +24,8 @@ _TUNERS = frozenset({"optuna", "grid"})
 #: The two blocks answer different questions. ``gridsearch_<model>_args`` says what to
 #: SEARCH; ``<model>_args`` says how to run the model. Almost every setting is one or the
 #: other, but ``classical_models`` is unambiguously the second -- it selects which
-#: classical heads ``compute_qpl`` fits on the quantum projection, so its value is a list
-#: of heads and not a list of candidates to choose among.
+#: downstream classical models ``compute_qpl`` fits on the quantum projection, so its
+#: value is a list of models and not a list of candidates to choose among.
 #:
 #: The tuned branch below used to build its kwargs from the gridsearch block alone, so
 #: ``qpl_args: {classical_models: ['lr']}`` was honoured with tuning off and silently
@@ -34,7 +34,12 @@ _TUNERS = frozenset({"optuna", "grid"})
 #: tuning metric across heads, so the projection was chosen to suit heads the config had
 #: excluded. Naming the key in the gridsearch block instead was not a workaround either;
 #: it reached ``compute_qpl_opt`` as an unexpected keyword argument.
-_QUANTUM_PASSTHROUGH = {"qpl": ("classical_models",)}
+#:
+#: ``classical_models_args`` is here for the same reason and needs it just as much: it
+#: holds the per-downstream-model hyperparameter grids, so dropping it when tuning is on
+#: would search the projection against heads tuned over DIFFERENT grids than the refit
+#: uses -- the same class of mismatch, one level down.
+_QUANTUM_PASSTHROUGH = {"qpl": ("classical_models", "classical_models_args")}
 
 #: The models that run on a quantum backend, as ``args['model']`` spells them.
 #:

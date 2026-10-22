@@ -62,7 +62,7 @@ file_dataset: 'dataset.csv'
 
 ```yaml
 folder_path: 'data/'
-file_dataset: 'ALL'  # Process all CSV files in folder
+file_dataset: 'ALL'  # every supported dataset file in the folder
 ```
 
 **Multiple Specific Datasets:**
@@ -70,6 +70,47 @@ file_dataset: 'ALL'  # Process all CSV files in folder
 ```yaml
 file_dataset: ['dataset1.csv', 'dataset2.csv', 'dataset3.csv']
 ```
+
+**Input formats: `.csv` and `.parquet`**
+
+A dataset may be stored as either, named with its extension; the reader is chosen from
+that extension and the two are interchangeable everywhere `file_dataset` is. The same
+data in either format produces the same features, the same labels, the same splits and
+the same scores, so a format is a storage choice rather than a pipeline one.
+
+```yaml
+file_dataset: 'dataset.parquet'                        # one Parquet dataset
+file_dataset: ['a.csv', 'b.parquet']                   # mixed, in one run
+file_dataset: 'ALL'                                    # both formats, discovered together
+```
+
+Parquet needs an engine, which is an optional extra:
+
+```bash
+pip install "qbiocode[parquet]"
+```
+
+A `.csv` dataset needs nothing beyond pandas, so an install without the extra behaves
+exactly as before; reading a `.parquet` without it raises an error naming the extra.
+Anything else — `.xlsx`, `.json`, a `.tsv` — is refused with a message listing the
+formats that work. (A tab-separated file still reads under a `.csv` name, as the CSV
+reader's separator has always been `\t|,`.)
+
+Two format details are handled at the reader so they cannot reach the pipeline:
+
+- **`index_col: True`** means "the first column holds row names". For CSV that promotes
+  column 0, as it always has. A Parquet file may instead carry a real index of its own,
+  in which case *that* is the row names and no column is promoted — so a Parquet file
+  written from an indexed frame keeps all of its features.
+- **Typed columns.** Parquet stores a dtype per column, so a nullable `Int64`/`Float64`
+  column reads straight back as one and would reach the scalers as an *object* array.
+  Numeric columns are converted to the plain numpy dtypes the CSV parser would have
+  produced (an integer column holding nulls becomes `float64`, exactly as an empty CSV
+  cell does). Text and categorical columns are left untouched.
+
+QBioCode's own **output** tables (`ModelResults.csv`, `RawDataEvaluation.csv`) stay CSV
+regardless: they are an output contract that downstream tooling already reads, not a
+user-supplied input.
 
 **Output Directory:**
 
@@ -593,7 +634,8 @@ shipped `config.yaml` has tuning on, so this is what a default run gets.
 - **Under `split_mode: manifest` the block IS read:** its values for the searched names
   are trial 0 (the arm's default config), and its other keys are fixed for every trial
   and the refit.
-- **`qpl_args.classical_models`** is read in both modes (see below).
+- **`qpl_args.classical_models` and `.classical_models_args`** are read in both modes
+  (see "QPL's downstream models" below).
 ```
 
 A tuned argument may be written two ways:
@@ -737,18 +779,70 @@ is the unscaled map and leaves results and projection caches exactly as before; 
 value is recorded in the parameter column and keys its own projection cache. `vqc` and
 `qnn` do not take it.
 
-`qpl`'s `classical_models` is **not** in that table, because it is not a hyperparameter to
-search -- it selects which classical heads are fitted on the quantum projection. It stays
-in `qpl_args` and is read from there whether or not tuning is on:
+### QPL's downstream models
+
+QPL is the generalised PQK: the same quantum projection, then a *configurable* set of
+downstream classical models rather than PQK's single fixed SVC. Each selected model gets
+its own results row, named `<projection>_<model>` — `qpl_svc`, `qpl_rf`, `qpl_tabpfn`.
+
+`qpl`'s `classical_models` and `classical_models_args` are **not** in that table, because
+neither is a hyperparameter to search: the first selects which downstream models are
+fitted on the projection, the second how each of them is searched. Both stay in
+`qpl_args` and are read from there whether or not tuning is on:
 
 ```yaml
+# One downstream model.
 qpl_args:
-  classical_models: ['rf', 'lr']   # honoured with tune_quantum on or off
+  classical_models: svc            # a bare name works; ['svc'] is the same thing
+
+# Several. The quantum projection is computed ONCE and shared by all of them.
+qpl_args:
+  classical_models: ['svc', 'rf', 'tabpfn']
+
+# Several, with one model's hyperparameter grid replaced.
+qpl_args:
+  classical_models: ['svc', 'rf', 'tabpfn']
+  classical_models_args:
+    svc:    {C: [0.1, 1, 10], kernel: ['rbf', 'linear']}
+    tabpfn: {n_estimators: 4}      # inference settings: TabPFN has no grid
 ```
 
-Every trial fits all of the named heads and a candidate is scored by their *mean*
-accuracy, so narrowing the list makes a tuned QPL run proportionally cheaper as well as
-changing what the search optimises for.
+Available: `rf`, `mlp`, `svc`, `lr`, `xgb`, `catboost`, `tabpfn`. The default is
+`['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost']` — `tabpfn` is selectable but not a
+default, because it needs the optional `[tabpfn]` extra and defaulting it on would make
+every QPL run in an ordinary install warn about it.
+
+**Two levels of optimisation, which are easy to confuse.** They are independent and they
+stack:
+
+| level | what is searched | by what | when |
+|---|---|---|---|
+| the projection | `encoding`, `reps`, `entanglement`, `data_map`, `bandwidth` | Optuna, from `gridsearch_qpl_args` | only with `grid_search: True` **and** `tune_quantum: True` |
+| each downstream model | that model's own hyperparameters | `RandomizedSearchCV`, 40 candidates × 5 folds | **always**, inside every QPL fit |
+
+So an untuned QPL run still hyperparameter-tunes each of its downstream models; what
+`tune_quantum` adds is a search over the projection those models are fitted on. With
+both on, each trial of the projection search fits every downstream model, each with its
+own search — the head searches are part of one trial's fit, not extra tuning budget.
+
+`classical_models_args` replaces an individual model's grid and is validated exactly as a
+`gridsearch_<model>_args` block is, so every entry must be a list of values (or a bare
+scalar, meaning a one-value list). A `{low, high}` range is Optuna-only syntax and is
+refused here, because the downstream searches enumerate values rather than sampling them.
+A model you do not name keeps its default grid, so omitting the key entirely reproduces
+the shipped behaviour.
+
+TabPFN is the one downstream model with no hyperparameter search, and that is a property
+of the model rather than a special case: its weights are pretrained and frozen, so `fit`
+only memorises the training rows and what it exposes are *inference* settings, not
+training hyperparameters. Searching them would cost 200 transformer forward passes per
+projection to choose between near-identical candidates. It also has a hard ten-class
+limit that `ignore_pretraining_limits` does not waive; an unsuitable target drops that
+one model with a warning and the rest of the run continues.
+
+Every trial fits all of the named downstream models and a candidate projection is scored
+by their *mean* tuning metric, so narrowing the list makes a tuned QPL run proportionally
+cheaper as well as changing what the search optimises for.
 
 **Tuning on real hardware is refused** unless you also set `allow_hardware_tuning: True`.
 Every trial is a separate queued job billed against your instance, and the failure mode
@@ -776,7 +870,38 @@ Turning `tune_quantum: True` on removes the confound and multiplies the quantum 
 `n_trials_quantum` *per iteration*.
 
 `freeze_quantum_params` is the middle option -- search each quantum arm once, on iteration
-0, and reuse that configuration for the rest:
+0, and reuse that configuration for the rest. The two modes, per split:
+
+```text
+freeze_quantum_params: False      # regular: the library default
+  split 1 -> optimise projection -> evaluate
+  split 2 -> optimise projection -> evaluate
+  split 3 -> optimise projection -> evaluate
+
+freeze_quantum_params: True       # fast: search once, reuse
+  split 1 -> optimise projection -> evaluate
+  split 2 -> reuse split 1's projection params -> evaluate
+  split 3 -> reuse split 1's projection params -> evaluate
+```
+
+**It freezes the projection only.** For `pqk` and `qpl` there are two independent levels
+of optimisation (see "QPL's downstream models" above), and this key governs the first:
+
+| level | what it searches | `freeze_quantum_params: True` |
+|---|---|---|
+| projection | `encoding`, `reps`, `entanglement`, `data_map`, `bandwidth` | searched on split 1, **frozen** for later splits |
+| downstream model | each classical head's own hyperparameters | **still searched on every split**, independently |
+
+So in QPL fast mode, split 2 reuses split 1's feature map, projects *its own* rows
+through it, and then runs its own `RandomizedSearchCV` for SVC, RF and so on. Freezing
+the downstream searches would save nothing worth having -- they are a few hundred fits on
+an already-projected matrix, against one circuit simulation per row for the projection --
+and would mean reporting a head fitted at another split's hyperparameters. Within a
+split, QPL still computes the projection once and shares it across every selected
+downstream model, in both modes.
+
+The shipped `apps/qprofiler/configs/config.yaml` sets `True`, for the sweep's cost model.
+A config that does not mention the key at all gets `False`:
 
 ```yaml
 grid_search: True

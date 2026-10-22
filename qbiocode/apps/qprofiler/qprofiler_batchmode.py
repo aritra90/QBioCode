@@ -14,6 +14,7 @@ from joblib import Parallel, delayed
 
 # ======= checkpointing =========
 from qbiocode import checkpoint_restart
+from qbiocode.utils import dataset_io
 
 
 def config_job_name(data_type, output_folder_timestamp, data_file):
@@ -216,18 +217,19 @@ def main():
             completed_files = checkpoint_restart(checkpoint_dir, verbose=True)
             print(f"Found {len(completed_files)} completed datasets")
         
-        # Process only incomplete datasets
+        # Process only incomplete datasets. `dataset_files` matches every input format
+        # QProfiler reads (.csv, .parquet), so a batch over a Parquet folder is
+        # discovered exactly as a CSV one is -- see qbiocode.utils.dataset_io.
         results = Parallel(n_jobs=n_jobs)(
             delayed(run_job)(file, configfile, output_folder_timestamp, data_type)
-            for file in os.listdir(path_to_input)
-            if file.endswith('csv') and file not in completed_files
+            for file in dataset_io.dataset_files(path_to_input)
+            if file not in completed_files
         )
     else:
         # Process all datasets
         results = Parallel(n_jobs=n_jobs)(
             delayed(run_job)(file, configfile, output_folder_timestamp, data_type)
-            for file in os.listdir(path_to_input)
-            if file.endswith('csv')
+            for file in dataset_io.dataset_files(path_to_input)
         )
     
     # Collect results
@@ -237,9 +239,7 @@ def main():
     failed = [code for code in (results or []) if code]
     output_dir = f'results/{data_type}_batch_{output_folder_timestamp}'
 
-    for file in os.listdir(path_to_input):
-        if not file.endswith('csv'):
-            continue
+    for file in dataset_io.dataset_files(path_to_input):
         # Searched for rather than computed. This used to read exactly
         #   results/<type>_batch_<stamp>/dataset=<file>/ModelResults.csv
         # which is only where the file lands if the config's hydra.run.dir ends at the
@@ -265,14 +265,13 @@ def main():
 
     # Clean up the per-dataset configs this batch wrote -- once, and by the name they
     # were actually written under (config_job_name).
-    for file in os.listdir(path_to_input):
-        if file.endswith('csv'):
-            stale = os.path.join(
-                'configs',
-                config_job_name(data_type, output_folder_timestamp, file) + '.yaml',
-            )
-            if os.path.isfile(stale):
-                os.remove(stale)
+    for file in dataset_io.dataset_files(path_to_input):
+        stale = os.path.join(
+            'configs',
+            config_job_name(data_type, output_folder_timestamp, file) + '.yaml',
+        )
+        if os.path.isfile(stale):
+            os.remove(stale)
 
     # Save combined results. NOT inside the dataset directories they were read from:
     # the merged file sits at the root of the batch directory, so a later glob for

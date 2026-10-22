@@ -1,0 +1,32 @@
+# ==========================================================================
+# Parquet input datasets -- the [parquet] extra
+# ==========================================================================
+# Installs the engine pandas needs to read `.parquet` input datasets, which
+# QProfiler accepts anywhere it accepts `.csv` (see qbiocode.utils.dataset_io).
+#
+#   pip install "qbiocode[parquet]"       # from a release/checkout
+#   pip install -r requirements/requirements-parquet.txt
+#
+# An extra rather than a base dependency because nothing needs it to run: a
+# `.csv` dataset -- which is every dataset shipped in this repository and every
+# one the tutorials generate -- is read by pandas' own CSV parser, and
+# `import qbiocode` never imports pyarrow. `dataset_io.read_table` raises an
+# ImportError naming this file if a `.parquet` dataset is read without it.
+#
+# WHY YOU WOULD WANT IT: Parquet stores a dtype per column and compresses, so a
+# wide dataset loads faster and smaller than the same data as CSV, and a float
+# column round-trips exactly rather than through a decimal rendering. It is also
+# what most upstream single-cell and genomics tooling now emits, so supporting it
+# removes a conversion step rather than adding a format.
+#
+# `pyarrow` rather than `fastparquet`: it is the engine pandas prefers and the
+# one its own `to_parquet`/`read_parquet` docs are written against. fastparquet
+# also works -- `read_table` asks pandas, which picks whichever is installed --
+# so either satisfies the import; this file pins the one that is tested.
+#
+# This list mirrors the `parquet` entry in pyproject.toml's
+# [project.optional-dependencies]; tests/test_requirements_consistency.py
+# asserts the two stay identical.
+# ==========================================================================
+
+pyarrow>=14.0

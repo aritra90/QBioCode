@@ -52,6 +52,7 @@ models. Everything below is additive.
 | `quvine` | `pip install 'qbiocode[quvine]'` | QuVINE quantum/classical graph embeddings — 83 methods reachable through `get_embeddings("quvine_*", ...)` |
 | `tabpfn` | `pip install 'qbiocode[tabpfn]'` | The `tabpfn` classical model — a pretrained tabular transformer. No API key or license acceptance needed for the pinned default; see below |
 | `mps` | `pip install 'qbiocode[mps]'` | Tensor-network projection backends for `pqk`/`qpl` (`quimb`, `cotengra`) — lifts the ~20-feature ceiling the dense statevector imposes, since one feature is one qubit |
+| `parquet` | `pip install 'qbiocode[parquet]'` | Reads `.parquet` input datasets (`pyarrow`), accepted anywhere a `.csv` is. A `.csv` dataset needs nothing beyond pandas |
 | `docs` | `pip install 'qbiocode[docs]'` | Sphinx toolchain for building this documentation locally |
 | `dev` | `pip install 'qbiocode[dev]'` | `pytest`, `pytest-cov`, `black`, `isort`, `flake8`, `mypy` |
 | `all` | `pip install 'qbiocode[all]'` | Union of every extra above |

@@ -169,8 +169,10 @@ QProfiler provides a comprehensive benchmarking pipeline that:
 - Correlates model performance with data characteristics
 - Generates detailed performance reports and visualizations
 
-**Before you run — the input data must exist.** QProfiler reads a folder of CSV
-datasets. The `folder_path` in the config is resolved **relative to the
+**Before you run — the input data must exist.** QProfiler reads a folder of
+datasets, each stored as `.csv` or `.parquet` (the reader is chosen from the
+extension, and the two are interchangeable; Parquet needs
+`pip install "qbiocode[parquet]"`). The `folder_path` in the config is resolved **relative to the
 `QBioCode` repo root** (the code truncates your current directory at `QBioCode`
 and joins `folder_path` to it). So:
 

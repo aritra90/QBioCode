@@ -16,6 +16,7 @@ qbiocode.utils package
        qbiocode.utils.combine_evals_results
        qbiocode.utils.data_encoding
        qbiocode.utils.dataset_checkpoint
+       qbiocode.utils.dataset_io
        qbiocode.utils.find_duplicates
        qbiocode.utils.find_string
        qbiocode.utils.generate_qml_configs
@@ -44,6 +45,10 @@ qbiocode.utils package
          - Identify completed datasets from a previous run to enable checkpoint restart.
        * - :func:`combine_results <qbiocode.utils.combine_evals_results.combine_results>`
          - Combine results from interrupted and resumed computational jobs.
+       * - :func:`dataset_files <qbiocode.utils.dataset_io.dataset_files>`
+         - The readable input datasets in a folder (.csv and .parquet), sorted.
+       * - :func:`read_table <qbiocode.utils.dataset_io.read_table>`
+         - Read one input dataset, selecting the reader from its extension.
        * - :func:`describe_token_source <qbiocode.utils.tabpfn_account.describe_token_source>`
          - Whether a token is configured, and from where -- with no key material.
        * - :func:`execute_circuit <qbiocode.utils.qutils.execute_circuit>`

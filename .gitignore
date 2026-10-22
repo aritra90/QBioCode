@@ -185,3 +185,4 @@ benchmark/splits/
 # Switch to `.claude/*` plus `!.claude/settings.json` (and a `!` per shared path) at that
 # point.
 .claude/
+.venv-analysis/

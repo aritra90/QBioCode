@@ -797,6 +797,16 @@ def compute_pqk_opt(
     ``tune_quantum: True``. Tuning against a real device is refused unless
     ``allow_hardware_tuning: True`` -- every trial would be a queued job.
 
+    **Across splits.** With ``freeze_quantum_params: True`` the projection search runs on
+    the first resample only and its winner is reused by the rest, cutting the cost from
+    ``iter * n_trials`` to ``n_trials + (iter - 1)``; ``False`` (the key's own default)
+    searches the projection on every split, each on its own training rows. Only the
+    *projection* is frozen: the SVC head's own ``RandomizedSearchCV`` still runs on every
+    split, and a reusing split projects its own rows through the frozen feature map rather
+    than reusing the first split's projected features. See
+    :mod:`qbiocode.learning._param_cache`, which also explains why a frozen arm's later
+    scores are optimistic rather than conservative.
+
     Args:
         X_train (array-like): Training data features. Split again internally to score
             candidates; the final model is refitted on all of it.

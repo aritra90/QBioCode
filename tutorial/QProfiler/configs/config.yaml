@@ -11,8 +11,12 @@ folder_path: 'data/ld_data'
 file_dataset: 'ALL'
 # or use a list as below, to only select a few datasets
 # file_dataset: ['file1', 'file2', 'file3', etc]
+#
+# Datasets may be .csv or .parquet (named with the extension); 'ALL' discovers both and
+# the two are interchangeable. The notebook writes .csv, which needs nothing extra;
+# Parquet needs  pip install "qbiocode[parquet]".
 
-# Set to True if your CSV files have row names in the first column
+# Set to True if your dataset files have row names in the first column
 # If True, the first column will be used as index and excluded from features
 # If False (default), all columns except the last are treated as features
 index_col: False

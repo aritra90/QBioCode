@@ -242,10 +242,25 @@ vqc_args: {'primitive': 'sampler',
 # to exist under its own name: model_run reads `args[method + "_args"]`, so with only
 # a `pqk_args` block present QPL fell back to its signature defaults (Z encoding,
 # linear entanglement, reps 2) while the config appeared to ask for something else.
+#
+# `classical_models` selects the DOWNSTREAM models fitted on the quantum projection --
+# QPL is the generalised PQK, which fits one fixed SVC. Each named model gets its own
+# results row, 'qpl_<model>', and the projection is computed ONCE and shared by all of
+# them, so adding one costs a classical search rather than another projection. The six
+# below are the default; 'tabpfn' is also available with the optional [tabpfn] extra.
+# One model may be given as a bare name (`classical_models: svc`).
+#
+# Every one of them is hyperparameter-tuned over its own grid inside each QPL fit, even
+# with grid_search off above -- that switch and tune_quantum control the search over the
+# PROJECTION (gridsearch_qpl_args), which is a separate level. `classical_models_args`
+# (commented out below) replaces an individual model's grid; see the qprofiler config
+# for the full description.
 qpl_args: {'encoding': ZZ,
            'entanglement': 'pairwise',
            'primitive': 'estimator',
-           'reps': 4
+           'reps': 4,
+           'classical_models': ['rf', 'mlp', 'svc', 'lr', 'xgb', 'catboost'],
+           # 'classical_models_args': {'svc': {'C': [0.1, 1, 10], 'kernel': ['rbf']}},
            }
 
 # Begin PQK arguments
