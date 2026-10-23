@@ -95,6 +95,7 @@ from scipy.spatial.distance import squareform
 
 from qbiocode.evaluation.model_evaluation import TUNING_EVIDENCE_COLUMNS
 from qbiocode.evaluation.protocol import PROTOCOL_COLUMNS, TIEBREAK_COLUMNS
+from qbiocode.learning._tuning import SELECTED_PREFIX
 from qbiocode.utils.fair_selection import PARAMETER_COLUMNS, WinnerReport, select_winners
 
 logger = logging.getLogger(__name__)
@@ -132,11 +133,20 @@ def meta_feature_columns(results: pd.DataFrame) -> list[str]:
     are the ``split_mode: manifest`` provenance columns (``PROTOCOL_COLUMNS``: repeat,
     fold, split sizes, seeds, host): they describe how a row was produced, and a numeric
     ``fold`` or ``n_val`` would otherwise enter the screen as a dataset property.
+
+    The ``selected_<name>`` columns are reserved for the same reason, and by PREFIX rather
+    than by name: they report the hyperparameters a search chose, so which of them exist
+    depends on what a config offered -- ``selected_bandwidth`` and ``selected_reps`` are
+    numeric and would otherwise be screened as properties of the *dataset* when they are
+    properties of the fitted model. An explicit list could not keep up with a config that
+    searches something new.
     """
     reserved = (set(INSTANCE) | {"model"} | set(METRIC_COLUMNS) | set(PARAMETER_COLUMNS)
                 | set(TUNING_EVIDENCE_COLUMNS) | set(PROTOCOL_COLUMNS) | set(TIEBREAK_COLUMNS))
     return [c for c in results.columns
-            if c not in reserved and pd.api.types.is_numeric_dtype(results[c])]
+            if c not in reserved
+            and not c.startswith(SELECTED_PREFIX)
+            and pd.api.types.is_numeric_dtype(results[c])]
 
 
 def canonical_meta_features(

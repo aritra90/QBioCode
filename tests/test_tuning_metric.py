@@ -62,6 +62,7 @@ from qbiocode.learning._tuning import (
     record_tuned_params,
     run_function_study,
     search_hyperparameters,
+    selected_columns,
     tuning_metric,
     tuning_scorer,
 )
@@ -231,6 +232,70 @@ class TestTheQuantumObjective:
         assert row["tuning_reused"] is False
         assert type(row["BestParams_Tuned"]) is dict
         assert row["BestParams_Tuned"] == {"k": 1, "reps": 2}
+        # Beside the dict, not instead of it: the dict reaches ModelResults.csv as one
+        # stringified cell, so a flat column is what makes the choice groupable.
+        assert row["selected_reps"] == 2
+
+
+class TestTheSelectedConfigurationIsReportedPerRow:
+    """``selected_<name>`` columns, one per hyperparameter the search chose.
+
+    They exist for one question: does the search settle on the same projection across the
+    splits of a dataset, or wander? Answering it from ``BestParams_Tuned`` means parsing a
+    repr per row, because that dict reaches ModelResults.csv as a single cell -- so the
+    chosen values are also written flat, where a ``groupby`` can reach them.
+    """
+
+    def test_each_searched_scalar_becomes_its_own_column(self):
+        selected = selected_columns(TunedParams({
+            "bandwidth": 1.5708, "encoding": "ZZ", "reps": 2, "entanglement": "full",
+        }))
+        assert selected == {
+            "selected_bandwidth": 1.5708, "selected_encoding": "ZZ",
+            "selected_reps": 2, "selected_entanglement": "full",
+        }
+
+    def test_a_plain_mapping_works_too(self):
+        """``search_hyperparameters`` returns TunedParams, but a caller may pass a dict."""
+        assert selected_columns({"reps": 1}) == {"selected_reps": 1}
+
+    def test_an_unsearched_parameter_gets_no_column(self):
+        """Only what the search varied. A column that mixed "chosen" with "never
+        searched" would make a stability analysis read as stable wherever the space was
+        empty."""
+        selected = selected_columns(TunedParams({"reps": 2}))
+        assert selected == {"selected_reps": 2}
+        assert "selected_bandwidth" not in selected
+
+    def test_a_container_value_is_left_to_the_parameter_dict(self):
+        """``hidden_layer_sizes: [[20], [50]]`` in a CSV cell is a repr again, so a
+        column would not help; the quantum projection parameters are all scalar."""
+        selected = selected_columns(TunedParams({
+            "hidden_layer_sizes": [20, 10], "reps": 2,
+        }))
+        assert selected == {"selected_reps": 2}
+
+    def test_an_untuned_run_gets_no_columns(self):
+        """A frame from a run that did not tune must keep exactly its old columns."""
+        assert selected_columns(None) == {}
+        assert selected_columns("not a mapping") == {}
+
+    def test_every_qpl_head_row_reports_the_same_projection(self):
+        """QPL fans out one row per downstream model, all fitted on ONE projection, so
+        every head must report that projection -- otherwise a per-head comparison would
+        look like the heads disagreed about the feature map."""
+        frame = pd.DataFrame({
+            "results_qpl_opt_rf": [{"accuracy": 0.6}, np.nan],
+            "results_qpl_opt_lr": [np.nan, {"accuracy": 0.8}],
+        })
+        best = TunedParams({"bandwidth": 3.1416, "encoding": "Z"},
+                           metric="balanced_accuracy", score=0.9)
+        record_tuned_params(frame, best, 0.0)
+        for column in ("results_qpl_opt_rf", "results_qpl_opt_lr"):
+            row = next(v for v in frame[column] if isinstance(v, dict))
+            assert row["selected_bandwidth"] == 3.1416
+            assert row["selected_encoding"] == "Z"
+            assert row["tuning_score"] == 0.9
 
 
 class TestTunedParamsIsAPlainDict:

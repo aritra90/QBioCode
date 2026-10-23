@@ -218,6 +218,15 @@ n_trials_quantum: 32
 # Cached as one JSON file per (dataset, embedding, n_components, model) under
 # quantum_param_dir. Editing a gridsearch_<model>_args block invalidates the cache for
 # that model automatically. Delete the directory to force a fresh search.
+#
+# SET THIS TO False to study how STABLE the selected quantum configuration is across
+# splits. With it True the search runs once and every later split reports the same
+# `selected_bandwidth`/`selected_encoding`/..., so there is nothing to measure -- the
+# agreement is the freeze, not a property of the data. With it False each split searches
+# its own training rows independently and the `selected_*` columns become comparable
+# observations. It costs one search per split instead of one per arm (at iter: 5,
+# five times the quantum fits), which is why this file leaves it True for the sweep's
+# cost model; a stability run should override it.
 freeze_quantum_params: True
 quantum_param_dir: quantum_tuned_params
 
@@ -548,7 +557,18 @@ hydra:
 # range. Keep these small -- every trial is a quantum fit, so the cost is n_trials_quantum
 # times the cost of one ordinary run of that model.
 # bandwidth: the features (in [0, 1]) are multiplied by it before the feature map, the
-# quantum counterpart of an RBF gamma. 1.0 is the unscaled map; pi/32 .. 2*pi on a log scale.
+# quantum counterpart of an RBF gamma. 1.0 is the unscaled map. It is a TUNED
+# hyperparameter like any other here, searched jointly with encoding/reps/entanglement --
+# which matters, because its optimum depends on the encoding (the kernel_exps studies put
+# it near pi for Z and near pi/32 for ZZ, a 30x difference). qsvc keeps the continuous
+# range below; pqk and qpl use a discrete candidate set, for the reason given there.
+#
+# Every tuned parameter is also reported per row as `selected_<name>`
+# (selected_bandwidth, selected_encoding, selected_reps, selected_entanglement) beside
+# tuning_score and tuning_metric, so the chosen configuration can be compared across
+# splits and datasets without parsing BestParams_Tuned. With
+# freeze_quantum_params: False each split searches independently, which is what makes
+# that comparison meaningful.
 gridsearch_qsvc_args: {'encoding': ['Z', 'ZZ'],
                        'reps': [1, 2],
                        'entanglement': ['linear', 'full'],
@@ -570,14 +590,29 @@ gridsearch_qnn_args: {'encoding': ['Z', 'ZZ'],
                       'maxiter': {low: 50, high: 200}
                      }
 
+# bandwidth as a DISCRETE candidate set rather than a continuous range, for the two
+# projected-kernel models. The six values span the meaningful range and stop at pi: the
+# feature maps apply P(2x) per qubit and features are scaled to [0, 1], so bandwidth=pi
+# puts the data on exactly one full 2*pi rotation, and past it the angles wrap -- two
+# different feature values collide onto one rotation. 1.0 is the current default and is
+# kept so every search includes the configuration earlier results were produced at; the
+# three smallest cover the region the kernel_exps studies found ZZ sensitive in (~pi/32),
+# and pi/2..pi covers Z's (~pi).
+#
+# Discrete rather than a range on purpose: the selected value is then one of six known
+# constants, which is what makes `selected_bandwidth` comparable across splits and
+# datasets. A continuous range proposes a different float every trial, so no two splits
+# can agree and a stability analysis has nothing to count. The space is finite
+# (2 encodings x 2 reps x 2 entanglements x 6 bandwidths = 48), and the tuner caps
+# n_trials at the space size, so a budget above 48 cannot be wasted re-evaluating.
 gridsearch_pqk_args: {'encoding': ['Z', 'ZZ'],
                       'reps': [1, 2],
                       'entanglement': ['linear', 'full'],
-                      'bandwidth': {low: 0.0982, high: 6.2832, log: true}
+                      'bandwidth': [0.0982, 0.3927, 1.0, 1.5708, 2.3562, 3.1416]
                      }
 
 gridsearch_qpl_args: {'encoding': ['Z', 'ZZ'],
                       'reps': [1, 2],
                       'entanglement': ['linear', 'full'],
-                      'bandwidth': {low: 0.0982, high: 6.2832, log: true}
+                      'bandwidth': [0.0982, 0.3927, 1.0, 1.5708, 2.3562, 3.1416]
                      }

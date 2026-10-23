@@ -555,6 +555,20 @@ class TestManifestMode:
         res = self.fold_frame().assign(val_auc=0.8, val_log_loss=0.4)
         assert mr.meta_feature_columns(res) == ["mfe.x"]
 
+    def test_the_selected_configuration_is_not_a_meta_feature(self):
+        """``selected_<name>`` reports what the SEARCH chose, not what the data is.
+
+        ``selected_bandwidth`` and ``selected_reps`` are numeric, so without the prefix
+        exclusion they entered the screen as dataset properties -- and they would have
+        correlated with performance, because the search picked them *for* performance.
+        Reserved by prefix rather than by name: which of them exist depends on what the
+        config offered, so an explicit list could not keep up.
+        """
+        res = self.fold_frame().assign(
+            selected_bandwidth=1.5708, selected_reps=2, selected_encoding="ZZ",
+        )
+        assert mr.meta_feature_columns(res) == ["mfe.x"]
+
     def test_unit_report_forwards_the_selection_mode(self):
         res = self.fold_frame()
         rep = mr.unit_report(res, selection="validation")

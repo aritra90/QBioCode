@@ -8,6 +8,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### The selected quantum configuration is reported per row, as its own columns
+
+A tuned quantum row already carried every chosen hyperparameter — but only inside
+`BestParams_Tuned`, which reaches `ModelResults.csv` as a single stringified dict. Asking
+"which bandwidth did split 3 pick?" meant parsing a repr per row, and asking it across a
+corpus meant parsing thousands.
+
+- **`selected_<name>` columns**, one per hyperparameter the search actually varied, beside
+  the parameter dict rather than instead of it. For the shipped projected-kernel blocks
+  that is `selected_bandwidth`, `selected_encoding`, `selected_reps` and
+  `selected_entanglement`, alongside the existing `tuning_score`, `tuning_metric` and
+  `tuning_reused` — so the stability of the selected projection across splits and datasets
+  is a `groupby` rather than a parsing exercise.
+- Written by `record_tuned_params`, which every quantum `_opt` wrapper already funnels
+  through, so `qsvc`, `qnn`, `vqc`, `pqk` and `qpl` all gain them at once. Every QPL head
+  row reports the same projection, since the heads share one.
+- Only what was searched: a parameter the config did not offer gets no column rather than
+  one holding the default. A column that mixed "chosen" with "never searched" would make a
+  stability analysis read as stable wherever the space was empty. Container values
+  (`hidden_layer_sizes`) stay in the dict, where a repr is unavoidable anyway.
+- An untuned run gains no columns, so existing result tables keep their headers.
+
+#### `bandwidth` as a discrete tuned candidate set for PQK and QPL
+
+`bandwidth` was already a member of both models' projection search space, searched jointly
+with `encoding`/`reps`/`entanglement`/`data_map` — joint rather than staged on purpose,
+since its optimum depends on the encoding (the `kernel_exps` studies put it near `pi` for
+`Z` and near `pi/32` for `ZZ`, a 30x difference). What changed is only how the shipped
+config spells the candidates:
+
+```yaml
+gridsearch_pqk_args:
+  bandwidth: [0.0982, 0.3927, 1.0, 1.5708, 2.3562, 3.1416]   # pi/32 .. pi
+```
+
+Discrete rather than the previous `{low, high, log}` range, because the selected value is
+then one of six known constants and therefore comparable across splits: a continuous range
+proposes a different float every trial, so no two splits can agree and
+`selected_bandwidth` has nothing to count. The space is finite (2 x 2 x 2 x 6 = 48) and
+the tuner caps `n_trials` at the space size, so a larger budget cannot be wasted. `qsvc`
+keeps its continuous range.
+
+The values stop at `pi` for a reason: the feature maps apply `P(2x)` per qubit and features
+are scaled to `[0, 1]`, so `bandwidth = pi` puts the data on exactly one full `2*pi`
+rotation and beyond it the angles wrap, colliding distinct feature values onto one
+rotation. `1.0` is kept so every search includes the configuration earlier results were
+produced at.
+
+`freeze_quantum_params` stays `True` in the shipped config (the sweep's cost model depends
+on it), with a note that a stability study must set it `False` — with freezing on, the
+search runs once and every later split reports the same `selected_*` values, so the
+agreement measures the freeze rather than the data.
+
 #### Parquet input datasets, wherever a CSV is accepted
 
 An input dataset may now be stored as `.csv` or `.parquet`, named with its extension. The

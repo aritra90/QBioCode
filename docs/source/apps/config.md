@@ -681,6 +681,44 @@ A tuned row also records the evidence behind its parameters in three columns,
 (True when the parameters came from the frozen cache, see below). They are bookkeeping,
 not meta-features, and the meta-regression excludes them.
 
+**The chosen configuration, per row.** Each hyperparameter the search varied is also
+written as its own `selected_<name>` column — so a tuned `pqk` or `qpl` row carries
+`selected_bandwidth`, `selected_encoding`, `selected_reps` and `selected_entanglement`
+beside `tuning_score`. The same values are inside `BestParams_Tuned`, but that reaches
+`ModelResults.csv` as one stringified dict, so reading them out of it means parsing a
+repr per row. The flat columns make the question these are for — does the search settle
+on the same projection across splits, or wander? — a `groupby`:
+
+```python
+import pandas as pd
+rows = pd.read_csv("ModelResults.csv")
+rows = rows[rows.model.str.startswith(("pqk", "qpl"))]
+rows.groupby(["Dataset", "model"])["selected_bandwidth"].nunique()   # 1 = stable
+```
+
+Only parameters the config actually offered get a column; one left unsearched is absent
+rather than recorded at its default, so a stability count cannot be inflated by
+dimensions nobody searched. An untuned run gains no such columns.
+
+**Read `nunique()` together with `tuning_score`.** Where several candidates score
+*identically* on the validation split, the argmax is a tie and which one wins is decided
+by trial order — so the selection looks unstable when the data simply does not
+distinguish the candidates. Measured on a 48-row toy problem here, four of the six shipped
+bandwidths tied at 0.833 balanced accuracy and the three splits duly "chose" three
+different values. A column of near-identical `tuning_score`s beside a high `nunique()` is
+that situation, not a finding; it resolves with more rows per split, and comparing the
+*score* each candidate earned (from the per-split trial logs under `split_mode: manifest`)
+distinguishes the two cases directly.
+
+For that comparison to mean anything, the splits must be searched independently — set
+`freeze_quantum_params: False` (see below). With freezing on, the search runs once and
+every later split reports the same `selected_*` values, so their agreement measures the
+freeze rather than the data. Prefer a **discrete** candidate list over a `{low, high}`
+range for anything you intend to compare this way: a range proposes a different float
+every trial, so no two splits can agree and the count is always "all distinct". The
+shipped `gridsearch_pqk_args`/`gridsearch_qpl_args` give `bandwidth` as six discrete
+values for exactly this reason.
+
 #### Tuning the quantum models
 
 The quantum classifiers (`qsvc`, `vqc`, `qnn`, `pqk`, `qpl`) tune through the same

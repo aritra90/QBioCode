@@ -1446,6 +1446,44 @@ def _validation_function_study(compute_fn, space, args, validation, *, model, n_
     return best
 
 
+#: Prefix of the per-hyperparameter columns :func:`selected_columns` writes.
+SELECTED_PREFIX = "selected_"
+
+
+def selected_columns(best_params):
+    """``{'selected_<name>': value}`` for each hyperparameter a search chose.
+
+    The searched parameters also go into the row's parameter dict, but that dict reaches
+    ModelResults.csv as a single stringified cell -- so asking "which bandwidth did split
+    3 pick?" means parsing a repr per row, and asking it across a corpus means parsing
+    thousands. These columns answer it with a ``groupby``.
+
+    Only what the search actually varied. A parameter the config did not offer is absent
+    rather than written as the default: the question these columns exist for is what the
+    search *chose*, and a column that silently mixes "chosen" with "never searched" would
+    make a stability analysis read as stable wherever the space was empty.
+
+    Scalars only. A searched value that is a container (``hidden_layer_sizes: [[20],
+    [50]]``) is left to the parameter dict -- a list in a CSV cell is a repr again, so a
+    column would not help, and these are the quantum projection parameters in practice,
+    which are all scalar.
+
+    Args:
+        best_params (Mapping): what a search returned -- a :class:`TunedParams` or any
+            mapping of chosen hyperparameters.
+
+    Returns:
+        dict: possibly empty, which is what an untuned run and a non-mapping both give.
+    """
+    if not isinstance(best_params, Mapping):
+        return {}
+    selected = {}
+    for name, value in best_params.items():
+        if isinstance(value, (str, bool, int, float)) or value is None:
+            selected[f"{SELECTED_PREFIX}{name}"] = value
+    return selected
+
+
 def record_tuned_params(frame, best_params, beg_time):
     """Report the tuned hyperparameters and the whole search's wall clock.
 
@@ -1470,9 +1508,17 @@ def record_tuned_params(frame, best_params, beg_time):
     holding :meth:`TunedParams.trial_log`, on the row that column is populated on --
     unless the frame already has that column, which a wrapper writing a per-head log
     (QPL) owns. Without trials the frame gains no column.
+
+    Each searched hyperparameter is ALSO written as its own ``selected_<name>`` column
+    (see :func:`selected_columns`), beside the parameter dict rather than instead of it.
+    The dict reaches ModelResults.csv as one stringified cell, so reading the chosen
+    ``bandwidth`` or ``encoding`` out of it means parsing a repr per row -- which is the
+    wrong shape for the question these columns are for: whether the search settles on the
+    same projection across the splits of a dataset, or wanders.
     """
     elapsed = time.time() - beg_time
     evidence = best_params.evidence() if isinstance(best_params, TunedParams) else {}
+    selected = selected_columns(best_params)
     # QPL reports one row per classical head; each carries its own parameter dict and
     # each understates the time by the whole search, so every one is corrected.
     for metrics in _metric_dicts(frame, "tuned model"):
@@ -1483,6 +1529,7 @@ def record_tuned_params(frame, best_params, beg_time):
         )
         metrics["time"] = elapsed
         metrics.update(evidence)
+        metrics.update(selected)
     log = best_params.trial_log() if isinstance(best_params, TunedParams) else None
     if log is not None:
         _attach_trial_log(frame, log)
