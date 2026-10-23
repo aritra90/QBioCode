@@ -666,7 +666,7 @@ class TestTheModelDocsMatchTheCode:
     @staticmethod
     def _dispatch_keys():
         """The model names ``model_run`` accepts, read out of its own table."""
-        source = (REPO_ROOT / "qbiocode" / "evaluation" / "model_run.py").read_text()
+        source = (REPO_ROOT / "qbiocode" / "evaluation" / "model_run.py").read_text(encoding="utf-8")
         block = source.split("compute_ml_dict = {")[1].split("}")[0]
         keys = re.findall(r'"([a-z_0-9]+)":\s*compute_', block)
         assert keys, "could not read compute_ml_dict out of model_run.py"
@@ -750,7 +750,7 @@ class TestTheModelDocsMatchTheCode:
         added -- which is exactly why it needs a test rather than a careful reader. A user
         reading only the docs would not know two of the four surrogates existed.
         """
-        source = (REPO_ROOT / "qbiocode" / "apps" / "sage" / "sage.py").read_text()
+        source = (REPO_ROOT / "qbiocode" / "apps" / "sage" / "sage.py").read_text(encoding="utf-8")
         block = source.split("valid_sage_types = [")[1].split("]")[0]
         declared = re.findall(r"'([a-z_]+)'", block)
         assert declared, "could not read valid_sage_types out of sage.py"

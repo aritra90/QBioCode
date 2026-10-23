@@ -27,6 +27,12 @@ jobs:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
     
+    - name: Install Bash and OpenMP runtime on macOS
+      if: runner.os == 'macOS'
+      run: |
+        brew install bash libomp
+        echo "$(brew --prefix bash)/bin" >> "$GITHUB_PATH"
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -42,7 +48,15 @@ jobs:
       continue-on-error: true
     
     - name: Run tests
+      shell: bash
       run: |
+        # The tests launch Bash themselves. Pass this executable explicitly so
+        # Windows does not find the WSL launcher through its native PATH.
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          export QBIOCODE_TEST_BASH="$(cygpath -w "$BASH")"
+        else
+          export QBIOCODE_TEST_BASH="$BASH"
+        fi
         python -m pytest --cov=qbiocode --cov-report=xml --cov-report=term
     
     - name: Upload coverage to Codecov

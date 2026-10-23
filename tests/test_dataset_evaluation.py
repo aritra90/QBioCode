@@ -58,7 +58,7 @@ from qbiocode.evaluation.mfe_features import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = REPO_ROOT / "tutorial" / "QProfiler" / "data" / "ld_data" / "class_data-1.csv"
+FIXTURE = Path(__file__).resolve().parent / "data" / "class_data-1.csv"
 
 
 def _fixture():

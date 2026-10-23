@@ -175,42 +175,36 @@ class TestQProfilerHonoursIt:
 class TestTheShippedConfigsAgreeWithTheirData:
     """A config whose data is narrower than its threshold silently stops embedding.
 
-    Both QProfiler tutorials ship data below the default and draw a 'none' vs 'pca'
+    Both QProfiler tutorials generate data below the default and draw a 'none' vs 'pca'
     comparison, so both must opt out explicitly. Without this test the tutorials would
     keep running and quietly produce one embedding group where their notebooks -- and the
     committed correlation figures -- describe two.
     """
 
     @pytest.mark.parametrize(
-        "config,data_dir",
+        "config,n_features",
         [
-            ("tutorial/QProfiler/configs/config.yaml", "tutorial/QProfiler/data/ld_data"),
-            (
-                "tutorial/QProfiler_v2/configs/config.yaml",
-                "tutorial/QProfiler_v2/data/ld_data_v2",
-            ),
+            # Feature counts from the notebooks' data-generation recipes; their
+            # generated CSVs are absent from a clean checkout.
+            ("tutorial/QProfiler/configs/config.yaml", 10),
+            ("tutorial/QProfiler_v2/configs/config.yaml", 6),
         ],
     )
-    def test_a_tutorial_that_embeds_narrow_data_opts_out_explicitly(self, config, data_dir):
-        import pandas as pd
-
-        text = (REPO_ROOT / config).read_text()
+    def test_a_tutorial_that_embeds_narrow_data_opts_out_explicitly(self, config, n_features):
+        text = (REPO_ROOT / config).read_text(encoding="utf-8")
         loaded = yaml.safe_load(text)
         requested = [str(e).lower().strip() for e in loaded["embeddings"]]
-        if requested == ["none"]:
-            pytest.skip("config asks for no embedding, so the threshold cannot bite")
-
-        csvs = sorted((REPO_ROOT / data_dir).glob("*.csv"))
-        assert csvs, f"no data found under {data_dir}"
-        n_features = pd.read_csv(csvs[0], sep=r"\t|,", engine="python").shape[1] - 1
+        assert requested == ["none", "pca"], f"{config} must retain its embedding comparison"
+        assert loaded.get("embedding_min_features") == 0, (
+            f"{config} must explicitly set embedding_min_features: 0"
+        )
 
         effective, skipped = resolve_embeddings(
             requested,
             n_features,
-            min_features=loaded.get(
-                "embedding_min_features", DEFAULT_EMBEDDING_MIN_FEATURES
-            ),
+            min_features=loaded["embedding_min_features"],
         )
+        assert effective == requested
         assert not skipped, (
             f"{config} asks for {requested} on {n_features}-feature data, but its "
             f"embedding_min_features leaves {skipped} suppressed. The notebook and its "

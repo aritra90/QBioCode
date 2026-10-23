@@ -141,6 +141,7 @@ docs = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "tomli>=2.0; python_version < '3.11'",
     # tests/integration/test_notebook_execution.py executes every tracked
     # notebook through these two. Undeclared, they were reached by
     # ``pytest.importorskip`` and 21 notebook tests skipped silently in any

@@ -276,7 +276,10 @@ def main():
     print(f"wrote {len(res)} rows ({res['Dataset'].nunique()} datasets, "
           f"{res['model'].nunique()} models) to {args.out_dir}/ModelResults.csv")
     def short(p):
-        rel = os.path.relpath(p)
+        try:
+            rel = os.path.relpath(p)
+        except ValueError:  # Windows paths on different drives have no relative form.
+            return os.path.abspath(p)
         return rel if not rel.startswith("..") else os.path.abspath(p)
     print(f"next: ./analyze_pilot.py --results-root {short(args.out_dir)} "
           f"--kernels-root {short(args.runs_dir)}")
