@@ -79,112 +79,6 @@ FAMILY = "tcga_rna"
 DUPLICATE_POLICIES = ("fail", "average")
 
 
-def sample_type(barcode: str) -> str | None:
-    """The TCGA sample-type code of a barcode: ``'01'`` from ``'TCGA-2F-A9KO-01A'``.
-
-    A barcode's fourth field is the sample type (two digits) followed by the vial (a
-    letter): ``01`` primary solid tumour, ``02`` recurrent, ``06`` metastatic, ``11``
-    solid tissue normal. The distinction is what decides whether two samples of one
-    patient may be averaged -- two vials of one tumour are replicates of the same
-    tissue, a tumour and a normal are not the same measurement at all.
-
-    Returns:
-        str | None: the two-digit code, or None if the barcode does not carry one.
-    """
-    parts = str(barcode).split("-")
-    if len(parts) < 4 or len(parts[3]) < 2 or not parts[3][:2].isdigit():
-        return None
-    return parts[3][:2]
-
-
-def collapse_patients(X, y, patients, policy):
-    """One row per patient, averaging the samples of each.
-
-    Only ever averages samples that share a :func:`sample_type`. A patient with two
-    sample types is a tumour/normal or tumour/metastasis pair, and the mean of those is
-    not a measurement of anything -- so it raises rather than quietly producing one.
-
-    The labels need no reconciliation: PFI and OS are patient-level outcomes, so every
-    sample of a patient already carries the same value. That is asserted rather than
-    assumed, because it is the premise that makes averaging meaningful at all.
-
-    Args:
-        X (pandas.DataFrame): samples x genes, indexed by sample barcode.
-        y (pandas.Series): the label per sample barcode.
-        patients (pandas.Series): the patient barcode per sample barcode.
-        policy (str): one of :data:`DUPLICATE_POLICIES`.
-
-    Returns:
-        (DataFrame, Series, dict): the collapsed matrix and labels, indexed by patient
-        barcode, and a report of what was done.
-
-    Raises:
-        ValueError: under ``policy='fail'`` when any patient has several samples; under
-            either policy when one patient's samples disagree on the label or span more
-            than one sample type.
-    """
-    counts = patients.value_counts()
-    multi = counts[counts > 1]
-    report = {
-        "samples_in": int(len(X)),
-        "patients": int(counts.size),
-        "patients_collapsed": int(multi.size),
-        "samples_merged_away": int(len(X) - counts.size),
-        "duplicate_policy": policy,
-        "sample_types": {},
-    }
-    types = patients.index.map(sample_type)
-    report["sample_types"] = {
-        str(code): int(n) for code, n in
-        pd.Series(types).value_counts().sort_index().items()
-    }
-
-    if multi.empty:
-        report["duplicate_policy"] = "none needed"
-        return X, y, report
-
-    if policy == "fail":
-        raise ValueError(
-            f"{multi.size} patient(s) contribute several samples "
-            f"({int(len(X) - counts.size)} extra rows), so two rows of one patient can "
-            f"land on opposite sides of a split. PFI and OS are patient-level outcomes, "
-            f"so those rows carry the SAME label and a model that recognises the patient "
-            f"recovers it -- which inflates every score. Pass "
-            f"--on-duplicate-patient average to average each patient's samples, or "
-            f"resolve it upstream."
-        )
-
-    # Label agreement, and tissue-type agreement, before anything is averaged.
-    by_patient = pd.DataFrame({"patient": patients.to_numpy(),
-                               "label": y.to_numpy(),
-                               "type": list(types)}, index=X.index)
-    disagree = by_patient.groupby("patient")["label"].nunique()
-    if (disagree > 1).any():
-        bad = list(disagree[disagree > 1].index[:5])
-        raise ValueError(
-            f"patient(s) {bad} have samples with DIFFERENT labels, which contradicts "
-            f"PFI/OS being patient-level. Averaging would invent a label; resolve this "
-            f"in the label table first."
-        )
-    mixed = by_patient.groupby("patient")["type"].nunique()
-    if (mixed > 1).any():
-        offenders = list(mixed[mixed > 1].index[:5])
-        detail = {p: sorted(by_patient.loc[by_patient.patient == p, "type"].unique())
-                  for p in offenders}
-        raise ValueError(
-            f"patient(s) with MORE THAN ONE sample type: {detail}. TCGA codes 01, 02, "
-            f"06 and 11 are primary tumour, recurrence, metastasis and normal tissue -- "
-            f"different measurements, whose mean is not a measurement. Averaging is "
-            f"refused here; drop the unwanted sample types upstream and re-run."
-        )
-
-    grouped = X.groupby(patients.to_numpy(), sort=True)
-    collapsed = grouped.mean()
-    labels = y.groupby(patients.to_numpy(), sort=True).first()
-    collapsed.index.name = "patient_barcode"
-    return collapsed, labels.loc[collapsed.index], report
-
-
 def sha256_of(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -214,6 +108,153 @@ def read_matrix(path: Path) -> pd.DataFrame:
             f"matrix with the roles of rows and columns swapped."
         )
     return frame.T
+
+
+def sample_type(barcode: str) -> str | None:
+    """The TCGA sample-type code of a barcode: ``'01'`` from ``'TCGA-2F-A9KO-01A'``.
+
+    A barcode's fourth field is the sample type (two digits) followed by the vial (a
+    letter): ``01`` primary solid tumour, ``02`` recurrent, ``06`` metastatic, ``11``
+    solid tissue normal. The distinction is what decides whether two samples of one
+    patient may be averaged -- two vials of one tumour are replicates of the same
+    tissue, a tumour and a normal are not the same measurement at all.
+
+    Returns:
+        str | None: the two-digit code, or None if the barcode does not carry one.
+    """
+    parts = str(barcode).split("-")
+    if len(parts) < 4 or len(parts[3]) < 2 or not parts[3][:2].isdigit():
+        return None
+    return parts[3][:2]
+
+
+#: TCGA sample-type codes, in the order one is preferred when a patient has several.
+#: Primary solid tumour first: it is what the cohort is about, what the PFI/OS label was
+#: defined against, and the only type present for the large majority of patients, so
+#: preferring it keeps the corpus homogeneous. Then additional primary, recurrence, and
+#: the metastatic codes -- a patient with only a metastasis still contributes one row
+#: rather than being dropped.
+#:
+#:   01 primary solid tumour      05 additional new primary     02 recurrent solid tumour
+#:   06 metastatic                07 additional metastatic      11 solid tissue NORMAL
+#:
+#: 11 is deliberately absent. Healthy tissue carries the patient's outcome label without
+#: carrying the tumour the label describes, so it is not an observation of what is being
+#: predicted; a cohort offering only normal tissue for a patient drops that patient.
+SAMPLE_TYPE_PRECEDENCE = ("01", "05", "02", "06", "07")
+
+
+def collapse_patients(X, y, patients, policy):
+    """One row per patient: one sample type, then the mean of its replicate vials.
+
+    TCGA gives some patients several samples, and they are not interchangeable. The
+    fourth field of a barcode is the sample type (:func:`sample_type`), and the real
+    cohorts pair a primary tumour with a recurrence (``01`` + ``02``), a metastasis
+    (``01`` + ``06``) or an additional primary (``01`` + ``05``). Averaging across those
+    would mix two different tumours; keeping both would put two rows of one patient --
+    carrying the SAME patient-level label -- on opposite sides of a split.
+
+    So each patient keeps the single most preferred type it offers
+    (:data:`SAMPLE_TYPE_PRECEDENCE`), and only genuine replicates of that one type, two
+    vials of one tumour, are averaged. Everything dropped is counted and reported.
+
+    The labels need no reconciliation: PFI and OS are patient-level outcomes, so every
+    sample of a patient already carries the same value. That is asserted rather than
+    assumed, because it is the premise that makes the mean meaningful at all.
+
+    Args:
+        X (pandas.DataFrame): samples x genes, indexed by sample barcode.
+        y (pandas.Series): the label per sample barcode.
+        patients (pandas.Series): the patient barcode per sample barcode.
+        policy (str): one of :data:`DUPLICATE_POLICIES`. ``'fail'`` refuses any patient
+            with several samples; ``'average'`` applies the rule above.
+
+    Returns:
+        (DataFrame, Series, dict): the collapsed matrix and labels, indexed by patient
+        barcode, and a report of what was kept and dropped.
+
+    Raises:
+        ValueError: under ``'fail'`` when any patient has several samples; under either
+            policy when one patient's samples disagree on the label, or when a sample
+            carries a type this module does not rank.
+    """
+    counts = patients.value_counts()
+    multi = counts[counts > 1]
+    types = pd.Series([sample_type(barcode) for barcode in X.index], index=X.index)
+    report = {
+        "samples_in": int(len(X)),
+        "patients": int(counts.size),
+        "patients_collapsed": 0,
+        "samples_merged_away": 0,
+        "samples_dropped_by_type": 0,
+        "patients_dropped_no_usable_type": 0,
+        "duplicate_policy": policy,
+        "sample_types": {str(code): int(n)
+                         for code, n in types.value_counts().sort_index().items()},
+    }
+
+    if multi.empty:
+        report["duplicate_policy"] = "none needed"
+        return X, y, report
+
+    if policy == "fail":
+        raise ValueError(
+            f"{multi.size} patient(s) contribute several samples "
+            f"({int(len(X) - counts.size)} extra rows), so two rows of one patient can "
+            f"land on opposite sides of a split. PFI and OS are patient-level outcomes, "
+            f"so those rows carry the SAME label and a model that recognises the patient "
+            f"recovers it -- which inflates every score. Pass "
+            f"--on-duplicate-patient average to keep one sample type per patient "
+            f"(primary tumour preferred) and average its replicate vials, or resolve it "
+            f"upstream."
+        )
+
+    frame = pd.DataFrame({"patient": patients.to_numpy(), "label": y.to_numpy(),
+                          "type": types.to_numpy()}, index=X.index)
+
+    disagree = frame.groupby("patient")["label"].nunique()
+    if (disagree > 1).any():
+        bad = list(disagree[disagree > 1].index[:5])
+        raise ValueError(
+            f"patient(s) {bad} have samples with DIFFERENT labels, which contradicts "
+            f"PFI/OS being patient-level. Averaging would invent a label; resolve this "
+            f"in the label table first."
+        )
+
+    unranked = sorted(set(frame["type"].dropna()) - set(SAMPLE_TYPE_PRECEDENCE))
+    if unranked:
+        raise ValueError(
+            f"sample type(s) {unranked} are not ranked in SAMPLE_TYPE_PRECEDENCE "
+            f"{list(SAMPLE_TYPE_PRECEDENCE)}. Code 11 is solid tissue NORMAL, which "
+            f"carries a patient's outcome without carrying the tumour it describes; "
+            f"anything else needs a deliberate decision about where it belongs in the "
+            f"precedence before these rows can be used."
+        )
+
+    rank = {code: position for position, code in enumerate(SAMPLE_TYPE_PRECEDENCE)}
+    frame["rank"] = frame["type"].map(rank)
+    usable = frame[frame["rank"].notna()]
+    report["patients_dropped_no_usable_type"] = int(
+        frame["patient"].nunique() - usable["patient"].nunique())
+
+    # The best type each patient offers, then only that type's rows.
+    best = usable.groupby("patient")["rank"].min()
+    keep_mask = usable["rank"] == usable["patient"].map(best)
+    kept = usable[keep_mask]
+    report["samples_dropped_by_type"] = int(len(usable) - len(kept))
+
+    kept_counts = kept["patient"].value_counts()
+    report["patients_collapsed"] = int((kept_counts > 1).sum())
+    report["samples_merged_away"] = int(len(kept) - kept_counts.size)
+    report["types_kept"] = {str(code): int(n)
+                            for code, n in kept["type"].value_counts().sort_index().items()}
+
+    X_kept = X.loc[kept.index]
+    collapsed = X_kept.groupby(kept["patient"].to_numpy(), sort=True).mean()
+    labels = y.loc[kept.index].groupby(kept["patient"].to_numpy(), sort=True).first()
+    collapsed.index.name = "patient_barcode"
+    report["patients"] = int(len(collapsed))
+    return collapsed, labels.loc[collapsed.index], report
 
 
 def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
@@ -302,6 +343,10 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
         "samples_merged_away": int(dup_report["samples_merged_away"]),
         "duplicate_policy": dup_report["duplicate_policy"],
         "sample_types": dup_report["sample_types"],
+        "sample_types_kept": dup_report.get("types_kept", dup_report["sample_types"]),
+        "samples_dropped_by_type": int(dup_report["samples_dropped_by_type"]),
+        "patients_dropped_no_usable_type": int(
+            dup_report["patients_dropped_no_usable_type"]),
         "family": FAMILY,
         "dropped_constant_columns": len(constant),
         "samples_without_expression": len(label_only),
@@ -420,10 +465,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  minority        : {inventory.minority_n.min()}-"
               f"{inventory.minority_n.max()}")
         merged = int(inventory.samples_merged_away.sum())
-        if merged:
-            print(f"  patients        : {merged} sample(s) merged into "
-                  f"{int(inventory.patients_collapsed.sum())} patient(s) by "
-                  f"--on-duplicate-patient average; one row is now one patient")
+        by_type = int(inventory.samples_dropped_by_type.sum())
+        if merged or by_type:
+            print(f"  patients        : one row is now one patient -- "
+                  f"{by_type} sample(s) dropped as a less-preferred sample type "
+                  f"(primary tumour preferred), {merged} replicate vial(s) averaged "
+                  f"into {int(inventory.patients_collapsed.sum())} patient(s)")
+            kept = {}
+            for mapping in inventory.sample_types_kept:
+                for code, n in dict(mapping).items():
+                    kept[code] = kept.get(code, 0) + int(n)
+            print(f"  sample types    : {dict(sorted(kept.items()))} "
+                  f"(01 primary, 05 add. primary, 02 recurrent, 06/07 metastatic)")
         print(f"  dropped samples : {int(inventory.samples_without_expression.sum())} "
               f"labelled but not in a matrix, "
               f"{int(inventory.samples_with_missing_label.sum())} with a missing label, "
