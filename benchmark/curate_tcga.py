@@ -74,6 +74,116 @@ LABEL_COLUMNS = ("PFI_label", "OS_label")
 #: so the choice is visible in the corpus rather than implicit in an analysis script.
 FAMILY = "tcga_rna"
 
+#: What to do when one patient contributes several samples. ``fail`` is the default
+#: because the alternative is a decision about someone else's data made silently.
+DUPLICATE_POLICIES = ("fail", "average")
+
+
+def sample_type(barcode: str) -> str | None:
+    """The TCGA sample-type code of a barcode: ``'01'`` from ``'TCGA-2F-A9KO-01A'``.
+
+    A barcode's fourth field is the sample type (two digits) followed by the vial (a
+    letter): ``01`` primary solid tumour, ``02`` recurrent, ``06`` metastatic, ``11``
+    solid tissue normal. The distinction is what decides whether two samples of one
+    patient may be averaged -- two vials of one tumour are replicates of the same
+    tissue, a tumour and a normal are not the same measurement at all.
+
+    Returns:
+        str | None: the two-digit code, or None if the barcode does not carry one.
+    """
+    parts = str(barcode).split("-")
+    if len(parts) < 4 or len(parts[3]) < 2 or not parts[3][:2].isdigit():
+        return None
+    return parts[3][:2]
+
+
+def collapse_patients(X, y, patients, policy):
+    """One row per patient, averaging the samples of each.
+
+    Only ever averages samples that share a :func:`sample_type`. A patient with two
+    sample types is a tumour/normal or tumour/metastasis pair, and the mean of those is
+    not a measurement of anything -- so it raises rather than quietly producing one.
+
+    The labels need no reconciliation: PFI and OS are patient-level outcomes, so every
+    sample of a patient already carries the same value. That is asserted rather than
+    assumed, because it is the premise that makes averaging meaningful at all.
+
+    Args:
+        X (pandas.DataFrame): samples x genes, indexed by sample barcode.
+        y (pandas.Series): the label per sample barcode.
+        patients (pandas.Series): the patient barcode per sample barcode.
+        policy (str): one of :data:`DUPLICATE_POLICIES`.
+
+    Returns:
+        (DataFrame, Series, dict): the collapsed matrix and labels, indexed by patient
+        barcode, and a report of what was done.
+
+    Raises:
+        ValueError: under ``policy='fail'`` when any patient has several samples; under
+            either policy when one patient's samples disagree on the label or span more
+            than one sample type.
+    """
+    counts = patients.value_counts()
+    multi = counts[counts > 1]
+    report = {
+        "samples_in": int(len(X)),
+        "patients": int(counts.size),
+        "patients_collapsed": int(multi.size),
+        "samples_merged_away": int(len(X) - counts.size),
+        "duplicate_policy": policy,
+        "sample_types": {},
+    }
+    types = patients.index.map(sample_type)
+    report["sample_types"] = {
+        str(code): int(n) for code, n in
+        pd.Series(types).value_counts().sort_index().items()
+    }
+
+    if multi.empty:
+        report["duplicate_policy"] = "none needed"
+        return X, y, report
+
+    if policy == "fail":
+        raise ValueError(
+            f"{multi.size} patient(s) contribute several samples "
+            f"({int(len(X) - counts.size)} extra rows), so two rows of one patient can "
+            f"land on opposite sides of a split. PFI and OS are patient-level outcomes, "
+            f"so those rows carry the SAME label and a model that recognises the patient "
+            f"recovers it -- which inflates every score. Pass "
+            f"--on-duplicate-patient average to average each patient's samples, or "
+            f"resolve it upstream."
+        )
+
+    # Label agreement, and tissue-type agreement, before anything is averaged.
+    by_patient = pd.DataFrame({"patient": patients.to_numpy(),
+                               "label": y.to_numpy(),
+                               "type": list(types)}, index=X.index)
+    disagree = by_patient.groupby("patient")["label"].nunique()
+    if (disagree > 1).any():
+        bad = list(disagree[disagree > 1].index[:5])
+        raise ValueError(
+            f"patient(s) {bad} have samples with DIFFERENT labels, which contradicts "
+            f"PFI/OS being patient-level. Averaging would invent a label; resolve this "
+            f"in the label table first."
+        )
+    mixed = by_patient.groupby("patient")["type"].nunique()
+    if (mixed > 1).any():
+        offenders = list(mixed[mixed > 1].index[:5])
+        detail = {p: sorted(by_patient.loc[by_patient.patient == p, "type"].unique())
+                  for p in offenders}
+        raise ValueError(
+            f"patient(s) with MORE THAN ONE sample type: {detail}. TCGA codes 01, 02, "
+            f"06 and 11 are primary tumour, recurrence, metastasis and normal tissue -- "
+            f"different measurements, whose mean is not a measurement. Averaging is "
+            f"refused here; drop the unwanted sample types upstream and re-run."
+        )
+
+    grouped = X.groupby(patients.to_numpy(), sort=True)
+    collapsed = grouped.mean()
+    labels = y.groupby(patients.to_numpy(), sort=True).first()
+    collapsed.index.name = "patient_barcode"
+    return collapsed, labels.loc[collapsed.index], report
+
 
 def sha256_of(path: Path) -> str:
     digest = hashlib.sha256()
@@ -106,7 +216,8 @@ def read_matrix(path: Path) -> pd.DataFrame:
     return frame.T
 
 
-def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str) -> tuple[pd.DataFrame, dict]:
+def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
+               policy: str = "fail") -> tuple[pd.DataFrame, dict]:
     """``(curated, meta)`` for one cancer: features first, label last.
 
     Args:
@@ -146,9 +257,17 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str) -> tuple
             f"(model_evaluation.roc_auc_score)"
         )
 
+    # One row per PATIENT before anything else looks at the matrix. PFI and OS are
+    # patient-level outcomes, so two samples of one patient carry the same label; left
+    # as separate rows they can straddle a split, and a model that recognises the
+    # patient from its expression recovers the label. Averaging replicates is what the
+    # upstream processing was documented as doing and demonstrably did not.
+    patients = mine.set_index("sample_barcode").loc[keep, "patient_barcode"]
+    X, y, dup_report = collapse_patients(X, y, patients, policy)
+
     # Genes that are constant across the cohort carry no information and would occupy a
-    # qubit or a PCA component for nothing. Dropped here, where it is recorded, rather
-    # than left for the variance selector to rank last.
+    # qubit or a PCA component for nothing. Dropped AFTER collapsing, because averaging
+    # can make a gene constant that was not.
     constant = [column for column in X.columns if X[column].nunique(dropna=False) <= 1]
     if constant:
         X = X.drop(columns=constant)
@@ -158,7 +277,6 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str) -> tuple
 
     counts = y.value_counts()
     minority_n = int(counts.min())
-    patients = mine.set_index("sample_barcode").loc[keep, "patient_barcode"]
     meta = {
         "dataset_id": dataset_id,
         "source": "tcga",
@@ -172,27 +290,28 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str) -> tuple
         "minority_n": minority_n,
         "minority_fraction": round(minority_n / len(curated), 6),
         "n_components_max": int(X.shape[1]),
-        # One row is one patient: the upstream processing averaged multi-sample patients,
-        # and the assertion below checks it. If that ever stops holding, this must become
-        # 'patient_barcode' -- make_splits.py reads it and switches to
-        # StratifiedGroupKFold, which keeps a patient's samples on one side of a split.
+        # None, and now TRUE BY CONSTRUCTION rather than by assumption: collapse_patients
+        # has made one row one patient. group_col is not the alternative -- make_splits.py
+        # reads it as frame[group_col], i.e. a COLUMN OF THE CSV, where every column but
+        # the last is a feature. A patient barcode there would be handed to the models as
+        # a near-unique identifier, which is a worse leak than the one it fixes.
         "group_col": None,
-        "distinct_patients": int(patients.nunique()),
+        "distinct_patients": int(dup_report["patients"]),
+        "samples_before_collapse": int(dup_report["samples_in"]),
+        "patients_collapsed": int(dup_report["patients_collapsed"]),
+        "samples_merged_away": int(dup_report["samples_merged_away"]),
+        "duplicate_policy": dup_report["duplicate_policy"],
+        "sample_types": dup_report["sample_types"],
         "family": FAMILY,
         "dropped_constant_columns": len(constant),
         "samples_without_expression": len(label_only),
         "samples_without_label": len(expr_only),
         "samples_with_missing_label": missing_label,
     }
-    if meta["distinct_patients"] != meta["n"]:
-        raise ValueError(
-            f"{dataset_id}: {meta['n']} rows but {meta['distinct_patients']} distinct "
-            f"patients, so some patient contributes several samples. The upstream "
-            f"processing is documented as averaging those; since it did not here, set "
-            f"group_col: 'patient_barcode' in this meta.yaml before running "
-            f"make_splits.py, or two samples of one patient can land on opposite sides "
-            f"of a split and inflate every score."
-        )
+    # collapse_patients guarantees this; asserted because it is the property every
+    # split downstream depends on and it costs nothing to check.
+    assert meta["n"] == meta["distinct_patients"], (dataset_id, meta["n"],
+                                                    meta["distinct_patients"])
     return curated, meta
 
 
@@ -205,6 +324,13 @@ def main(argv: list[str] | None = None) -> int:
                              "separate from the existing corpus so the two can be "
                              "curated, split and run independently")
     parser.add_argument("--label", choices=LABEL_COLUMNS, default="PFI_label")
+    parser.add_argument("--on-duplicate-patient", choices=DUPLICATE_POLICIES,
+                        default="fail",
+                        help="what to do when one patient contributes several samples. "
+                             "'fail' (default) refuses, naming the count; 'average' "
+                             "takes the mean of each patient's samples, which is valid "
+                             "only for replicates of ONE tissue and is refused when a "
+                             "patient's samples span several TCGA sample types")
     parser.add_argument("--min-minority", type=int, default=5,
                         help="skip a cohort whose minority class is smaller than this; "
                              "make_splits.py needs k <= minority and the default k is 5")
@@ -246,7 +372,8 @@ def main(argv: list[str] | None = None) -> int:
             failures.append((path.name, "file name does not end _<CANCER>.parquet"))
             continue
         try:
-            curated, meta = curate_one(path, per_sample, args.label)
+            curated, meta = curate_one(path, per_sample, args.label,
+                                       args.on_duplicate_patient)
         except Exception as error:  # noqa: BLE001 - report every cohort, fail at the end
             failures.append((path.name, str(error)))
             print(f"  FAIL     {path.name}: {error}")
@@ -292,6 +419,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  n               : {inventory.n.min()}-{inventory.n.max()} samples")
         print(f"  minority        : {inventory.minority_n.min()}-"
               f"{inventory.minority_n.max()}")
+        merged = int(inventory.samples_merged_away.sum())
+        if merged:
+            print(f"  patients        : {merged} sample(s) merged into "
+                  f"{int(inventory.patients_collapsed.sum())} patient(s) by "
+                  f"--on-duplicate-patient average; one row is now one patient")
         print(f"  dropped samples : {int(inventory.samples_without_expression.sum())} "
               f"labelled but not in a matrix, "
               f"{int(inventory.samples_with_missing_label.sum())} with a missing label, "
