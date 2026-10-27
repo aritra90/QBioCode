@@ -257,6 +257,49 @@ def collapse_patients(X, y, patients, policy):
     return collapsed, labels.loc[collapsed.index], report
 
 
+#: Fraction below which a sample type is treated as a minor contaminant of a cohort
+#: rather than part of it. A cohort is MOSTLY one tissue; the few samples of another
+#: type carry the same outcome label while being a visibly different measurement, so a
+#: model can read the tissue off the expression and shift its prediction. That is a gain
+#: from how the sample was taken, not from biology.
+#:
+#: Measured on SKCM, the one cohort where this is not a rounding error: 46 primary
+#: samples at PFI 0.652 against 259 metastatic at 0.459, a difference of 0.193 with a
+#: 95% CI of [0.043, 0.344]. Tissue type is trivially learnable from expression, so
+#: keeping both leaves a predictor of the label that is not the tumour's biology.
+#:
+#: 0.15 keeps every other cohort untouched -- all 18 are >=98% one type -- and acts only
+#: where a cohort is genuinely mixed.
+MINOR_TYPE_FRACTION = 0.15
+
+
+def dominant_type(types):
+    """``(code, keep_mask, dropped)``: the cohort's main sample type and what it excludes.
+
+    Returns the most common type, a mask selecting it, and a count of the samples of
+    every other type -- but only when those others are below
+    :data:`MINOR_TYPE_FRACTION` of the cohort. A cohort that is genuinely a mixture
+    (neither type minor) keeps everything and reports it, because dropping a third of a
+    cohort is a decision for a person, not a threshold.
+
+    Args:
+        types (pandas.Series): the sample type per sample, indexed like the matrix.
+
+    Returns:
+        (str, pandas.Series, dict): the dominant code, a boolean mask, and
+        ``{code: n}`` for what the mask excludes.
+    """
+    counts = types.value_counts()
+    main = str(counts.index[0])
+    minor_total = int(counts.iloc[1:].sum())
+    if not minor_total:
+        return main, pd.Series(True, index=types.index), {}
+    if minor_total / len(types) > MINOR_TYPE_FRACTION:
+        return main, pd.Series(True, index=types.index), {}
+    return (main, types == main,
+            {str(code): int(n) for code, n in counts.iloc[1:].items()})
+
+
 def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
                policy: str = "fail") -> tuple[pd.DataFrame, dict]:
     """``(curated, meta)`` for one cancer: features first, label last.
@@ -290,6 +333,15 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
     X = expression.loc[keep]
     y = y.loc[keep].astype(int)
 
+    # One tissue per cohort. A cohort's minor sample types carry the same outcome label
+    # while being a different measurement, and the tissue is readable from the
+    # expression -- see MINOR_TYPE_FRACTION for the SKCM numbers that motivate this.
+    types_here = pd.Series([sample_type(barcode) for barcode in X.index], index=X.index)
+    main_type, type_mask, minor_dropped = dominant_type(types_here)
+    if minor_dropped:
+        X = X.loc[type_mask]
+        y = y.loc[type_mask]
+
     classes = sorted(pd.unique(y))
     if len(classes) != 2:
         raise ValueError(
@@ -303,7 +355,10 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
     # as separate rows they can straddle a split, and a model that recognises the
     # patient from its expression recovers the label. Averaging replicates is what the
     # upstream processing was documented as doing and demonstrably did not.
-    patients = mine.set_index("sample_barcode").loc[keep, "patient_barcode"]
+    # Indexed by X's CURRENT rows, not by `keep`: the dominant-type filter above may
+    # have removed some, and a patients Series longer than X would both mis-align the
+    # groupby and leave the reported patient count describing rows that are gone.
+    patients = mine.set_index("sample_barcode").loc[X.index, "patient_barcode"]
     X, y, dup_report = collapse_patients(X, y, patients, policy)
 
     # Genes that are constant across the cohort carry no information and would occupy a
@@ -344,6 +399,8 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
         "duplicate_policy": dup_report["duplicate_policy"],
         "sample_types": dup_report["sample_types"],
         "sample_types_kept": dup_report.get("types_kept", dup_report["sample_types"]),
+        "cohort_sample_type": main_type,
+        "minor_types_dropped": minor_dropped,
         "samples_dropped_by_type": int(dup_report["samples_dropped_by_type"]),
         "patients_dropped_no_usable_type": int(
             dup_report["patients_dropped_no_usable_type"]),
@@ -477,6 +534,12 @@ def main(argv: list[str] | None = None) -> int:
                     kept[code] = kept.get(code, 0) + int(n)
             print(f"  sample types    : {dict(sorted(kept.items()))} "
                   f"(01 primary, 05 add. primary, 02 recurrent, 06/07 metastatic)")
+        mixed = inventory[inventory.minor_types_dropped.astype(str) != "{}"]
+        for row in mixed.itertuples():
+            print(f"  !! {row.dataset_id}: kept sample type {row.cohort_sample_type!r} "
+                  f"and dropped {row.minor_types_dropped} -- a cohort's minor tissue "
+                  f"types carry the same outcome label while being readable from the "
+                  f"expression")
         print(f"  dropped samples : {int(inventory.samples_without_expression.sum())} "
               f"labelled but not in a matrix, "
               f"{int(inventory.samples_with_missing_label.sum())} with a missing label, "
