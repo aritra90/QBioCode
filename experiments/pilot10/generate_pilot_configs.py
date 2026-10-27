@@ -761,6 +761,30 @@ def load_config(path):
     return OmegaConf.merge(*layers)
 
 
+def feature_selection_block(n_features):
+    """The ``feature_selection`` YAML a job carries, or "" when none is configured.
+
+    Empty rather than ``method: none`` on purpose: a config with no block produces the
+    embedding-cache spec it produced before the stage existed, so a cache computed by an
+    earlier sweep still serves it (qprofiler._spec_settings omits the key for the same
+    reason). Writing the block out always would invalidate every cached file for a
+    setting that did not touch the data.
+    """
+    if not n_features:
+        return ""
+    return (
+        "# Keep the top-N columns by variance, chosen on each training fold and applied\n"
+        "# to its held-out side -- before scaling, because MinMaxScaler divides every\n"
+        "# column by its own range and so destroys the variance ranking this reads.\n"
+        "# The kept columns differ per split and per stage; they are recorded in the\n"
+        "# selected_features/ sidecar, which is the only place they can be read back.\n"
+        "feature_selection:\n"
+        "  method: variance\n"
+        f"  n_features: {int(n_features)}\n"
+        "  fit_scope: train_fold\n"
+    )
+
+
 def build(idx, folder, csv, rows, feats, why, n_iter=ITER_DEFAULT,
           test_size=TEST_SIZE_DEFAULT, n_trials_quantum=N_TRIALS_QUANTUM_DEFAULT,
           emb=None, model=None, runs_dir=RUNS_DIR, protocol=False,
@@ -1099,7 +1123,7 @@ def _splits_phrase(iteration, repeat, fold):
 
 
 def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_trials,
-                       qnn_readout):
+                       qnn_readout, n_features=None):
     """The protocol keys of a manifest-mode job, edited into a split-layout config body.
 
     ``iteration``, ``repeat`` and ``fold`` are one split, or equal-length lists of the
@@ -1131,7 +1155,7 @@ def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_tr
         # 'MinMaxScaler', 'None'/false. Fit on the rows a stage trains on (the fit rows
         # while tuning, the training rows for the final fit), never on validation or test.
         scaling: ['True']
-        """) + body[end:]
+        """) + feature_selection_block(n_features) + body[end:]
     body = _swap(body, textwrap.dedent("""\
         # Trials per classical model. Automatically reduced to the size of the search space
         # when that space is finite, so a small block does not waste trials re-sampling.
@@ -1180,7 +1204,8 @@ def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_tr
 
 def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration, repeat,
                        fold, *, run_root, run_id, split_dir, n_trials, qnn_readout,
-                       embedding_cache, why, embed_above=EMBEDDING_MIN_FEATURES):
+                       embedding_cache, why, embed_above=EMBEDDING_MIN_FEATURES,
+                       n_features=None):
     """(name, body) of one manifest-mode job: ``group`` of dataset ``ds`` (curated_dataset's
     dict) on embedding ``emb``, split ``iteration`` -- or, with lists for ``iteration``,
     ``repeat`` and ``fold``, on those splits in turn (--splits-per-job)."""
@@ -1197,7 +1222,7 @@ def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration
                     embed_above=embed_above)
     body = _manifest_protocol(body, run_id=run_id, split_dir=split_dir, iteration=iteration,
                               repeat=repeat, fold=fold, n_trials=n_trials,
-                              qnn_readout=qnn_readout)
+                              qnn_readout=qnn_readout, n_features=n_features)
     return name, body
 
 
@@ -1358,7 +1383,8 @@ def main_manifest(ap, args):
                         reps[0] if one else reps, folds[0] if one else folds,
                         run_root=run_root, run_id=args.run_id, split_dir=split_dir,
                         n_trials=args.n_trials, qnn_readout=args.qnn_readout,
-                        embedding_cache=cache, why=why, embed_above=args.embed_above)
+                        embedding_cache=cache, why=why, embed_above=args.embed_above,
+                        n_features=args.n_features)
                     path = os.path.join(ds_dir, f"{name}.yaml")
                     with open(path, "w") as fh:
                         fh.write(body)
@@ -1540,6 +1566,17 @@ def main():
                            f"features than this (default {EMBEDDING_MIN_FEATURES}, which "
                            "leaves 14-20 features on MPS; 13 embeds every width the "
                            "statevector cannot take)")
+    fold.add_argument("--n-features", type=int, default=None, metavar="N",
+                      help="keep the top N columns by variance, selected INSIDE each "
+                           "training fold and applied to its held-out side, before "
+                           "scaling and before any embedding. Omitted entirely by "
+                           "default, which leaves the configs (and so an existing "
+                           "embedding cache) byte-identical to a run without this flag. "
+                           "For wide omics data: --n-features 5000 keeps a variance "
+                           "panel and --embed-above still decides whether what survives "
+                           "is embedded, so '5000 then PCA to 8' and 'top 16 genes "
+                           "unembedded' are both reachable. The kept columns differ per "
+                           "split and are recorded in the selected_features/ sidecar")
     fold.add_argument("--splits", default=None,
                       help="global iterations: '1-5' (repeat 0), '1,6,11', 'all' "
                            "(default all)")
@@ -1548,7 +1585,8 @@ def main():
     args = ap.parse_args()
 
     manifest_only = ("split_dir", "datasets_root", "run_id", "n_trials", "wall", "datasets",
-                     "datasets_file", "models", "splits", "qnn_readout", "splits_per_job")
+                     "datasets_file", "models", "splits", "qnn_readout", "splits_per_job",
+                     "n_features")
     if args.split_mode == "manifest":
         # The reverse of the refusal below: internal-mode knobs mean nothing here, and a
         # silently ignored --n-trials-quantum or --budget-hours would be a wrong run.

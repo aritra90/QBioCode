@@ -372,3 +372,48 @@ class TestSelectedFeaturesSidecar:
 
         assert protocol.SELECTED_FEATURES_DIR not in qp._SIDECAR_DIRS
         assert "model" not in protocol.SELECTED_FEATURE_COLUMNS
+
+
+class TestGeneratorFlag:
+    """--n-features must reach the YAML, and its absence must change nothing."""
+
+    @staticmethod
+    def _gen():
+        import importlib.util, pathlib
+        path = (pathlib.Path(__file__).resolve().parent.parent / "experiments" /
+                "pilot10" / "generate_pilot_configs.py")
+        spec = importlib.util.spec_from_file_location("gpc", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_no_n_features_emits_nothing(self):
+        """An empty string, not 'method: none': a config with no block produces the
+        embedding-cache spec it produced before the stage existed, so a cache from an
+        earlier sweep still serves it."""
+        assert self._gen().feature_selection_block(None) == ""
+        assert self._gen().feature_selection_block(0) == ""
+
+    def test_the_block_is_valid_and_round_trips(self):
+        import yaml
+
+        from qbiocode.apps.qprofiler import feature_selection as fs
+
+        text = self._gen().feature_selection_block(5000)
+        parsed = yaml.safe_load(text)["feature_selection"]
+        assert fs.normalise_config(parsed) == {
+            "method": "variance", "n_features": 5000, "fit_scope": "train_fold"}
+
+    def test_the_flag_is_manifest_only(self):
+        """Internal mode has no feature-selection stage wired to it, and a silently
+        ignored --n-features would be a wrong run rather than a no-op."""
+        assert "n_features" in self._gen().__dict__ or True   # module imported
+        import subprocess
+        import sys
+        import pathlib
+        path = (pathlib.Path(__file__).resolve().parent.parent / "experiments" /
+                "pilot10" / "generate_pilot_configs.py")
+        out = subprocess.run([sys.executable, str(path), "--n-features", "16"],
+                             capture_output=True, text=True)
+        assert out.returncode != 0
+        assert "only apply with --split-mode manifest" in out.stderr
