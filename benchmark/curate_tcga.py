@@ -257,47 +257,72 @@ def collapse_patients(X, y, patients, policy):
     return collapsed, labels.loc[collapsed.index], report
 
 
-#: Fraction below which a sample type is treated as a minor contaminant of a cohort
-#: rather than part of it. A cohort is MOSTLY one tissue; the few samples of another
-#: type carry the same outcome label while being a visibly different measurement, so a
-#: model can read the tissue off the expression and shift its prediction. That is a gain
-#: from how the sample was taken, not from biology.
+#: A cohort keeps ONE sample type. The others are dropped whatever their share, because
+#: the hazard does not scale with the share: a sample of another tissue carries the
+#: cohort's outcome label while being a visibly different measurement, and tissue type is
+#: trivially learnable from expression. A model that detects it shifts its prediction and
+#: gains accuracy from how the sample was taken rather than from the tumour's biology.
 #:
-#: Measured on SKCM, the one cohort where this is not a rounding error: 46 primary
-#: samples at PFI 0.652 against 259 metastatic at 0.459, a difference of 0.193 with a
-#: 95% CI of [0.043, 0.344]. Tissue type is trivially learnable from expression, so
-#: keeping both leaves a predictor of the label that is not the tumour's biology.
+#: Measured on SKCM: 46 primary samples at PFI 0.652 against 259 metastatic at 0.459 --
+#: a difference of 0.193, 95% CI [0.043, 0.344], excluding zero.
 #:
-#: 0.15 keeps every other cohort untouched -- all 18 are >=98% one type -- and acts only
-#: where a cohort is genuinely mixed.
-MINOR_TYPE_FRACTION = 0.15
+#: An earlier version of this only acted when the minor types were under 15% of the
+#: cohort, so that the 18 nearly-pure cohorts stayed untouched. SKCM's minor share is
+#: 47/305 = 0.154, so the guard missed by 0.4 percentage points THE ONE COHORT IT WAS
+#: WRITTEN FOR. A threshold picked to leave the clean cases alone is the wrong
+#: instrument: what matters is that one dataset is one kind of measurement, and that is
+#: true of a cohort losing 15% of its rows as much as of one losing 1%.
+#:
+#: The cost is reported per cohort, and refused outright past DROP_FRACTION_REFUSE: past
+#: that, "which tissue is this cohort" has stopped being a cleanup question and become a
+#: decision about what the dataset is.
+DROP_FRACTION_REFUSE = 0.40
 
 
-def dominant_type(types):
-    """``(code, keep_mask, dropped)``: the cohort's main sample type and what it excludes.
+def dominant_type(types, dataset_id=""):
+    """``(code, keep_mask, dropped)``: the cohort's one sample type, and what that excludes.
 
-    Returns the most common type, a mask selecting it, and a count of the samples of
-    every other type -- but only when those others are below
-    :data:`MINOR_TYPE_FRACTION` of the cohort. A cohort that is genuinely a mixture
-    (neither type minor) keeps everything and reports it, because dropping a third of a
-    cohort is a decision for a person, not a threshold.
+    The most common type wins and every other is dropped, whatever its share -- see
+    :data:`DROP_FRACTION_REFUSE` for why there is no "small enough to keep" case. Ties
+    are broken by the code's order in :data:`SAMPLE_TYPE_PRECEDENCE`, so a cohort split
+    evenly between a primary and a metastatic set keeps the primary rather than whichever
+    happened to sort first.
 
     Args:
         types (pandas.Series): the sample type per sample, indexed like the matrix.
+        dataset_id (str): for the error message.
 
     Returns:
-        (str, pandas.Series, dict): the dominant code, a boolean mask, and
-        ``{code: n}`` for what the mask excludes.
+        (str, pandas.Series, dict): the kept code, a boolean mask, and ``{code: n}`` for
+        what the mask excludes.
+
+    Raises:
+        ValueError: when keeping one type would discard more than
+            :data:`DROP_FRACTION_REFUSE` of the cohort. That is no longer a cleanup
+            decision, and the message gives the counts so a person can make it.
     """
     counts = types.value_counts()
-    main = str(counts.index[0])
-    minor_total = int(counts.iloc[1:].sum())
+    rank = {code: position for position, code in enumerate(SAMPLE_TYPE_PRECEDENCE)}
+    # Sort by count descending, then by precedence, so an even split is decided by what
+    # the label was defined against rather than by dict order.
+    ordered = sorted(counts.items(),
+                     key=lambda item: (-item[1], rank.get(str(item[0]), len(rank))))
+    main = str(ordered[0][0])
+    dropped = {str(code): int(n) for code, n in ordered[1:]}
+    minor_total = sum(dropped.values())
     if not minor_total:
         return main, pd.Series(True, index=types.index), {}
-    if minor_total / len(types) > MINOR_TYPE_FRACTION:
-        return main, pd.Series(True, index=types.index), {}
-    return (main, types == main,
-            {str(code): int(n) for code, n in counts.iloc[1:].items()})
+    share = minor_total / len(types)
+    if share > DROP_FRACTION_REFUSE:
+        raise ValueError(
+            f"{dataset_id or 'cohort'}: keeping sample type {main!r} would drop "
+            f"{minor_total} of {len(types)} samples ({share:.0%}) of type(s) "
+            f"{dropped}. A cohort should be one kind of measurement, but discarding "
+            f"this much is a decision about what the dataset IS -- split it into one "
+            f"dataset per sample type, or choose which to keep, rather than letting "
+            f"this script pick the larger half."
+        )
+    return main, types == main, dropped
 
 
 def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
@@ -337,7 +362,7 @@ def curate_one(matrix_path: Path, labels: pd.DataFrame, label_col: str,
     # while being a different measurement, and the tissue is readable from the
     # expression -- see MINOR_TYPE_FRACTION for the SKCM numbers that motivate this.
     types_here = pd.Series([sample_type(barcode) for barcode in X.index], index=X.index)
-    main_type, type_mask, minor_dropped = dominant_type(types_here)
+    main_type, type_mask, minor_dropped = dominant_type(types_here, dataset_id)
     if minor_dropped:
         X = X.loc[type_mask]
         y = y.loc[type_mask]
