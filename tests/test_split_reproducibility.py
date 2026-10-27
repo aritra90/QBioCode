@@ -199,7 +199,7 @@ class TestTheSeedPlusIterationContract:
                 np.testing.assert_array_equal(g, w)
             # The row indices it returns are the rows on each side, which is what a cached
             # embedding is checked against.
-            train_idx, test_idx = got[4:]
+            train_idx, test_idx = got[4], got[5]
             np.testing.assert_array_equal(X[train_idx], got[0])
             np.testing.assert_array_equal(X[test_idx], got[1])
 

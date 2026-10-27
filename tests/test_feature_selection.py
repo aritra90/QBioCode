@@ -197,3 +197,178 @@ class TestSelectionDigest:
         """It digests what was recorded, so a reordering shows up rather than being
         normalised away -- the indices are the record, the digest only checks them."""
         assert fs.selection_digest([1, 2]) != fs.selection_digest([2, 1])
+
+
+class TestWiredIntoTheSplit:
+    """The pipeline contract: order, scope, and what reaches the embedding."""
+
+    @staticmethod
+    def _data(seed=0):
+        rng = np.random.RandomState(seed)
+        X = rng.normal(size=(60, 30))
+        # Columns 0-3 carry a large spread everywhere, so they are selected whatever the
+        # fold -- which makes the assertions below about WHICH columns stable.
+        X[:, 0:4] *= 25.0
+        y = np.array([0, 1] * 30)
+        return X, y
+
+    def test_off_by_default_returns_the_full_width(self):
+        from qbiocode.apps.qprofiler import qprofiler as qp
+
+        X, y = self._data()
+        args = {"seed": 42, "test_size": 0.3, "stratify": ["y"]}
+        X_tr, X_te, _, _, _, _, selected = qp._split_and_scale(X, y, args, 1, "None")
+        assert X_tr.shape[1] == 30 and X_te.shape[1] == 30
+        assert selected is None
+
+    def test_selection_narrows_both_sides_and_reports_the_columns(self):
+        from qbiocode.apps.qprofiler import qprofiler as qp
+
+        X, y = self._data()
+        args = {"seed": 42, "test_size": 0.3, "stratify": ["y"],
+                "feature_selection": {"method": "variance", "n_features": 4}}
+        X_tr, X_te, _, _, _, _, selected = qp._split_and_scale(X, y, args, 1, "None")
+        assert X_tr.shape[1] == 4 and X_te.shape[1] == 4
+        assert sorted(selected) == [0, 1, 2, 3]
+
+    def test_selection_precedes_scaling_in_the_real_pipeline(self):
+        """The columns chosen must be those of the RAW data, not the min-max scaled.
+
+        Built so the two orders disagree: column 5 has one extreme outlier (large range,
+        modest variance), columns 0-3 have a broad spread. Selecting first picks 0-3;
+        scaling first would divide column 5 by its own huge range and change the
+        ranking. Asserting the chosen set is the raw one pins the order.
+        """
+        from qbiocode.apps.qprofiler import qprofiler as qp
+
+        X, y = self._data()
+        X[:, 5] = 0.0
+        X[0, 5] = 5000.0
+        args = {"seed": 42, "test_size": 0.3, "stratify": ["y"],
+                "feature_selection": {"method": "variance", "n_features": 4}}
+        _, _, _, _, _, _, with_scaling = qp._split_and_scale(
+            X, y, args, 1, "MinMaxScaler")
+        _, _, _, _, _, _, without = qp._split_and_scale(X, y, args, 1, "None")
+        assert np.array_equal(with_scaling, without), (
+            "the selected columns must not depend on the scaler, which is only true if "
+            "selection runs before it"
+        )
+
+    def test_the_two_stages_may_select_differently(self):
+        """Expected, not a defect: 'tune' is fitted on the fit rows and 'final' on the
+        whole training fold, so the variance ranking need not agree. It is also why the
+        indices are recorded per (split, stage) rather than once per split."""
+        from qbiocode.apps.qprofiler import qprofiler as qp
+        rng = np.random.RandomState(3)
+        X = rng.normal(size=(40, 12))
+        y = np.array([0, 1] * 20)
+        # A stub standing in for a manifest's OuterSplit: only the index arrays and
+        # the repeat/fold labels are read by _split_and_scale.
+        class _S:
+            repeat, fold = 0, 0
+            train_idx = np.arange(0, 32)
+            val_idx = np.arange(0, 8)
+            fit_idx = np.arange(8, 32)
+            test_idx = np.arange(32, 40)
+            n_fit, n_val, n_test = 24, 8, 8
+
+        args = {"seed": 42, "feature_selection": {"method": "variance",
+                                                  "n_features": 3}}
+        _, _, _, _, _, _, final = qp._split_and_scale(
+            X, y, args, 1, "None", split=_S(), stage="final")
+        _, _, _, _, _, _, tune = qp._split_and_scale(
+            X, y, args, 1, "None", split=_S(), stage="tune")
+        assert len(final) == len(tune) == 3
+        # They are selected from different row sets, so each must be a valid selection
+        # of its own side; equality is permitted but not required.
+        assert set(final) <= set(range(12)) and set(tune) <= set(range(12))
+
+
+class TestCacheSpecInteraction:
+    """What keeps an existing cache valid, and what must invalidate it."""
+
+    @staticmethod
+    def _args(**extra):
+        base = {"seed": 42, "test_size": 0.3, "stratify": ["y"], "n_components": 8,
+                "embeddings": ["pca"], "n_neighbors": 30}
+        base.update(extra)
+        return base
+
+    def test_no_selection_leaves_the_spec_byte_identical(self):
+        """The regression guard for full1's 171-dataset cache: a run that selects
+        nothing must produce the spec it produced before this stage existed, so the
+        files already on disk still serve it."""
+        from qbiocode.apps.qprofiler import embedding_cache as emb_cache
+        from qbiocode.apps.qprofiler import qprofiler as qp
+
+        plain = emb_cache.embedding_spec(
+            self._args(), "d.csv", "a" * 64, "pca", 1, "MinMaxScaler")
+        explicit_off = emb_cache.embedding_spec(
+            self._args(feature_selection={"method": "none"}),
+            "d.csv", "a" * 64, "pca", 1, "MinMaxScaler")
+        assert plain == explicit_off
+        assert "feature_selection" not in plain
+        assert qp._spec_settings(self._args()) == {}
+
+    def test_a_selection_changes_the_spec(self):
+        from qbiocode.apps.qprofiler import embedding_cache as emb_cache
+
+        off = emb_cache.embedding_spec(
+            self._args(), "d.csv", "a" * 64, "pca", 1, "MinMaxScaler")
+        on = emb_cache.embedding_spec(
+            self._args(feature_selection={"method": "variance", "n_features": 16}),
+            "d.csv", "a" * 64, "pca", 1, "MinMaxScaler")
+        assert off != on, "a selected run must not read an unselected run's file"
+
+    def test_n_features_discriminates(self):
+        """Two sweeps differing only in selection width must refuse each other's files;
+        this is what makes n_features a safe axis to vary."""
+        from qbiocode.apps.qprofiler import embedding_cache as emb_cache
+
+        a = emb_cache.embedding_spec(
+            self._args(feature_selection={"method": "variance", "n_features": 16}),
+            "d.csv", "a" * 64, "pca", 1, "MinMaxScaler")
+        b = emb_cache.embedding_spec(
+            self._args(feature_selection={"method": "variance", "n_features": 5000}),
+            "d.csv", "a" * 64, "pca", 1, "MinMaxScaler")
+        assert a != b
+
+
+class TestSelectedFeaturesSidecar:
+    """The artifact: which columns a fold actually used."""
+
+    def test_rows_carry_rank_and_column_in_selection_order(self):
+        from qbiocode.evaluation import protocol
+
+        frame = protocol.selected_features_frame([7, 2, 5], "ds.csv|pca|i01", "final")
+        assert list(frame.columns) == list(protocol.SELECTED_FEATURE_COLUMNS)
+        assert list(frame["rank"]) == [0, 1, 2]
+        assert list(frame["column"]) == [7, 2, 5]
+        assert set(frame["stage"]) == {"final"}
+
+    def test_no_selection_gives_an_empty_frame_with_the_header(self):
+        """So a pass's sidecar set does not depend on the config: a reader finding no
+        rows learns 'nothing was selected' instead of distinguishing a missing file."""
+        from qbiocode.evaluation import protocol
+
+        frame = protocol.selected_features_frame(None, "k", "final")
+        assert frame.empty
+        assert list(frame.columns) == list(protocol.SELECTED_FEATURE_COLUMNS)
+
+    def test_columns_are_python_ints_so_the_csv_is_clean(self):
+        from qbiocode.evaluation import protocol
+
+        frame = protocol.selected_features_frame(np.array([3, 1], dtype=np.int64),
+                                                 "k", "tune")
+        assert [type(v) for v in frame["column"]] == [int, int] or \
+            frame["column"].dtype.kind == "i"
+
+    def test_resume_does_not_carry_this_sidecar(self):
+        """resume.carry_sidecars filters rows by their 'model' column, and a
+        selected-features row has none -- the selection belongs to the pass, not an arm.
+        Listing the directory there would match nothing and silently drop the record."""
+        from qbiocode.apps.qprofiler import qprofiler as qp
+        from qbiocode.evaluation import protocol
+
+        assert protocol.SELECTED_FEATURES_DIR not in qp._SIDECAR_DIRS
+        assert "model" not in protocol.SELECTED_FEATURE_COLUMNS

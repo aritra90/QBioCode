@@ -750,10 +750,33 @@ def _split_seed(args, iter):
     return split_seed
 
 
-def _split_and_scale(X, y_encoded, args, iter, scaler_name, split=None, stage="final"):
-    """Split ``iter`` of one dataset, scaled.
+def _feature_selection(args):
+    """The run's validated ``feature_selection`` block.
 
-    Returns ``(X_train, X_test, y_train, y_test, train_idx, test_idx)``. The last two are
+    One function for both consumers, as :func:`_embedding_settings` is for the
+    embedding: :func:`_split_and_scale` selects with it and the cache spec records it.
+    """
+    from qbiocode.apps.qprofiler import feature_selection as fsel
+
+    return fsel.normalise_config(args.get("feature_selection", None))
+
+
+def _split_and_scale(X, y_encoded, args, iter, scaler_name, split=None, stage="final"):
+    """Split ``iter`` of one dataset, feature-selected and scaled.
+
+    Returns ``(X_train, X_test, y_train, y_test, train_idx, test_idx, selected)``.
+    ``selected`` is the column indices ``feature_selection`` kept, or None when it is
+    off -- the caller records them, because they differ per (split, stage) and cannot be
+    recovered from the config alone.
+
+    Feature selection runs FIRST, on the raw values, for the reason given in
+    :mod:`qbiocode.apps.qprofiler.feature_selection`: the default scaling is
+    MinMaxScaler, which divides each column by its own range and so destroys the
+    variance ranking a selector reads. It is fitted on the first side only, exactly as
+    the scaler below is, so a test or validation row never influences which columns the
+    models see.
+
+    ``train_idx`` and ``test_idx`` are
     the rows of ``X`` on each side, which is how a cached embedding is checked to belong
     to this split. They are passed through ``train_test_split`` as a third array, and that
     does not move any row: its permutation depends only on the row count, the labels
@@ -783,11 +806,19 @@ def _split_and_scale(X, y_encoded, args, iter, scaler_name, split=None, stage="f
         test_idx = np.sort(np.asarray(test_idx, dtype=np.int64))
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
+    # Select features BEFORE scaling: fit the selector on TRAIN, apply to TEST. Order
+    # matters -- see the module docstring of feature_selection. Off by default, in which
+    # case this returns the arrays untouched.
+    from qbiocode.apps.qprofiler import feature_selection as fsel
+
+    X_train, X_test, selected = fsel.select_features(
+        X_train, X_test, _feature_selection(args)
+    )
     # Scale the features: fit one scaler on TRAIN and apply it to TEST (never fit a
     # separate scaler on the test set -- that would use test-set statistics).
     if scaler_name != 'None':
         X_train, X_test = scale_train_test(X_train, X_test, scaling=scaler_name)
-    return X_train, X_test, y_train, y_test, train_idx, test_idx
+    return X_train, X_test, y_train, y_test, train_idx, test_idx, selected
 
 
 def _data_key(file, embed, n_components, iter):
@@ -810,9 +841,10 @@ def _data_key(file, embed, n_components, iter):
 def _embedding_settings(args):
     """Everything an embedding is given apart from the data and the seed.
 
-    One function for both consumers: :func:`_embed` passes these to the embedding, and
-    the embedding cache records them in each file's spec. So a setting added here is
-    passed to the embedding and checked by the cache, with no other change needed.
+    :func:`_embed` splats this straight into
+    :func:`~qbiocode.embeddings.embed.get_embeddings`, which takes no ``**kwargs``, so
+    every key here must be one of its parameters. A setting that belongs in the cache
+    spec but is NOT an argument of the embedding goes in :func:`_spec_settings`.
     """
     return {
         "n_neighbors": args.get("n_neighbors", 30),
@@ -820,6 +852,31 @@ def _embedding_settings(args):
         "method": None,
         "quvine_args": args.get("quvine_args", {}),
     }
+
+
+def _spec_settings(args):
+    """Everything the embedding cache spec records beyond :func:`_embedding_settings`.
+
+    What a cached file depends on is a superset of what the embedding is called with: a
+    fold-specific feature selection changes the matrix the embedding is fitted on
+    without changing any argument passed to it. Two runs differing only in
+    ``feature_selection`` must not share a file, and they would if the spec were built
+    from the embedding's arguments alone.
+
+    Kept separate from :func:`_embedding_settings` because that dict is splatted into
+    ``get_embeddings``, which accepts no unknown keyword.
+
+    The key is OMITTED when no selection is configured, rather than recorded as
+    ``method: 'none'``. That is what keeps an existing cache valid: a run that selects
+    nothing produces exactly the spec it produced before this stage existed, so the
+    171-dataset cache already on disk still serves it. Adding the key unconditionally
+    would change every spec and silently invalidate every cached file, for a setting
+    that by definition did not touch the data.
+    """
+    selection = _feature_selection(args)
+    if selection["method"] == "none":
+        return {}
+    return {"feature_selection": selection}
 
 
 def _embed(embed, X_train, X_test, args, split_seed):
@@ -923,25 +980,46 @@ def _write_frame_atomic(frame, path):
             os.remove(tmp)
 
 
-def _write_sidecars(summary, test_idx, data_key):
+def _write_sidecars(summary, test_idx, data_key, selected=None, selected_tune=None):
     """The per-pass sidecars of manifest mode, under the run directory.
 
     ``oof/<data_key>.csv`` holds every model's outer-test predictions with their row ids,
-    ``trials/<data_key>.csv`` every tuning trial of every model, and
-    ``val_predictions/<data_key>.csv`` each trial's validation predictions
-    (see :mod:`qbiocode.evaluation.protocol` for the columns).
+    ``trials/<data_key>.csv`` every tuning trial of every model,
+    ``val_predictions/<data_key>.csv`` each trial's validation predictions, and
+    ``selected_features/<data_key>.csv`` the columns a configured feature selection kept
+    at each stage (see :mod:`qbiocode.evaluation.protocol` for the columns).
+
+    ``selected``/``selected_tune`` are the final- and tuning-stage selections, as
+    :func:`_split_and_scale` returned them. Both None (no selection configured) still
+    writes the file, empty with its header, so a pass's sidecar set does not depend on
+    the config -- a reader that finds no rows learns "nothing was selected" rather than
+    having to distinguish a missing file from a missing stage.
     """
+    import pandas as pd
+
     trials, val_predictions = protocol.trial_frames(summary, data_key)
+    features = pd.concat(
+        [protocol.selected_features_frame(selected, data_key, "final"),
+         protocol.selected_features_frame(selected_tune, data_key, "tune")],
+        ignore_index=True,
+    )
     for directory, frame in (
         (protocol.OOF_DIR, protocol.oof_frame(summary, test_idx, data_key)),
         (protocol.TRIALS_DIR, trials),
         (protocol.VAL_PREDICTIONS_DIR, val_predictions),
+        (protocol.SELECTED_FEATURES_DIR, features),
     ):
         _write_frame_atomic(frame, os.path.join(directory, f"{data_key}.csv"))
 
 
 #: The sidecar directories of one manifest-mode pass, in the order ``_write_sidecars``
 #: writes them. ``resume.carry_sidecars`` copies an adopted model's rows into the same three.
+#: SELECTED_FEATURES_DIR is deliberately NOT here. resume.carry_sidecars copies rows
+#: whose 'model' column names an adopted model, and a selected-features row has no
+#: model: the selection belongs to the pass, not to any one arm. Listing it would
+#: match nothing and silently drop the record. A resumed pass re-derives the same
+#: selection from the same training rows and rewrites the file whole, so nothing is
+#: lost -- see the spec's feature_selection block, which is what makes the two agree.
 _SIDECAR_DIRS = (protocol.OOF_DIR, protocol.TRIALS_DIR, protocol.VAL_PREDICTIONS_DIR)
 
 
@@ -1292,9 +1370,8 @@ def main(args):
             iter_start_time = time.time()
 
             split_seed = _split_seed(args, iter)
-            X_train, X_test, y_train, y_test, train_idx, test_idx = _split_and_scale(
-                X, y_encoded, args, iter, scaler_name, split=split
-            )
+            X_train, X_test, y_train, y_test, train_idx, test_idx, selected = \
+                _split_and_scale(X, y_encoded, args, iter, scaler_name, split=split)
             if split is None:
                 log.info(
                     f"Begin processing iteration (split) {iter} of {args['iter']} "
@@ -1303,9 +1380,9 @@ def main(args):
             else:
                 # The tuning stage of this split: the scaler (and below, the embedding)
                 # fitted on the fit rows alone, applied to the validation rows.
-                X_fit, X_val, y_fit, y_val, fit_idx, val_idx = _split_and_scale(
-                    X, y_encoded, args, iter, scaler_name, split=split, stage="tune"
-                )
+                X_fit, X_val, y_fit, y_val, fit_idx, val_idx, selected_tune = \
+                    _split_and_scale(X, y_encoded, args, iter, scaler_name,
+                                     split=split, stage="tune")
                 pass_fields = _protocol_fields(manifest, split, args, split_seed, host_fields)
                 log.info(
                     f"Begin processing iteration (split) {iter} (repeat {split.repeat}, "
@@ -1502,7 +1579,8 @@ def main(args):
                     })
                     # Before the CSV rows and results.pkl, so a pass whose rows exist
                     # always has its predictions and trials on disk as well.
-                    _write_sidecars(summary, test_idx, data_key)
+                    _write_sidecars(summary, test_idx, data_key,
+                                    selected, selected_tune)
                 # print(summary)
                 # Snapshot the per-(dataset, iteration, embedding) part ONCE, then build
                 # each model's row from a fresh copy of it. Merging each model's results

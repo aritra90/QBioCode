@@ -76,6 +76,19 @@ PROTOCOL_COLUMNS = SPLIT_COLUMNS + SEED_COLUMNS + HOST_COLUMNS
 OOF_DIR = "oof"                        # outer-test predictions of every model
 TRIALS_DIR = "trials"                  # every tuning trial of every model
 VAL_PREDICTIONS_DIR = "val_predictions"  # validation predictions of every trial
+SELECTED_FEATURES_DIR = "selected_features"  # columns a fold's feature selection kept
+
+#: One row per kept column, per (pass, stage). ``rank`` is the position in the selection
+#: order (0 = highest variance), ``column`` the 0-based index into the dataset file's
+#: feature columns -- indices rather than names because they are 5x smaller and immune to
+#: the version suffixes gene ids carry (``ENSG00000000003.15`` changes between GENCODE
+#: releases); the file's column order plus ``dataset_sha256`` recovers the names exactly.
+#:
+#: Recorded rather than recomputed from a digest: a variance is an accumulation, and this
+#: project has measured byte-identical inputs giving different sums on different compute
+#: nodes. Two columns whose variances differ in the last bits can swap across the cut on
+#: another host, so a recomputed digest cannot distinguish that from real corruption.
+SELECTED_FEATURE_COLUMNS = ("data_key", "stage", "rank", "column")
 
 OOF_COLUMNS = ("data_key", "model", "row_id", "y_true", "y_pred", "y_score")
 TRIAL_COLUMNS = (
@@ -350,6 +363,32 @@ def _column_or_nan(values: Any, n: int) -> np.ndarray:
     if array.ndim != 1 or array.size != n:
         raise ValueError(f"expected {n} per-row values, got shape {array.shape}")
     return array
+
+
+def selected_features_frame(selected: Any, data_key: str, stage: str):
+    """The columns one (pass, stage) feature selection kept, one row each.
+
+    Args:
+        selected: Column indices in selection order, or None when no selection ran.
+        data_key: The pass's data_key.
+        stage: ``'final'`` (fitted on the outer training fold) or ``'tune'`` (fitted on
+            the fit rows). Both are recorded because each is fitted on different rows
+            and so may keep different columns.
+
+    Returns:
+        A DataFrame with SELECTED_FEATURE_COLUMNS -- empty (but correctly columned) when
+        ``selected`` is None, so a caller need not special-case the off path.
+    """
+    import pandas as pd
+
+    if selected is None:
+        return pd.DataFrame(columns=list(SELECTED_FEATURE_COLUMNS))
+    return pd.DataFrame({
+        "data_key": data_key,
+        "stage": stage,
+        "rank": range(len(selected)),
+        "column": [int(c) for c in selected],
+    }, columns=list(SELECTED_FEATURE_COLUMNS))
 
 
 def oof_frame(summary: Mapping[str, Any], test_idx: Any, data_key: str):

@@ -507,7 +507,7 @@ class TestThePrecompute:
         X, _, y = qp._read_dataset(str(experiment.csv), args)
         sha = emb_cache.file_sha256(experiment.csv)
         for embed, it in EMBEDDED:
-            X_train, X_test, _, _, train_idx, test_idx = qp._split_and_scale(
+            X_train, X_test, _, _, train_idx, test_idx, _ = qp._split_and_scale(
                 X, y, args, it, scaler)
             want = qp._embed(embed, X_train, X_test, args, qp._split_seed(args, it))
             entry = emb_cache.read(emb_cache.cache_file(experiment.cache, _key(embed, it)))

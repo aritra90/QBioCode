@@ -285,7 +285,7 @@ class TestTheSplit:
         args = _args(data_dir, split_dir)
         for stage, (a, b) in (("final", (split.train_idx, split.test_idx)),
                               ("tune", (split.fit_idx, split.val_idx))):
-            Xa, Xb, ya, yb, ia, ib = qp._split_and_scale(
+            Xa, Xb, ya, yb, ia, ib, _ = qp._split_and_scale(
                 X, y, args, 4, "MinMaxScaler", split=split, stage=stage)
             np.testing.assert_array_equal(ia, a)
             np.testing.assert_array_equal(ib, b)

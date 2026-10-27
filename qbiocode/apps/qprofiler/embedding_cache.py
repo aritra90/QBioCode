@@ -200,6 +200,10 @@ def embedding_spec(args, dataset, dataset_sha256, embedding, iteration, scaler_n
             "scaling": scaler_name,
             "embedding": embedding,
             **{key: _plain(value) for key, value in qp._embedding_settings(args).items()},
+        # Beyond the embedding's own arguments: a fold-internal feature selection
+        # changes the matrix it is fitted on without changing what it is called with.
+        # Absent when no selection is configured, so an existing cache stays valid.
+        **{key: _plain(value) for key, value in qp._spec_settings(args).items()},
         })
     return _canonical({
         "cache_version": CACHE_VERSION,
@@ -217,6 +221,10 @@ def embedding_spec(args, dataset, dataset_sha256, embedding, iteration, scaler_n
         # and the seed, which is the split seed above.
         "embedding": embedding,
         **{key: _plain(value) for key, value in qp._embedding_settings(args).items()},
+        # Beyond the embedding's own arguments: a fold-internal feature selection
+        # changes the matrix it is fitted on without changing what it is called with.
+        # Absent when no selection is configured, so an existing cache stays valid.
+        **{key: _plain(value) for key, value in qp._spec_settings(args).items()},
     })
 
 
@@ -238,6 +246,16 @@ def plan(dataset, dataset_sha256, n_features, args, scaler_name, manifest=None):
     from qbiocode.apps.qprofiler import qprofiler as qp
     from qbiocode.embeddings import DEFAULT_EMBEDDING_MIN_FEATURES, is_transductive
 
+    # The width the embedding is actually fitted on, which is what resolve_embeddings
+    # documents its argument to be. With a feature selection configured that is the
+    # SELECTED width, not the file's: main's loop resolves from X_train.shape[1] after
+    # selection, so planning from the file's width would disagree with it -- on a 19962-
+    # gene file selected to 16, the plan would list pca/umap entries for passes the run
+    # collapses to a single 'none', and every one of those files would be computed and
+    # never read.
+    selection = qp._feature_selection(args)
+    if selection["method"] != "none":
+        n_features = min(int(selection["n_features"]), int(n_features))
     embeddings, _ = resolve_embeddings(
         args["embeddings"],
         n_features,
@@ -629,7 +647,11 @@ def precompute(config_paths, check_only=False, force=False, out=print):
             for iteration, stage in sorted(
                 {(spec["iteration"], spec.get("stage", "final")) for spec, _ in todo}
             ):
-                X_train, X_test, _, _, train_idx, test_idx = qp._split_and_scale(
+                # The selected columns are discarded here on purpose: this path writes
+                # the embedding, and the job that reads it re-derives the same selection
+                # from the same training rows. The spec's feature_selection block is
+                # what guarantees the two agree.
+                X_train, X_test, _, _, train_idx, test_idx, _ = qp._split_and_scale(
                     X, y_encoded, args, iteration, scaler_name,
                     split=manifest.split(iteration) if manifest is not None else None,
                     stage=stage,

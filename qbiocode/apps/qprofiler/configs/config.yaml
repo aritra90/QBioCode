@@ -152,6 +152,45 @@ stratify: ['y']
 # Enable feature scaling (MinMaxScaler)
 scaling: ['True']
 
+# ---------------------------------------------------------------------------
+# Feature selection: keep a subset of the ORIGINAL columns, before scaling
+# ---------------------------------------------------------------------------
+# Off by default, and a run that leaves it off behaves exactly as before -- its
+# embedding-cache spec is unchanged, so files cached by an earlier sweep still serve it.
+#
+# This is a different operation from `embeddings` and answers a different question. A
+# variance filter keeps real columns, so the result is still the measured quantity (a
+# gene's expression); PCA and UMAP return linear combinations, which are not. On wide
+# data -- RNA-seq at ~20k genes is the case this was added for -- both apply: select to
+# n_features, then embed what survives down to n_components.
+#
+#   method      'none' (default) or 'variance'. 'variance' ranks columns by their
+#               variance on the training side and keeps the top n_features.
+#   n_features  how many columns to keep. Required for a real method, and deliberately
+#               not defaulted: it decides how many columns reach the embedding and, on a
+#               dataset narrow enough to skip embedding, how many QUBITS a circuit uses.
+#               A cap, not a demand -- a dataset narrower than this is kept whole.
+#   fit_scope   'train_fold' only. The selection is fitted on the training side of each
+#               split and applied to the held-out side, exactly as the scaler and the
+#               embedding are. There is no option to fit it on the whole file: that
+#               would rank columns using the rows every arm is then scored on.
+#
+# Two consequences worth knowing before turning it on:
+#
+#   * The selection runs on the RAW values, BEFORE scaling. It has to: `scaling: True`
+#     resolves to MinMaxScaler, which divides each column by its own range, and a
+#     variance ranking taken after that is a statement about where a column's extremes
+#     sit rather than about its spread.
+#   * The kept columns differ between splits, and between the tuning and final stages of
+#     one split, because each is fitted on different rows. That is correct, not a
+#     defect -- but it means "which columns did this fold use" is answerable only from
+#     the recorded indices, not from this config.
+#
+# feature_selection:
+#   method: variance
+#   n_features: 5000
+#   fit_scope: train_fold
+
 # this turns on hyperparameter tuning for the CML methods
 # On, and paired with tune_quantum below: tuning classical while leaving quantum untuned
 # is the confound this sweep exists to avoid.
