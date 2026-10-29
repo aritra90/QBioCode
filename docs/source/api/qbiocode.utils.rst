@@ -25,6 +25,7 @@ qbiocode.utils package
        qbiocode.utils.mps_backend
        qbiocode.utils.projection
        qbiocode.utils.qc_winner_finder
+       qbiocode.utils.qelm_features
        qbiocode.utils.qutils
        qbiocode.utils.tabpfn_account
        qbiocode.utils.tutorial_data

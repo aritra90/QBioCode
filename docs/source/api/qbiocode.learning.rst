@@ -19,6 +19,7 @@ qbiocode.learning package
        qbiocode.learning.compute_mlp
        qbiocode.learning.compute_nb
        qbiocode.learning.compute_pqk
+       qbiocode.learning.compute_qelm
        qbiocode.learning.compute_qensemble
        qbiocode.learning.compute_qnn
        qbiocode.learning.compute_qpl
@@ -63,6 +64,10 @@ qbiocode.learning package
          - This function generates quantum circuits, computes projections of the data onto these circuits, and evaluates the performance of classical machine learning models on the projected data.
        * - :func:`compute_pqk_opt <qbiocode.learning.compute_pqk.compute_pqk_opt>`
          - Tune PQK's hyperparameters with Optuna, then run it at the best ones found.
+       * - :func:`compute_qelm <qbiocode.learning.compute_qelm.compute_qelm>`
+         - Fit a quantum extreme learning machine and evaluate it on the test split.
+       * - :func:`compute_qelm_opt <qbiocode.learning.compute_qelm.compute_qelm_opt>`
+         - Tune QELM's hyperparameters with Optuna, then run it at the best ones found.
        * - :func:`compute_qensemble <qbiocode.learning.compute_qensemble.compute_qensemble>`
          - Compute quantum ensemble classifier predictions.
        * - :func:`compute_qnn <qbiocode.learning.compute_qnn.compute_qnn>`

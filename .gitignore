@@ -124,9 +124,11 @@ tutorial/**/*.png
 tutorial/**/.ipynb_checkpoints/
 tutorial/**/pqk_projections/
 tutorial/**/qpl_projections/
-# Running a PQK/QPL example from the repository root lands the cache here.
+tutorial/**/qelm_projections/
+# Running a PQK/QPL/QELM example from the repository root lands the cache here.
 /pqk_projections/
 /qpl_projections/
+/qelm_projections/
 # `PQK - OV.ipynb` downloads a 46 MB archive and extracts ~250 MB of TCGA tables
 # beside itself, then writes its results table there. Every byte is reproducible
 # from the URL in the notebook's own download cell, so none of it belongs in git --

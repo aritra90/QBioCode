@@ -100,6 +100,7 @@ from .learning.compute_nb import compute_nb, compute_nb_opt
 # every classical learner exports both twins. Guarded by
 # tests/test_model_contract_matrix.py.
 from .learning.compute_pqk import compute_pqk, compute_pqk_opt
+from .learning.compute_qelm import compute_qelm, compute_qelm_opt
 from .learning.compute_qnn import compute_qnn, compute_qnn_opt
 from .learning.compute_qpl import compute_qpl, compute_qpl_opt
 from .learning.compute_qsvc import compute_qsvc, compute_qsvc_opt
@@ -174,6 +175,8 @@ __all__ = [
     "compute_pqk_opt",
     "compute_qpl",
     "compute_qpl_opt",
+    "compute_qelm",
+    "compute_qelm_opt",
     # Embeddings
     "get_embeddings",
     "resolve_embeddings",

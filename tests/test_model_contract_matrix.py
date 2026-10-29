@@ -300,7 +300,7 @@ def one_of_each_family(quantum_dataset, tmp_path_factory):
 
 
 class TestTheDispatchTable:
-    """28 entries wired by hand, none of them checked at import time."""
+    """30 entries wired by hand, none of them checked at import time."""
 
     def test_every_entry_resolves_to_the_function_its_key_names(self):
         """A typo'd import or a mis-wired key is otherwise a KeyError in a worker.
@@ -348,9 +348,9 @@ class TestTheDispatchTable:
             f"learners with no '_opt' twin: {sorted(base - tuned)}; "
             f"'_opt' twins with no base entry: {sorted(tuned - base)}"
         )
-        assert len(DISPATCH) == 2 * len(base) == 28, (
+        assert len(DISPATCH) == 2 * len(base) == 30, (
             f"compute_ml_dict holds {len(DISPATCH)} entries for {len(base)} learners; "
-            f"the documented surface is 28 entries for 14 learners"
+            f"the documented surface is 30 entries for 15 learners"
         )
 
     @pytest.mark.parametrize(

@@ -13,8 +13,8 @@ QBioCode provides tools for benchmarking quantum and classical machine learning 
 - **QProfiler**: Automated ML benchmarking with data complexity analysis
 - **QSage**: Meta-learning tool for intelligent model selection
 - **Data Generation**: Create artificial datasets with controlled complexity
-- **Quantum ML Support**: QSVC, PQK, VQC, QNN, Quantum Ensemble implementations
-- **Scalable Quantum Simulation**: tensor-network (MPS) projection backends for `pqk`/`qpl` via the optional `[mps]` extra — one feature is one qubit, so this lifts the ~20-feature ceiling a dense statevector imposes
+- **Quantum ML Support**: QSVC, PQK, QPL, QELM, VQC, QNN, Quantum Ensemble implementations
+- **Scalable Quantum Simulation**: tensor-network (MPS) projection backends for `pqk`/`qpl`/`qelm` via the optional `[mps]` extra — one feature is one qubit, so this lifts the ~20-feature ceiling a dense statevector imposes
 - **Classical ML Baselines**: RF, SVM, LR, DT, NB, MLP, XGBoost, CatBoost, and TabPFN (a pretrained tabular transformer, via the optional `[tabpfn]` extra)
 - **Comprehensive Documentation**: Detailed tutorials and API reference
 
@@ -55,7 +55,7 @@ Everything below is additive, and extras combine (`'qbiocode[apps,quvine]'`).
 | *(none)* | `pip install qbiocode` | Core library: embeddings (`pca`, `nmf`, `umap`, `tsne`, `spectral`, ...), PQK, classical + quantum models, `evaluate_graph`, `scale_train_test` |
 | `apps` | `pip install 'qbiocode[apps]'` | Hydra-driven CLIs for the QProfiler and QSage apps |
 | `quvine` | `pip install 'qbiocode[quvine]'` | QuVINE quantum/classical graph embeddings — 83 methods via `get_embeddings("quvine_*", ...)` |
-| `mps` | `pip install 'qbiocode[mps]'` | Tensor-network projection backends for `pqk`/`qpl` — run quantum models on hundreds of features instead of ~20 |
+| `mps` | `pip install 'qbiocode[mps]'` | Tensor-network projection backends for `pqk`/`qpl`/`qelm` — run quantum models on hundreds of features instead of ~20 |
 | `docs` | `pip install 'qbiocode[docs]'` | Sphinx toolchain for building the documentation |
 | `dev` | `pip install 'qbiocode[dev]'` | `pytest`, `pytest-cov`, `black`, `isort`, `flake8`, `mypy` |
 | `all` | `pip install 'qbiocode[all]'` | Union of every extra above |
@@ -446,9 +446,97 @@ runsheet and the non-claims, and `qdata-gen selftest` for the physics checks.
 **Quantum Models:**
 - Quantum Support Vector Classifier (QSVC)
 - Projected Quantum Kernel (PQK)
+- Quantum Projection Learning (QPL) — PQK's projection with a configurable set of classical heads
+- Quantum Extreme Learning Machine (QELM) — a fixed random reservoir with a ridge readout ([see below](#quantum-extreme-learning-machine-qelm))
 - Variational Quantum Classifier (VQC)
 - Quantum Neural Network (QNN)
 - Quantum Ensemble (QEnsemble) - swap and random unitary methods
+
+#### Quantum Extreme Learning Machine (QELM)
+
+QELM projects each row through the data feature map followed by a **fixed random
+reservoir**, reads a configurable set of Pauli expectation values off that state, and
+fits a ridge classifier on them in closed form:
+
+```
+x  ──►  feature map  ──►  reservoir (fixed, untrained)  ──►  F observables  ──►  ridge
+```
+
+The reservoir is never trained and never tuned — that is what makes this an *extreme*
+learning machine rather than a variational model (`vqc`, `qnn`). The readout is
+deliberately the weakest of the three projection-based arms: a win for a strong head
+(PQK's searched SVC) may be the head extracting from an ordinary representation, whereas
+a ridge on random features can only do well if the **representation itself** carries the
+signal.
+
+| arm | circuit | features | head |
+| --- | --- | --- | --- |
+| `pqk` | data feature map | `3n` | SVC, 40×5 randomized search |
+| `qpl` | data feature map | `3n` | up to 6 heads, each searched |
+| `qelm` | feature map **+ random reservoir** | `F` (free) | ridge, closed form |
+
+**The ablation.** `reservoir_reps: 0` builds no reservoir at all, and with
+`measurement: 'xyz'` the features are then *bit-identical* to PQK's projection. Three
+runs therefore separate two effects that comparing only `pqk` against a full QELM would
+confound:
+
+| run | representation | readout | isolates |
+| --- | --- | --- | --- |
+| `qelm`, `reservoir_reps: 0` | PQK's | ridge | the **readout** |
+| `pqk` | PQK's | SVC | — (the reference) |
+| `qelm`, `reservoir_reps: 1+` | reservoir | ridge | the **reservoir** |
+
+**Parameters** (`qelm_args`, and searchable via `gridsearch_qelm_args`):
+
+| key | meaning |
+| --- | --- |
+| `encoding`, `reps`, `entanglement`, `bandwidth`, `data_map` | the data feature map, exactly as in `pqk_args` |
+| `reservoir_reps` | reservoir depth; **0 = no reservoir** (the ablation above) |
+| `measurement` | `'xyz'` (`3n` features), `'xyz+zz'` (`4n-1`), or `'random_pauli'` (free width) |
+| `n_features` | how many observables — `'random_pauli'` only. An int is a count; a **float is a multiple of the qubit count** (`3.0` on 8 features → 24), which is the spelling that means the same thing across datasets of different widths |
+| `alpha` | the ridge penalty. Omit it and each fit selects its own by generalised cross-validation, which costs about one fit — the arm's default and its cost argument |
+
+`qelm_reservoir_seed` seeds the reservoir and the random pool. It falls back to `q_seed`
+then `seed`, so an ordinary config needs no new key. **It is configuration, not a
+hyperparameter:** naming it in `gridsearch_qelm_args` is refused with an explanation,
+because searching it would report the best of *n* random reservoirs as if it were the
+performance of one.
+
+**Outputs.** One `results_qelm` row (`results_qelm_opt` when tuned) carrying the usual
+metrics plus `reservoir_reps`, `reservoir_seed`, `measurement`, `n_features` and the
+selected `alpha`. A tuned run additionally writes `selected_<name>` columns — including
+`selected_reservoir_reps`, so "did the search keep the reservoir on this dataset?" is a
+`groupby` rather than a repr to parse. AUC and PR-AUC are real (ridge publishes
+`decision_function`).
+
+**Cost and scaling.** Quantum cost is PQK's times the reservoir depth factor — the same
+one-state-preparation-per-row scaling. Classical cost collapses: one ridge solve against
+PQK's 200 SVC fits. The reservoir is nearest-neighbour by construction, so the MPS bond
+dimension stays flat in the qubit count (measured: 8 at both 6 and 16 qubits) and the
+`[mps]` extra lifts the ~20-feature statevector ceiling as it does for `pqk`.
+
+`backend` must be `'simulator'` (optionally with `projection_backend: 'aer_mps'` or
+`'quimb_mps'`): QELM reads an arbitrary pool of Pauli observables off one state, and the
+runtime-primitive path `pqk` and `qsvc` use is built around the `3n` single-qubit groups
+those models measure.
+
+```python
+from qbiocode.learning import compute_qelm
+
+# The full model: a depth-1 reservoir, 3n features, ridge penalty chosen by GCV
+frame = compute_qelm(
+    X_train, X_test, y_train, y_test,
+    args={"backend": "simulator", "seed": 42, "qelm_projection_dir": "qelm_projections"},
+    encoding="ZZ", reps=2, reservoir_reps=1, measurement="xyz",
+)
+
+# The ablation: no reservoir, so the features are exactly PQK's
+ablation = compute_qelm(
+    X_train, X_test, y_train, y_test,
+    args={"backend": "simulator", "seed": 42, "qelm_projection_dir": "qelm_projections"},
+    encoding="ZZ", reps=2, reservoir_reps=0, measurement="xyz",
+)
+```
 
 **Quantum Ensemble Usage:**
 ```python

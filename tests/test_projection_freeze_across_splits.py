@@ -68,6 +68,7 @@ import qbiocode.learning._tuning as tuning_module
 import qbiocode.utils.qutils as qutils
 from qbiocode.learning._param_cache import FREEZE_KEY, freezing_enabled
 from qbiocode.learning.compute_pqk import compute_pqk_opt
+from qbiocode.learning.compute_qelm import compute_qelm_opt
 from qbiocode.learning.compute_qpl import compute_qpl_opt
 
 pytestmark = pytest.mark.filterwarnings("ignore::UserWarning")
@@ -146,6 +147,10 @@ def _args(root, freeze, **extra):
         "quantum_param_dir": str(root / "params"),
         "pqk_projection_dir": str(root / "proj"),
         "qpl_projection_dir": str(root / "proj"),
+        # Named for the same reason as the other two: the default is a RELATIVE
+        # directory, so an arm whose key is missing writes its cache into whatever the
+        # working directory happens to be -- the repository root, under pytest.
+        "qelm_projection_dir": str(root / "proj"),
     }
     args.update(extra)
     return args
@@ -155,9 +160,17 @@ class _Spies:
     """Counts of the two kinds of work a split can do.
 
     ``studies`` counts Optuna studies created, which is one per projection-level search
-    -- the thing ``freeze_quantum_params`` is meant to skip. ``sessions`` counts backend
-    sessions opened, which is one per projection actually computed: a trial's, and the
-    refit's.
+    -- the thing ``freeze_quantum_params`` is meant to skip. ``sessions`` counts
+    projections actually computed: a trial's, and the refit's.
+
+    A projection is counted at BOTH of the places an arm can compute one. ``pqk`` and
+    ``qpl`` go through ``qutils.get_backend_session`` (one session per projection);
+    ``qelm`` never opens a session at all -- it always uses
+    ``qbiocode.utils.projection.make_projector``, because its observable pool can hold
+    multi-qubit Paulis and the per-row Estimator loop the other two use is written
+    around 3n single-qubit groups. Counting only sessions therefore scored every QELM
+    split as zero work, which reads as "it reused the cached projection" -- the exact
+    failure this spy exists to detect, reported against the one arm that cannot have it.
     """
 
     def __init__(self):
@@ -165,8 +178,11 @@ class _Spies:
         self.sessions = []
 
     def install(self, monkeypatch):
+        from qbiocode.utils import projection as projection_module
+
         real_study = tuning_module.optuna.create_study
         real_session = qutils.get_backend_session
+        real_projector = projection_module.make_projector
 
         def study(*args, **kwargs):
             self.studies.append(1)
@@ -176,8 +192,15 @@ class _Spies:
             self.sessions.append(1)
             return real_session(*args, **kwargs)
 
+        def projector(*args, **kwargs):
+            self.sessions.append(1)
+            return real_projector(*args, **kwargs)
+
         monkeypatch.setattr(tuning_module.optuna, "create_study", study)
         monkeypatch.setattr(qutils, "get_backend_session", session)
+        # Patched on the module rather than on the importing function's namespace:
+        # compute_qelm imports it inside the call, so the attribute is looked up afresh.
+        monkeypatch.setattr(projection_module, "make_projector", projector)
         return self
 
 
@@ -217,6 +240,13 @@ ARMS = {
         "run": compute_qpl_opt,
         "label": "qpl_opt_svc",
         "extra": {"classical_models": ["svc"]},
+    },
+    # QELM freezes the same projection keys plus its own reservoir_reps; its ridge
+    # readout is re-selected per split, as pqk's and qpl's heads are.
+    "qelm": {
+        "run": compute_qelm_opt,
+        "label": "qelm_opt",
+        "extra": {},
     },
 }
 

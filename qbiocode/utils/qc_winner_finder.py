@@ -865,14 +865,27 @@ def aggregate_benchmark(
 # margin. Those are properties of the kernel, not of the score, and they are computable only
 # from objects the run does not normally keep -- hence `kernel_dump_dir`.
 #
-# Two file kinds are read, written by the two quantum kernel arms:
+# Three file kinds are read, written by the three quantum kernel arms:
 #   gram_<model>_<data_key>.npz   QSVC   K_train, K_test, X_train, y_train, y_test
 #   proj_<model>_<data_key>.npz   PQK    Z_train, Z_test, X_train, y_train, y_test,
 #                                        best_params
+#   qelm_<model>_<data_key>.npz   QELM   Z_train, Z_test, X_train, y_train, y_test,
+#                                        params
 # `data_key` is '<stem>_<embedding>_<n_components>_<iteration>' as built by qprofiler, so a
 # row here joins the delta table on Dataset == '<stem>.csv'.
+#
+# The QELM file carries reservoir features rather than a feature-map projection, and its
+# readout is a ridge rather than a searched SVC -- so the induced kernel is LINEAR, which
+# `collect_kernel_diagnostics` below takes from the model label rather than from the
+# dump's own settings (a QELM dump has no 'kernel' key to read, and the PQK default of
+# 'rbf' would report a geometric difference for a kernel no QELM ever fitted). Its
+# settings travel under `params` -- every one of them, since none but `alpha` was fitted
+# -- where PQK writes `best_params`, only the SVC search's winner.
 
-_KERNEL_MODELS = ("qsvc_opt", "qsvc", "pqk_opt", "pqk")
+_KERNEL_MODELS = ("qsvc_opt", "qsvc", "pqk_opt", "pqk", "qelm_opt", "qelm")
+
+#: Filename prefixes of the kernel dumps, and the model family each belongs to.
+_DUMP_PREFIXES = ("gram_", "proj_", "qelm_")
 
 
 def _parse_dump_name(filename):
@@ -883,7 +896,7 @@ def _parse_dump_name(filename):
     ``grid_search: True`` means only the ``_opt`` arm ever runs.
     """
     base = os.path.basename(filename)
-    for prefix in ("gram_", "proj_"):
+    for prefix in _DUMP_PREFIXES:
         if base.startswith(prefix):
             rest = base[len(prefix) : -len(".npz")]
             break
@@ -961,8 +974,11 @@ def collect_kernel_diagnostics(
     from qbiocode.utils import kernel_diagnostics as kd
 
     paths = sorted(
-        _glob.glob(os.path.join(kernels_root, "**", "gram_*.npz"), recursive=True)
-        + _glob.glob(os.path.join(kernels_root, "**", "proj_*.npz"), recursive=True)
+        path
+        for prefix in _DUMP_PREFIXES
+        for path in _glob.glob(
+            os.path.join(kernels_root, "**", f"{prefix}*.npz"), recursive=True
+        )
     )
     rows = []
     for path in paths:
@@ -1002,16 +1018,28 @@ def collect_kernel_diagnostics(
         svc_kernel = "rbf"
         if "K_train" in keys:  # QSVC: the fidelity Gram itself
             Kq = np.asarray(z["K_train"], dtype=float)
-        elif "Z_train" in keys:  # PQK: rebuild exactly what the SVC head was fitted with
+        elif "Z_train" in keys:  # PQK / QELM: rebuild what the head was fitted with
             best = {}
-            if "best_params" in keys:
-                try:
-                    best = _json.loads(str(z["best_params"]))
-                except Exception:
-                    best = {}
-            # The head searches kernel over linear/rbf/poly/sigmoid, so assuming RBF here
-            # would silently report a different kernel than the one that produced the score.
-            svc_kernel = best.get("kernel", "rbf")
+            # 'params' is QELM's (every setting, since only `alpha` was fitted);
+            # 'best_params' is PQK's (the SVC search's winner).
+            for field in ("best_params", "params"):
+                if field in keys:
+                    try:
+                        best = _json.loads(str(z[field]))
+                    except Exception:
+                        best = {}
+                    break
+            # The PQK head searches kernel over linear/rbf/poly/sigmoid, so assuming RBF
+            # here would silently report a different kernel than the one that produced the
+            # score. A QELM's readout is a ridge, whose induced kernel is LINEAR and is not
+            # searched at all -- so it is taken from the arm rather than from `best`, which
+            # for this arm carries no 'kernel' key and would fall through to the RBF
+            # default. That default would report a geometric difference for a kernel no
+            # QELM ever fitted.
+            if str(model).startswith("qelm"):
+                svc_kernel = "linear"
+            else:
+                svc_kernel = best.get("kernel", "rbf")
             kw = {} if svc_kernel == "linear" else {"gamma": best.get("gamma", "scale")}
             if kw.get("gamma") == "scale":
                 kw["gamma"] = _resolve_gamma(z["Z_train"], "scale")

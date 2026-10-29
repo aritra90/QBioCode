@@ -17,9 +17,10 @@ from qbiocode.learning import _tuning
 
 # By path: qbiocode.learning re-exports each compute_* function under its module's name,
 # so `from qbiocode.learning import compute_nb` is the function, not the module.
-compute_nb, compute_pqk, compute_qnn, compute_qpl, compute_qsvc, compute_vqc = (
+compute_nb, compute_pqk, compute_qelm, compute_qnn, compute_qpl, compute_qsvc, compute_vqc = (
     importlib.import_module(f"qbiocode.learning.{m}")
-    for m in ("compute_nb", "compute_pqk", "compute_qnn", "compute_qpl", "compute_qsvc", "compute_vqc")
+    for m in ("compute_nb", "compute_pqk", "compute_qelm", "compute_qnn", "compute_qpl",
+              "compute_qsvc", "compute_vqc")
 )
 
 
@@ -55,9 +56,10 @@ class _Captured(Exception):
         (compute_qnn, "compute_qnn_opt", "run_function_study", {"reps": [1]}),
         (compute_vqc, "compute_vqc_opt", "run_function_study", {"reps": [1]}),
         (compute_qpl, "compute_qpl_opt", "run_function_study", {"reps": [1]}),
+        (compute_qelm, "compute_qelm_opt", "run_function_study", {"reps": [1]}),
         (compute_nb, "compute_nb_opt", "search_hyperparameters", {"var_smoothing": [1e-9]}),
     ],
-    ids=["qsvc", "pqk", "qnn", "vqc", "qpl", "nb"],
+    ids=["qsvc", "pqk", "qnn", "vqc", "qpl", "qelm", "nb"],
 )
 def test_the_tuner_gets_the_run_seed_from_a_dictconfig(monkeypatch, module, fn, entry, search):
     seen = {}

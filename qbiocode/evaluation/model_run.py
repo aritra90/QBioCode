@@ -50,7 +50,7 @@ _QUANTUM_PASSTHROUGH = {"qpl": ("classical_models", "classical_models_args")}
 #: ``("QNN", "PQK", "VQC", "QSVC")`` -- and a THIRD copy inline in the scatter arm -- both
 #: missing ``qpl``, so every QPL row was coloured and ordered as a classical model in
 #: every published figure. One list, one place to add the next quantum learner to.
-QUANTUM_MODELS = frozenset({"qsvc", "qnn", "vqc", "pqk", "qpl"})
+QUANTUM_MODELS = frozenset({"qsvc", "qnn", "vqc", "pqk", "qpl", "qelm"})
 
 
 def _call_with_global_seeds(compute_fn, seed, q_seed, *fn_args, **fn_kwargs):
@@ -333,6 +333,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args, validation=None)
     from qbiocode.learning.compute_mlp import compute_mlp, compute_mlp_opt
     from qbiocode.learning.compute_xgb import compute_xgb, compute_xgb_opt
     from qbiocode.learning.compute_pqk import compute_pqk, compute_pqk_opt
+    from qbiocode.learning.compute_qelm import compute_qelm, compute_qelm_opt
     from qbiocode.learning.compute_qpl import compute_qpl, compute_qpl_opt
     from qbiocode.learning.compute_qnn import compute_qnn, compute_qnn_opt
     from qbiocode.learning.compute_qsvc import compute_qsvc, compute_qsvc_opt
@@ -373,6 +374,8 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args, validation=None)
         "pqk_opt": compute_pqk_opt,
         "qpl": compute_qpl,
         "qpl_opt": compute_qpl_opt,
+        "qelm": compute_qelm,
+        "qelm_opt": compute_qelm_opt,
     }
 
     quantum_models = QUANTUM_MODELS

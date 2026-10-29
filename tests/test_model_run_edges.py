@@ -574,6 +574,7 @@ DIRECT_CALL_REQUIREMENTS = {
     "qnn": (("backend", "shots", "seed"), {}),
     "pqk": (("backend", "seed", "pqk_projection_dir"), {}),
     "qpl": (("backend", "seed", "qpl_projection_dir"), {}),
+    "qelm": (("backend", "seed", "qelm_projection_dir"), {}),
 }
 
 #: The learners that read ``args`` for themselves -- and so the ones that need a real
@@ -617,6 +618,7 @@ def minimal_args(tmp_path):
         "seed": 7,
         "pqk_projection_dir": str(tmp_path / "pqk"),
         "qpl_projection_dir": str(tmp_path / "qpl"),
+        "qelm_projection_dir": str(tmp_path / "qelm"),
     }
 
     def build(name):

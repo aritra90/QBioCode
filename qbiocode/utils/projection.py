@@ -25,6 +25,23 @@ Those boundaries were measured on this machine with the ZZ feature map; see
 Every projector here exposes the same two methods, ``project_row(x)`` ->
 ``(3, n_qubits)`` and ``project(X, n_jobs=...)`` -> ``(n_rows, 3, n_qubits)``,
 which is the layout ``compute_qpl``/``compute_pqk`` save and then flatten.
+
+What is measured, and what measures it
+--------------------------------------
+Those shapes are the *default*, not the contract. Each projector takes an optional
+``observables`` list of ``(pauli, qubits)`` specs
+(:mod:`qbiocode.utils.qelm_features`), and ``None`` -- what ``compute_pqk`` and
+``compute_qpl`` pass -- means the ``3n`` single-qubit Paulis above, in that order, so
+their output is unchanged to the bit. A projector given an explicit pool returns
+``(n_rows, n_observables)`` instead: two dimensions rather than three, because an
+arbitrary pool has no ``(3, n_qubits)`` grid to fold into. A quantum extreme learning
+machine is the caller that needs this, and it also appends a fixed random unitary to the
+feature map through ``extra_circuit``; neither parameter changes anything for a caller
+that omits both.
+
+The qubit convention is index-based -- character ``i`` of ``pauli`` acts on
+``qubits[i]`` -- and is documented, with the reason it is easy to get backwards, in
+:mod:`qbiocode.utils.qelm_features`.
 """
 
 from __future__ import annotations
@@ -35,6 +52,7 @@ import numpy as np
 
 from qbiocode.utils import qutils
 from qbiocode.utils.mps_backend import MPSFeatureMapProjector
+from qbiocode.utils.qelm_features import check_observables, default_observables
 
 #: Backend names accepted by :func:`make_projector`.
 SUPPORTED_BACKENDS = ("statevector", "aer_mps", "quimb_mps", "quimb_permmps", "quimb_exact")
@@ -53,6 +71,62 @@ AER_MAX_REPS = 6
 #: At or above this width, exact tensor-network contraction beats the dense
 #: statevector on ``full`` entanglement (measured n=20 statevector wins, n=24 exact wins).
 EXACT_MIN_QUBITS = 24
+
+
+def _compose_extra(circuit, extra, n_qubits):
+    """``circuit`` with ``extra`` appended, or ``circuit`` itself when ``extra`` is None.
+
+    Validated here rather than left to qiskit, because both failure modes are quiet. An
+    ``extra`` carrying free parameters would have a data row bound into *its* angles by
+    ``assign_parameters`` -- qiskit binds by position across the whole circuit, so the
+    row would be split between the feature map and the reservoir and the reservoir would
+    stop being fixed. A narrower ``extra`` would compose onto qubits 0..m-1 only, which
+    is a different circuit rather than an error.
+    """
+    if extra is None:
+        return circuit
+    if extra.num_parameters:
+        raise ValueError(
+            f"extra_circuit still has {extra.num_parameters} unbound parameter(s) "
+            f"{[p.name for p in extra.parameters][:5]}; it is composed onto the "
+            f"parameterised feature map, so a data row would be bound into its angles "
+            f"and it would not be a fixed circuit. Bind it first (see "
+            f"qbiocode.utils.qelm_features.qelm_reservoir, which returns a bound one)."
+        )
+    if extra.num_qubits != n_qubits:
+        raise ValueError(
+            f"extra_circuit is {extra.num_qubits} qubit(s) wide but the feature map is "
+            f"{n_qubits}; composing it would leave the remaining qubits untouched "
+            f"rather than fail. Build it at the same width."
+        )
+    composed = circuit.copy()
+    composed.compose(extra, inplace=True)
+    return composed
+
+
+def resolve_observables(observables, n_qubits):
+    """``(specs, row_shape)`` for a projector's ``observables`` argument.
+
+    One function so the three projectors cannot drift on the rule that decides their
+    output shape -- which is the rule a caller's ``.reshape`` and every cached ``.npy``
+    on disk depend on.
+
+    Args:
+        observables (iterable or None): ``(pauli, qubits)`` specs, or ``None`` for the
+            default ``3n`` single-qubit pool.
+        n_qubits (int): Circuit width.
+
+    Returns:
+        tuple: ``(specs, row_shape)``. ``row_shape`` is ``(3, n_qubits)`` for the
+        default pool -- the layout ``compute_pqk``/``compute_qpl`` have always saved --
+        and ``(len(specs),)`` for an explicit one. The default keeps its two-dimensional
+        row because those two modules, their caches and their width validation are all
+        written against it.
+    """
+    if observables is None:
+        return default_observables(n_qubits), (3, int(n_qubits))
+    specs = check_observables(observables, n_qubits)
+    return specs, (len(specs),)
 
 
 def choose_backend(n_qubits, entanglement="linear", reps=1):
@@ -96,6 +170,13 @@ class StatevectorFeatureMapProjector:
         reps (int): feature-map repetitions.
         entanglement (str): entanglement pattern.
         data_map_func (callable, optional): passed through to the feature map.
+        observables (iterable or None): ``(pauli, qubits)`` specs to measure (see
+            :mod:`qbiocode.utils.qelm_features`). ``None`` (the default) is the ``3n``
+            single-qubit pool and a ``(3, n_qubits)`` row, unchanged.
+        extra_circuit (QuantumCircuit or None): composed after the feature map and
+            before the measurement -- a QELM's fixed random reservoir. Must be fully
+            bound and the same width, so the feature map stays the only place a data
+            row enters.
 
     Notes:
         Memory is the binding constraint: ``2**30`` complex128 amplitudes is 16 GiB,
@@ -103,7 +184,7 @@ class StatevectorFeatureMapProjector:
     """
 
     def __init__(self, n_qubits, encoding="ZZ", reps=1, entanglement="linear",
-                 data_map_func=None):
+                 data_map_func=None, observables=None, extra_circuit=None):
         from qiskit.quantum_info import SparsePauliOp
 
         self.n_qubits = int(n_qubits)
@@ -115,15 +196,30 @@ class StatevectorFeatureMapProjector:
             feature_map=encoding, feat_dimension=n_qubits, reps=reps,
             entanglement=entanglement, data_map_func=data_map_func,
         )
+        # Appended to the PARAMETERISED circuit, once, so the per-row path still binds
+        # only the data and the reservoir's own angles are never rebound.
+        self.circuit = _compose_extra(self.circuit, extra_circuit, self.n_qubits)
+        self.observables, self._row_shape = resolve_observables(observables, self.n_qubits)
         # Built once. Each is a single-term operator, so expectation_value is a cheap
         # sparse contraction against an already-computed amplitude vector.
-        self._observables = [
-            SparsePauliOp.from_sparse_list([(p, [k], 1.0)], num_qubits=self.n_qubits)
-            for p in "XYZ" for k in range(self.n_qubits)
+        #
+        # `from_sparse_list`, not SparsePauliOp(label): it is index-based, so character
+        # i of `pauli` acts on `qubits[i]` -- the convention qelm_features documents and
+        # the quimb path below shares. A bare label would be little-endian and would
+        # silently mirror every multi-qubit observable.
+        self._operators = [
+            SparsePauliOp.from_sparse_list(
+                [(pauli, list(qubits), 1.0)], num_qubits=self.n_qubits
+            )
+            for pauli, qubits in self.observables
         ]
 
     def project_row(self, x):
-        """Return the ``(3, n_qubits)`` array of ``<X>``, ``<Y>``, ``<Z>`` for one row."""
+        """Return one row's expectation values, shaped by the observable pool.
+
+        ``(3, n_qubits)`` for the default pool -- ``<X>``, ``<Y>``, ``<Z>`` per qubit --
+        and ``(n_observables,)`` for an explicit one.
+        """
         from qiskit.quantum_info import Statevector
 
         x = np.asarray(x, dtype=float).ravel()
@@ -133,9 +229,10 @@ class StatevectorFeatureMapProjector:
                 f"{self.n_qubits} qubits takes {self.circuit.num_parameters}."
             )
         sv = Statevector(self.circuit.assign_parameters(x))
-        # One simulation, then 3n reads off it -- the whole point of this class.
-        evs = [sv.expectation_value(o).real for o in self._observables]
-        return np.asarray(evs).reshape(3, self.n_qubits)
+        # One simulation, then every observable read off it -- the whole point of this
+        # class.
+        evs = [sv.expectation_value(o).real for o in self._operators]
+        return np.asarray(evs).reshape(self._row_shape)
 
     def project(self, X, progress_every=100, n_jobs=1):
         """Project a design matrix; see :meth:`MPSFeatureMapProjector.project`."""
@@ -172,7 +269,8 @@ class AerMPSFeatureMapProjector:
     BASIS = ("u", "p", "h", "rz", "rx", "ry", "cx", "cz")
 
     def __init__(self, n_qubits, encoding="ZZ", reps=1, entanglement="linear",
-                 max_bond=None, data_map_func=None):
+                 max_bond=None, data_map_func=None, observables=None,
+                 extra_circuit=None):
         from qiskit import transpile
         from qiskit.quantum_info import SparsePauliOp
         from qiskit_aer import AerSimulator
@@ -192,11 +290,36 @@ class AerMPSFeatureMapProjector:
             feature_map=encoding, feat_dimension=n_qubits, reps=reps,
             entanglement=entanglement, data_map_func=data_map_func,
         )
-        template = transpile(feature_map, basis_gates=list(self.BASIS),
-                             optimization_level=0)
-        for p in "XYZ":
-            for k in range(self.n_qubits):
-                template.save_expectation_value(SparsePauliOp(p), [k], label=f"{p}{k}")
+        self.observables, self._row_shape = resolve_observables(observables, self.n_qubits)
+        # Composed BEFORE the basis translation, so the reservoir is lowered into
+        # Aer's basis along with the feature map -- the class docstring's second
+        # ordering trap, for the same reason: transpiling it separately per row is not
+        # simulation work.
+        template = transpile(
+            _compose_extra(feature_map, extra_circuit, self.n_qubits),
+            basis_gates=list(self.BASIS), optimization_level=0,
+        )
+        # Labels are positional, not the Pauli string: two observables can share a
+        # string on different qubits ('ZZ' on (0,1) and on (1,2)), so keying the result
+        # dict by the string would silently collapse them onto one saved value.
+        #
+        # `from_sparse_list` for the operator, as in the statevector path -- NOT
+        # `SparsePauliOp(pauli)` with a qubit list, which this used to do. That is safe
+        # for the single-qubit default and wrong for anything wider: a bare label is
+        # little-endian, so `SparsePauliOp('XY')` on [0, 1] is Y on qubit 0 and X on
+        # qubit 1 -- mirrored against the index-based convention every other path here
+        # uses.
+        self._labels = []
+        for index, (pauli, qubits) in enumerate(self.observables):
+            label = f"obs{index}"
+            template.save_expectation_value(
+                SparsePauliOp.from_sparse_list(
+                    [(pauli, list(qubits), 1.0)], num_qubits=self.n_qubits
+                ),
+                list(range(self.n_qubits)),
+                label=label,
+            )
+            self._labels.append(label)
         self.circuit = template
 
     def project_row(self, x):
@@ -210,8 +333,8 @@ class AerMPSFeatureMapProjector:
             raise RuntimeError(f"Aer simulation failed: {result.status}")
         data = result.data()
         return np.asarray(
-            [[float(data[f"{p}{k}"]) for k in range(self.n_qubits)] for p in "XYZ"]
-        )
+            [float(data[label]) for label in self._labels]
+        ).reshape(self._row_shape)
 
     def project(self, X, progress_every=100, n_jobs=1):
         return _project_matrix(self, X, progress_every, n_jobs)
@@ -229,9 +352,16 @@ class AerMPSFeatureMapProjector:
         return None
 
 
+def _row_shape_of(projector):
+    """One row's output shape. ``(3, n_qubits)`` unless an observable pool was given."""
+    # getattr: MPSFeatureMapProjector is constructed by this module too, and a projector
+    # built before this attribute existed (or a test double) means the default pool.
+    return getattr(projector, "_row_shape", None) or (3, projector.n_qubits)
+
+
 def _project_chunk(projector, chunk):
     """joblib worker: project a contiguous block of rows."""
-    out = np.empty((len(chunk), 3, projector.n_qubits))
+    out = np.empty((len(chunk), *_row_shape_of(projector)))
     for i, row in enumerate(chunk):
         out[i] = projector.project_row(row)
     return out
@@ -244,7 +374,7 @@ def _project_matrix(projector, X, progress_every, n_jobs):
         raise ValueError(f"X must be 2-D (n_rows, n_features); got shape {X.shape}.")
 
     if n_jobs == 1:
-        out = np.empty((len(X), 3, projector.n_qubits))
+        out = np.empty((len(X), *_row_shape_of(projector)))
         for i, row in enumerate(X):
             if progress_every and i % progress_every == 0:
                 print(f"at datapoint {i}")
@@ -262,7 +392,8 @@ def _project_matrix(projector, X, progress_every, n_jobs):
 
 
 def make_projector(n_qubits, encoding="ZZ", reps=1, entanglement="linear",
-                   backend="auto", max_bond=None, data_map_func=None):
+                   backend="auto", max_bond=None, data_map_func=None,
+                   observables=None, extra_circuit=None):
     """Build a projector, choosing the backend from measurements unless told otherwise.
 
     Args:
@@ -280,6 +411,15 @@ def make_projector(n_qubits, encoding="ZZ", reps=1, entanglement="linear",
             projected-kernel paths use
             :func:`qbiocode.utils.qutils.unit_coefficient_data_map`; omitting it
             silently produces different features from those pipelines.
+        observables (iterable or None): ``(pauli, qubits)`` specs to measure, from
+            :func:`qbiocode.utils.qelm_features.qelm_observables`. ``None`` (the
+            default) measures the ``3n`` single-qubit Paulis and returns the
+            ``(n_rows, 3, n_qubits)`` layout ``compute_pqk``/``compute_qpl`` save; an
+            explicit pool returns ``(n_rows, len(observables))``.
+        extra_circuit (QuantumCircuit or None): a fully-bound circuit composed after
+            the feature map, e.g.
+            :func:`qbiocode.utils.qelm_features.qelm_reservoir`. ``None`` (the default)
+            appends nothing.
 
     Returns:
         A projector exposing ``project_row``, ``project``, ``fidelity_estimate`` and
@@ -287,6 +427,13 @@ def make_projector(n_qubits, encoding="ZZ", reps=1, entanglement="linear",
 
     Raises:
         ValueError: if ``backend`` is not ``"auto"`` or a supported name.
+
+    Note:
+        ``choose_backend`` is driven by the FEATURE MAP's ``entanglement`` and ``reps``
+        and knows nothing about ``extra_circuit``. A reservoir built by
+        ``qelm_reservoir`` is nearest-neighbour by construction, so a bounded pattern
+        stays bounded and the routing holds; a caller passing some other circuit should
+        name ``backend`` explicitly rather than trust ``"auto"``.
     """
     if backend == "auto":
         backend = choose_backend(n_qubits, entanglement=entanglement, reps=reps)
@@ -309,7 +456,8 @@ def make_projector(n_qubits, encoding="ZZ", reps=1, entanglement="linear",
         )
 
     common = dict(n_qubits=n_qubits, encoding=encoding, reps=reps,
-                  entanglement=entanglement, data_map_func=data_map_func)
+                  entanglement=entanglement, data_map_func=data_map_func,
+                  observables=observables, extra_circuit=extra_circuit)
 
     if backend == "statevector":
         return StatevectorFeatureMapProjector(**common)

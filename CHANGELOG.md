@@ -8,6 +8,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### QELM: a quantum extreme learning machine as a first-class model
+
+A fifth quantum arm, `qelm`, selectable from `model:` alongside `pqk`, `qpl`, `qsvc`,
+`qnn` and `vqc`. It projects each row through the data feature map followed by a **fixed
+random reservoir**, reads a configurable pool of Pauli expectation values off that state,
+and fits a ridge classifier on them in closed form. The reservoir is never trained and
+never tuned, which is what distinguishes it from the variational arms; the readout is
+deliberately the weakest of the three projection-based arms, because a win for a strong
+head may be the head extracting from an ordinary representation, whereas a ridge on random
+features can only do well if the representation itself carries the signal.
+
+- **`compute_qelm` / `compute_qelm_opt`** (`qbiocode.learning.compute_qelm`), registered in
+  `model_run`'s dispatch table and in `QUANTUM_MODELS` — so it inherits split-based
+  evaluation, the Optuna tuning workflow, `freeze_quantum_params`, manifest-mode fold
+  tuning with per-trial logs, `selected_<name>` columns, projection caching with
+  checkpoint/resume, `kernel_dump_dir` diagnostics, quantum/classical side classification
+  in `fair_selection`, and the quantum colouring in the correlation figures.
+- **It consumes the same post-embedding `X` as every other model.** Scaling, feature
+  selection, the embedding and `n_components` are unchanged and remain external; the arm
+  adds nothing to the feature path, which is what makes its rows comparable to a `pqk` or
+  `lr` row from the same pass.
+- **The ablation is exact.** `reservoir_reps: 0` builds no reservoir at all, and with
+  `measurement: 'xyz'` the features are bit-identical to `pqk`'s projection — so
+  `qelm` at depth 0, `pqk`, and `qelm` at depth 1+ separate the effect of the *readout*
+  from the effect of the *reservoir*, which comparing only the outer two would confound.
+  (Qiskit's own `reps=0` still emits a final rotation layer, so "no reservoir" is the
+  absence of a circuit rather than a zero-depth one; `tests/test_qelm.py` pins the
+  equivalence on the fitted model, not just the features.)
+- **New observable pools and a reservoir builder** (`qbiocode.utils.qelm_features`):
+  `'xyz'` (`3n` features, `pqk`'s pool in its order), `'xyz+zz'` (`4n - 1`) and
+  `'random_pauli'` (free width, seeded, distinct operators). The projectors in
+  `qbiocode.utils.projection` and `.mps_backend` now take optional `observables` and
+  `extra_circuit` arguments; both default to the previous behaviour, so `pqk` and `qpl`
+  projections are unchanged to the bit.
+- **The reservoir is nearest-neighbour by construction**, so the MPS bond dimension stays
+  flat in the qubit count (measured: 8 at both 6 and 16 qubits, against 256 uncompressed)
+  and the `[mps]` extra lifts the ~20-feature statevector ceiling as it does for `pqk`. An
+  unstructured reservoir would have capped the arm at ~20 qubits while still producing
+  valid features.
+- **`qelm_reservoir_seed` is configuration, not a hyperparameter.** It falls back to
+  `q_seed` then `seed`, and naming it in `gridsearch_qelm_args` is **refused with an
+  explanation**: searching it would report the best of `n_trials` random reservoirs as if
+  it were the performance of one. An unseeded run is refused for the same class of reason
+  — it would be irreproducible without failing.
+- Config: `qelm_args`, `gridsearch_qelm_args` (whose `reservoir_reps: [0, 1, 2]` puts the
+  `pqk`-equivalent representation in the search space), `qelm_reservoir_seed` and
+  `qelm_projection_dir`. `backend` must be `'simulator'`; a hardware backend is refused
+  with the reason, since this arm's observable pool can hold multi-qubit Paulis and the
+  runtime-primitive path is built around `pqk`'s `3n` single-qubit groups.
+- Documented in the README, `docs/source/apps/config.md` (model table, tunable-parameter
+  table, a section on the model, the ablation, the parameters, the seed policy, cost and
+  outputs) and the API reference.
+
+Two fixes fell out of the integration. The freeze-across-splits spy counted backend
+sessions as its proxy for "a projection was computed", which scored every QELM split as
+zero work — the signature of the bug it exists to detect, on the one arm that cannot have
+it; it now counts `make_projector` as well. And a test config that omitted
+`qelm_projection_dir` wrote its cache into the repository root, because the default is
+relative: the fixture now names it, `.gitignore` covers the directory, and the config
+documentation says the defaults are relative.
+
 #### The selected quantum configuration is reported per row, as its own columns
 
 A tuned quantum row already carried every chosen hyperparameter — but only inside

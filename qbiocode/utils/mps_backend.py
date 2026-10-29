@@ -209,7 +209,7 @@ def _project_chunk(projector, chunk):
     Returns the block's projections plus its truncation diagnostics, which the parent
     merges -- a worker's own attribute updates die with its process.
     """
-    out = np.empty((len(chunk), 3, projector.n_qubits))
+    out = np.empty((len(chunk), *projector._row_shape))
     for i, row in enumerate(chunk):
         out[i] = projector.project_row(row)
     return out, projector.fidelity_estimate(), projector.observed_max_bond()
@@ -245,10 +245,21 @@ class MPSFeatureMapProjector:
             effectively exact for these circuits.
         data_map_func (callable, optional): passed through to the feature map,
             e.g. :func:`qbiocode.utils.qutils.unit_coefficient_data_map`.
+        observables (iterable or None): ``(pauli, qubits)`` specs to measure (see
+            :mod:`qbiocode.utils.qelm_features`). ``None`` (the default) is the ``3n``
+            single-qubit pool and the ``(3, n_qubits)`` row layout above, which takes
+            the fast reduced-density-matrix sweep in :meth:`_read_expectations`. An
+            explicit pool returns ``(len(observables),)`` per row.
+        extra_circuit (QuantumCircuit or None): a fully-bound circuit composed after
+            the feature map -- a QELM's fixed reservoir
+            (:func:`qbiocode.utils.qelm_features.qelm_reservoir`). Keep it
+            nearest-neighbour: an unstructured circuit is not MPS-compressible, which
+            is the whole premise of this module.
 
     Attributes:
         circuit (QuantumCircuit): the transpiled, still-parameterised feature
             map. Exposed so callers can inspect depth / gate counts.
+        observables (list): the resolved ``(pauli, qubits)`` specs being measured.
     """
 
     def __init__(
@@ -261,6 +272,8 @@ class MPSFeatureMapProjector:
         cutoff=1e-12,
         data_map_func=None,
         simulator="mps",
+        observables=None,
+        extra_circuit=None,
     ):
         quimb, qtn = _require_quimb()
         from qiskit import transpile
@@ -306,15 +319,37 @@ class MPSFeatureMapProjector:
 
         # Transpiled once, parameterised. Per row we only re-bind angles, so the
         # transpiler -- which is the expensive part at 100+ qubits -- runs once
-        # for the whole dataset rather than once per sample.
+        # for the whole dataset rather than once per sample. The reservoir is composed
+        # on BEFORE that, so it is lowered into the translation basis too and
+        # `qiskit_circuit_to_quimb_gates` stays a total function over the result.
+        from qbiocode.utils.projection import _compose_extra, resolve_observables
+
         self.circuit = transpile(
-            feature_map,
+            _compose_extra(feature_map, extra_circuit, self.n_qubits),
             basis_gates=list(TRANSPILE_BASIS),
             optimization_level=1,
         )
+        self.observables, self._row_shape = resolve_observables(observables, self.n_qubits)
+        # Whether the fast path in `_read_expectations` applies: it forms one 2x2
+        # reduced density matrix per site and traces X, Y, Z against it, which computes
+        # exactly the default pool and nothing else.
+        self._default_pool = observables is None
         self._paulis = [quimb.pauli(p) for p in "XYZ"]
         # Dense 2x2 copies, for tracing against a reduced density matrix.
         self._pauli_arrays = [np.asarray(P) for P in self._paulis]
+        # Dense matrices for an explicit pool, built once: kron in spec order, which is
+        # what quimb's `local_expectation(G, where)` expects -- G's first factor acts on
+        # where[0]. That matches qiskit's index-based `from_sparse_list`, so the two
+        # backends agree entry for entry (verified in tests/test_qelm_features.py).
+        self._operators = None
+        if not self._default_pool:
+            lookup = dict(zip("XYZ", self._pauli_arrays))
+            self._operators = []
+            for pauli, qubits in self.observables:
+                matrix = lookup[pauli[0]]
+                for char in pauli[1:]:
+                    matrix = np.kron(matrix, lookup[char])
+                self._operators.append((matrix, tuple(qubits)))
         self._last_fidelity = None
         self._last_max_bond = None
 
@@ -355,7 +390,20 @@ class MPSFeatureMapProjector:
         earlier draft, which was a comparison of read strategies, not of simulators.
 
         ``exact`` has no MPS to canonicalize and goes through ``local_expectation``.
+
+        An explicit observable pool takes none of this: the sweep computes one site's
+        X, Y and Z from one RDM, which *is* the default pool, so a pool holding
+        multi-qubit or partial-coverage operators has to go through
+        ``local_expectation`` per operator. That is the slower read, and it is the
+        honest one -- the sweep cannot produce ``<Z_0 Z_3>`` from single-site RDMs at
+        all.
         """
+        if not self._default_pool:
+            out = np.empty(self._row_shape)
+            for index, (matrix, qubits) in enumerate(self._operators):
+                out[index] = circ.local_expectation(matrix, qubits).real
+            return out
+
         n = self.n_qubits
         out = np.empty((3, n))
 
@@ -395,13 +443,15 @@ class MPSFeatureMapProjector:
         self._last_max_bond = max(self._last_max_bond or 0, psi.max_bond())
 
     def project_row(self, x):
-        """Return the ``(3, n_qubits)`` array of ``<X>``, ``<Y>``, ``<Z>`` for one row.
+        """Return one row's expectation values, shaped by the observable pool.
 
         Args:
             x (array_like): one data row, of length ``circuit.num_parameters``.
 
         Returns:
-            numpy.ndarray: shape ``(3, n_qubits)``, real valued.
+            numpy.ndarray: real valued, shape ``(3, n_qubits)`` for the default pool --
+            ``<X>``, ``<Y>``, ``<Z>`` per qubit -- or ``(n_observables,)`` for an
+            explicit one.
         """
         circ = self._build_state(x)
         # BEFORE reading: reading canonicalises the state in place, and the fidelity
@@ -425,9 +475,10 @@ class MPSFeatureMapProjector:
                 and not a GPU.
 
         Returns:
-            numpy.ndarray: shape ``(n_rows, 3, n_qubits)`` -- the same layout
-            ``compute_qpl``/``compute_pqk`` save and then reshape to
-            ``(n_rows, 3 * n_qubits)``.
+            numpy.ndarray: shape ``(n_rows, 3, n_qubits)`` for the default observable
+            pool -- the same layout ``compute_qpl``/``compute_pqk`` save and then
+            reshape to ``(n_rows, 3 * n_qubits)`` -- or ``(n_rows, n_observables)``
+            for an explicit one.
 
         Notes:
             **Processes, not threads.** The per-row work is numpy/numba inside one
@@ -448,7 +499,7 @@ class MPSFeatureMapProjector:
             )
 
         if n_jobs == 1:
-            out = np.empty((len(X), 3, self.n_qubits))
+            out = np.empty((len(X), *self._row_shape))
             for i, row in enumerate(X):
                 if progress_every and i % progress_every == 0:
                     print(f"at datapoint {i}")

@@ -241,14 +241,14 @@ When using `'simulator_aer'` or `'noisy_<device_name>'` backends, specify the si
 
 ### Projection Backend: how many features a quantum model can afford
 
-`projection_backend` selects *how* the projected-kernel models (`pqk`, `qpl`) evaluate
+`projection_backend` selects *how* the projected-kernel models (`pqk`, `qpl`, `qelm`) evaluate
 their Pauli expectation values on a local simulator. It changes cost only — every backend
 returns the same numbers, verified equal to ~1e-14 — so it is a performance switch, not a
 modelling one.
 
 It matters because **one feature is one qubit.** The default path stores all `2**n`
 amplitudes, so it runs out of memory near 30 qubits and becomes impractical past about 20
-on a few hundred samples. That is a hard cap on how many features a `pqk`/`qpl` model can
+on a few hundred samples. That is a hard cap on how many features a `pqk`/`qpl`/`qelm` model can
 use, and the usual workaround — PCA down to `n_components: 3` — throws most of the dataset
 away before the model sees it. Matrix-product-state backends are *linear* in qubit count
 for bounded-entanglement feature maps, which lifts the cap to hundreds of features.
@@ -614,7 +614,9 @@ model: ['qsvc', 'vqc', 'qnn', 'pqk']
 | `qsvc` | Quantum | Quantum Support Vector Classifier |
 | `vqc` | Quantum | Variational Quantum Classifier |
 | `qnn` | Quantum | Quantum Neural Network |
-| `pqk` | Quantum | Projected Quantum Kernel |
+| `pqk` | Quantum | Projected Quantum Kernel — one projection, one searched SVC |
+| `qpl` | Quantum | Quantum Projection Learning — PQK's projection, a configurable set of classical heads (see "QPL's downstream models") |
+| `qelm` | Quantum | Quantum Extreme Learning Machine — a fixed random reservoir and a closed-form ridge readout (see "QELM: a random reservoir with a ridge readout") |
 
 ### Model Hyperparameters
 
@@ -721,7 +723,7 @@ values for exactly this reason.
 
 #### Tuning the quantum models
 
-The quantum classifiers (`qsvc`, `vqc`, `qnn`, `pqk`, `qpl`) tune through the same
+The quantum classifiers (`qsvc`, `vqc`, `qnn`, `pqk`, `qpl`, `qelm`) tune through the same
 `gridsearch_<model>_args` blocks, but tuning them needs a second key. A config without it
 leaves them untuned; the shipped `config.yaml` sets both keys, so that the two sides are
 tuned alike:
@@ -796,6 +798,7 @@ What is tunable per model:
 | `qsvc` | `encoding`, `entanglement`, `reps`, `primitive`, `C`, `gamma`, `pegasos`, `bandwidth` |
 | `vqc`, `qnn` | `encoding`, `entanglement`, `reps`, `primitive`, `ansatz_type`, `local_optimizer`, `maxiter` |
 | `pqk`, `qpl` | `encoding`, `entanglement`, `reps`, `primitive`, `data_map`, `bandwidth` |
+| `qelm` | the `pqk` keys, plus `reservoir_reps`, `measurement`, `n_features`, `alpha` — but **not** `qelm_reservoir_seed`, which is refused (see below) |
 
 There is no `n_qubits`: the qubit count follows from the width of the data reaching the
 model, so it is set by the embedding's `n_components`, not by tuning.
@@ -899,6 +902,131 @@ instead would let one lucky head choose the projection, and every head is report
 (The statistic averaged is the run's `tuning_metric`, which defaults to balanced accuracy;
 it is accuracy only under `tuning_metric: accuracy`.)
 
+### QELM: a random reservoir with a ridge readout
+
+`qelm` projects each row through the data feature map followed by a **fixed random
+reservoir**, reads a configurable pool of Pauli expectation values off that state, and
+fits a ridge classifier on them in closed form:
+
+```text
+x  ──►  feature map  ──►  reservoir (fixed, untrained)  ──►  F observables  ──►  ridge
+```
+
+Two things distinguish it from `pqk` and `qpl`. The circuit carries an extra random layer
+that is never trained and never tuned — that is what makes it an *extreme* learning
+machine rather than a variational model (`vqc`, `qnn`, which train their circuit
+parameters). And the readout is deliberately the **weakest** of the three: one
+least-squares solve instead of `pqk`'s 200 SVC fits.
+
+| arm | circuit | features | head |
+|---|---|---|---|
+| `pqk` | data feature map | `3n` | SVC, 40 × 5 randomized search |
+| `qpl` | data feature map | `3n` | up to 6 heads, each searched |
+| `qelm` | feature map **+ random reservoir** | `F` (free) | ridge, closed form |
+
+The weak readout is the point rather than a limitation. A win for a strong head may be
+the head extracting from an ordinary representation, whereas a ridge on random features
+can only do well if the **representation itself** carries the signal — which is the
+question this arm exists to answer.
+
+#### The ablation: `reservoir_reps: 0`
+
+`reservoir_reps: 0` builds no reservoir at all, and with `measurement: 'xyz'` the
+features are then **bit-identical** to `pqk`'s projection. So three runs separate two
+effects that comparing `pqk` against a full QELM alone would confound:
+
+| run | representation | readout | isolates |
+|---|---|---|---|
+| `qelm` with `reservoir_reps: 0` | PQK's | ridge | the **readout** |
+| `pqk` | PQK's | SVC | — (the reference) |
+| `qelm` with `reservoir_reps: 1` or more | reservoir | ridge | the **reservoir** |
+
+Run all three on one config so they see identical post-embedding features. Putting `0` in
+`gridsearch_qelm_args.reservoir_reps` (as the shipped block does) instead lets the tuner
+decide whether the reservoir earns its depth per dataset; a `selected_reservoir_reps` of
+`0` across a dataset's splits is then a real result — it says the random layer added
+nothing there.
+
+#### Parameters
+
+```yaml
+qelm_args:
+  encoding: ZZ               # the feature map, exactly as in pqk_args
+  entanglement: 'linear'
+  primitive: 'estimator'     # the only accepted value
+  reps: 2
+  reservoir_reps: 1          # reservoir depth; 0 = no reservoir (the ablation above)
+  measurement: 'xyz'         # which observables to read
+  # n_features: 3.0          # 'random_pauli' only; 3.0 means 3 x the qubit count
+  # alpha: 1.0               # omit to let each fit choose by cross-validation
+```
+
+| `measurement` | observables | count |
+|---|---|---|
+| `'xyz'` | `<X>`, `<Y>`, `<Z>` per qubit — `pqk`'s pool, in its order | `3n` |
+| `'xyz+zz'` | the above plus `<Z_k Z_k+1>` along the chain | `4n - 1` |
+| `'random_pauli'` | `n_features` distinct Paulis from the seeded pool | free |
+
+`n_features` is read by `'random_pauli'` only; the structured pools fix their own width
+and **reject** it, because truncating `'xyz'` would drop whole Pauli groups rather than
+thin the pool. An int is a count; a **float is a multiple of the qubit count** (`3.0` on
+8 features means 24). Prefer the float — an absolute count cannot mean the same thing
+across datasets of different widths, and `n_components: 3` cannot yield 36 observables.
+
+`alpha` is the ridge penalty. Omitted, each fit selects its own by generalised
+cross-validation, which for ridge is computed from one matrix decomposition rather than
+by refitting per fold — so the whole head, penalty selection included, costs about one
+fit. That is the arm's default and its cost argument; name it only to pin or search it.
+Under `split_mode: manifest` the penalty is instead selected on the run's `tuning_metric`,
+so every arm of a fold-based run selects on one statistic.
+
+#### `qelm_reservoir_seed` is configuration, not a hyperparameter
+
+```yaml
+qelm_reservoir_seed: 42   # falls back to q_seed, then seed
+```
+
+It fixes both the reservoir and the random observable pool. Absent, it falls back to
+`q_seed` and then `seed`, so an ordinary config needs this key only to vary the reservoir
+independently of the rest of the run.
+
+```{warning}
+**Naming it in `gridsearch_qelm_args` is refused rather than ignored.** Searching the
+seed would select whichever random draw best suited the validation holdout, so the
+reported score would be the **maximum over `n_trials` random reservoirs** rather than the
+performance of one — a number that looks like a tuned result and is not one. To study
+reservoir variability, run several configs at different values of this key and report the
+spread.
+```
+
+At `reservoir_reps: 0` with a structured pool there is nothing random left, so the
+ablation cell is seed-independent — which is what makes it comparable to `pqk` rather
+than to one draw of a reservoir.
+
+#### Backend and cost
+
+`backend` must be `'simulator'`. A QELM reads an arbitrary pool of Pauli observables off
+one state, and the runtime-primitive path `pqk` and `qsvc` use is built around the `3n`
+single-qubit groups those models measure; a hardware backend is refused with that
+explanation rather than silently run. Use `projection_backend: 'aer_mps'` or
+`'quimb_mps'` for width.
+
+Quantum cost is `pqk`'s times the reservoir depth factor — the same one state preparation
+per row. Classical cost collapses: one ridge solve against `pqk`'s 200 SVC fits, which
+compounds under tuning, since each of `n_trials_quantum` trials is cheaper. The reservoir
+is nearest-neighbour by construction, so the MPS bond dimension stays flat in the qubit
+count (measured: 8 at both 6 and 16 qubits) and the `[mps]` extra lifts the ~20-feature
+statevector ceiling as it does for `pqk`.
+
+#### Outputs
+
+One `results_qelm` row (`results_qelm_opt` when tuned), with the usual metrics plus
+`reservoir_reps`, `reservoir_seed`, `measurement`, `n_features` and the selected `alpha`
+in its parameter column. AUC and PR-AUC are real numbers: ridge publishes
+`decision_function`, which is a genuine ranking. A tuned run additionally writes a
+`selected_<name>` column per searched key, so `selected_reservoir_reps` answers "did the
+search keep the reservoir?" with a `groupby` rather than a repr to parse.
+
 #### Freezing the quantum search across iterations
 
 Leaving `tune_quantum: False` while `grid_search: True` is the cheap configuration and it
@@ -996,15 +1124,25 @@ relabelling the reused iterations would split one arm in two and break the pairi
 
 #### Projection caches
 
-`pqk` and `qpl` cache their projected feature matrices so a rerun does not recompute
-circuits. The file name includes a fingerprint of the settings that change the circuit
-(`encoding`, `entanglement`, `reps`, `primitive`, feature width), and the row count is
-checked on load. Redirect either cache if you want throwaway projections kept apart from
-your real ones:
+`pqk`, `qpl` and `qelm` cache their projected feature matrices so a rerun does not
+recompute circuits. The file name includes a fingerprint of the settings that change the
+circuit (`encoding`, `entanglement`, `reps`, `primitive`, feature width), and the row
+count is checked on load. For `qelm` the fingerprint additionally covers
+`reservoir_reps`, the reservoir seed and a digest of the observable pool — none of which
+is part of the feature map, so nothing else would distinguish two runs that differ only
+in their reservoir. Its width is checked on load as well as its row count. Redirect any
+of the caches if you want throwaway projections kept apart from your real ones:
 
 ```yaml
-pqk_projection_dir: pqk_projections   # default, relative to the working directory
-qpl_projection_dir: qpl_projections   # default
+pqk_projection_dir: pqk_projections     # default, relative to the working directory
+qpl_projection_dir: qpl_projections     # default
+qelm_projection_dir: qelm_projections   # default
+```
+
+```{note}
+These defaults are **relative**, so a run that does not set them writes the cache into
+whatever the working directory happens to be. Under Hydra that is the run directory; a
+script or a test invoked from the repository root lands it there instead.
 ```
 
 Tuning does this automatically: every trial writes to a temporary directory that is

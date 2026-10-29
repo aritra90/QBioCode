@@ -81,6 +81,7 @@ BLOCKS = [
     ("qnn", {"encoding": ["Z"], "reps": [1], "maxiter": [10, 20]}),
     ("pqk", {"encoding": ["Z", "ZZ"], "reps": [1]}),
     ("qpl", {"encoding": ["Z"], "reps": [1, 2]}),
+    ("qelm", {"encoding": ["Z"], "reps": [1], "reservoir_reps": [0, 1]}),
 ]
 
 

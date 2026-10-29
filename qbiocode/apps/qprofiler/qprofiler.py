@@ -176,7 +176,8 @@ def _resolve_backend_alias(args, log):
     :func:`qbiocode.utils.qutils.normalize_backend` does that translation, but it was
     applied inside ``get_backend_session`` -- and eight other sites read the raw string
     and branch on ``args["backend"] != "simulator"``
-    (:mod:`qbiocode.embeddings.embed`, ``compute_qsvc``/``qnn``/``vqc``/``pqk``/``qpl``,
+    (:mod:`qbiocode.embeddings.embed`,
+    ``compute_qsvc``/``qnn``/``vqc``/``pqk``/``qpl``/``qelm``,
     and ``ensure_tuning_is_affordable``). An alias reaching those comparisons is not an
     unknown-value error: ``statevector_simulator != "simulator"`` is simply *true*, so
     every one of them would take its hardware branch -- building a pass manager, and

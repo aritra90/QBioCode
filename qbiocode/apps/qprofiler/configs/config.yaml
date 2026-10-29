@@ -116,6 +116,12 @@ skip_existing: false
 # absent because it is not in compute_ml_dict at all, and two of its three sampling modes
 # build a circuit with no controlled operations (both pinned as strict xfails).
 #
+# 'qelm' is absent for now for a different reason: it is a NEW arm whose question is still
+# open -- whether a random quantum reservoir carries predictive information the pqk
+# projection does not. Add it to this list to answer that; see qelm_args below, and run it
+# alongside 'pqk' so the comparison is on identical inputs. Unlike 'qpl' it is not a
+# duplicate of anything here: its representation and its readout are both different.
+#
 # 'vqc' and 'qnn' are BOTH kept on purpose, even though they are the same variational
 # model differing only in primitive (sampler vs estimator). Whether that difference is
 # visible in the scores is an open question this sweep answers rather than assumes; drop
@@ -211,7 +217,7 @@ n_trials: 50
 # accuracy-tuned, so under any other metric they are retuned rather than reused.
 tuning_metric: balanced_accuracy
 
-# Also tune the QUANTUM models (qsvc, vqc, qnn, pqk, qpl). ON here, which is a change:
+# Also tune the QUANTUM models (qsvc, vqc, qnn, pqk, qpl, qelm). ON here, which is a change:
 # leaving it off while grid_search tunes the classical side is the confound the comment
 # above describes, so the benchmark pays for it deliberately. It is not free -- each
 # trial is a quantum fit, so the quantum arms' cost goes up by n_trials_quantum, and the
@@ -236,12 +242,16 @@ n_trials_quantum: 32
 #       split 1 -> optimise projection -> evaluate
 #       split 2 -> reuse split 1's projection params -> evaluate
 #
-# It freezes the PROJECTION only -- encoding, reps, entanglement, data_map, bandwidth.
+# It freezes the PROJECTION only -- encoding, reps, entanglement, data_map, bandwidth,
+# and for qelm also reservoir_reps and the pool settings.
 # For pqk and qpl the downstream classical model(s) fitted on the projection keep their
 # own RandomizedSearchCV, which still runs independently on EVERY split: split 2 reuses
 # split 1's feature map, projects its own rows through it, and then tunes its own SVC/RF.
 # Freezing those too would save almost nothing (they are cheap fits on an already-
 # projected matrix) and would report a head fitted at another split's hyperparameters.
+# The same holds for qelm's ridge penalty, which each split re-selects by GCV on its own
+# projected rows. Note that qelm_reservoir_seed is NOT part of this: it is not searched
+# in the first place, so every split of every arm uses the same reservoir either way.
 # Within a split, qpl still computes the projection once and shares it across every
 # model in qpl_args.classical_models, in both modes.
 #
@@ -583,6 +593,71 @@ qpl_args: {'encoding': ZZ,
            #                           'tabpfn': {'n_estimators': 4}},
            }
 
+# Begin QELM arguments
+# QELM is a quantum extreme learning machine: the data feature map followed by a FIXED
+# RANDOM reservoir, then a configurable number of Pauli expectation values, then a ridge
+# readout solved in closed form.
+#
+#     x -> feature map -> reservoir (fixed, untrained) -> F observables -> ridge
+#
+# It differs from pqk/qpl in two ways that matter. The circuit carries an extra random
+# layer that is never trained and never tuned, and the head is as WEAK as possible --
+# one least-squares solve instead of pqk's 200 SVC fits. That is deliberate: a win for a
+# strong head may be the head extracting from an ordinary representation, whereas a ridge
+# on random features can only do well if the representation itself carries the signal.
+#
+# 'qelm' is not in the `model` list above, like 'qpl'; add it there to run it.
+#
+# THE ABLATION. reservoir_reps: 0 builds no reservoir at all, and with measurement: 'xyz'
+# the features are then EXACTLY pqk's projection (bit-identical, pinned by
+# tests/test_qelm_features.py). So three runs separate the two effects:
+#     reservoir_reps: 0  + ridge   -- pqk's representation, weak readout
+#     pqk                          -- pqk's representation, strong readout
+#     reservoir_reps: 1+ + ridge   -- reservoir representation, weak readout
+# Comparing only the outer two would confound the readout with the reservoir.
+#
+# measurement -- which observables are read off the state:
+#     'xyz'           <X>, <Y>, <Z> per qubit: 3n features. pqk's pool and its order.
+#     'xyz+zz'        the above plus <Z_k Z_k+1> along the chain: 4n-1 features.
+#     'random_pauli'  n_features distinct Paulis drawn from the seeded pool. The only
+#                     pool whose WIDTH IS FREE, so the only one n_features applies to.
+#
+# n_features -- read by 'random_pauli' only; the structured pools fix their own width and
+# REJECT it. An int is a count; a FLOAT IS A MULTIPLE of the qubit count (3.0 on 8
+# features means 24). Prefer the float: an absolute count cannot mean the same thing
+# across datasets of different widths, and n_components: 3 cannot yield 36 observables.
+#
+# alpha -- the ridge penalty. Omitted (as here), it is selected inside every fit by
+# generalised cross-validation, which for ridge costs about one fit rather than a search.
+# That is the arm's default and its cost argument; name it only to pin or search it.
+#
+# backend must be 'simulator'. A QELM reads an arbitrary pool of Pauli observables off
+# one state, and the runtime-primitive path pqk and qsvc use is built around the 3n
+# single-qubit groups those models measure. Use projection_backend: 'aer_mps' or
+# 'quimb_mps' for width -- the reservoir is nearest-neighbour by construction, so the
+# MPS bond dimension stays flat in the qubit count (measured: 8 at both 6 and 16 qubits).
+qelm_args: {'encoding': ZZ,
+            'entanglement': 'linear',
+            'primitive': 'estimator',
+            'reps': 2,
+            'reservoir_reps': 1,
+            'measurement': 'xyz',
+            # 'n_features': 3.0,      # 'random_pauli' only; 3.0 = 3 x the qubit count
+            # 'alpha': 1.0,           # omit to let each fit choose by GCV
+            }
+
+# Seeds the reservoir AND the random observable pool. Absent, it falls back to q_seed and
+# then seed, so an ordinary config needs this key only to vary the reservoir independently
+# of the rest of the run.
+#
+# IT IS CONFIGURATION, NOT A HYPERPARAMETER, and naming it in gridsearch_qelm_args is
+# refused rather than ignored. Tuning it would select whichever random draw best suited
+# the validation holdout, so the reported score would be the MAXIMUM OVER n_trials RANDOM
+# RESERVOIRS rather than the performance of one -- a number that looks like a tuned result
+# and is not one. To study reservoir variability, run several configs at different values
+# of this key and report the spread.
+qelm_reservoir_seed: 42
+
 
 # set hydra output directories
 hydra:
@@ -655,3 +730,32 @@ gridsearch_qpl_args: {'encoding': ['Z', 'ZZ'],
                       'entanglement': ['linear', 'full'],
                       'bandwidth': [0.0982, 0.3927, 1.0, 1.5708, 2.3562, 3.1416]
                      }
+
+# QELM searches the same projection keys as pqk/qpl, plus the two that are its own.
+#
+# reservoir_reps INCLUDES 0 on purpose: that is the pqk-equivalent representation (see
+# qelm_args above), so the tuner decides whether the reservoir earns its depth on this
+# dataset rather than being assumed to. A selected_reservoir_reps of 0 across the splits
+# of a dataset is a real result -- it says the random layer added nothing there.
+#
+# measurement is left FIXED at the value in qelm_args rather than searched. Searching it
+# would let one split pick 'random_pauli' at 24 features and another 'xyz' at 3n, which
+# makes selected_n_features incomparable across splits -- and comparability is the whole
+# point of the selected_* columns. Add it here only for a deliberate one-off sweep.
+#
+# alpha is absent so every fit chooses its own penalty by GCV, which is cheaper than a
+# search and is the arm's defining behaviour. Naming it here would spend trial budget on
+# something the closed form already solves exactly.
+#
+# The space is finite (2 encodings x 2 reps x 2 entanglements x 6 bandwidths x 3 depths
+# = 144) and the tuner caps n_trials at the space size, so a budget above 144 cannot be
+# wasted re-evaluating.
+#
+# qelm_reservoir_seed must NOT appear here; see the note at that key. It is refused with
+# an explanation rather than silently searched.
+gridsearch_qelm_args: {'encoding': ['Z', 'ZZ'],
+                       'reps': [1, 2],
+                       'entanglement': ['linear', 'full'],
+                       'bandwidth': [0.0982, 0.3927, 1.0, 1.5708, 2.3562, 3.1416],
+                       'reservoir_reps': [0, 1, 2]
+                      }

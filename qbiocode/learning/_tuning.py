@@ -1282,9 +1282,9 @@ def run_function_study(
     # Serial for the same reason as run_study: model_run already parallelises over
     # models, and the quantum stack maps its own OpenMP runtime in alongside torch's.
     #
-    # The scratch projection directory is what makes PQK and QPL tunable at all. They
-    # cache the projected feature matrix under a name built from `data_key` and a
-    # fingerprint of the feature map -- not the row count. A trial projects the inner
+    # The scratch projection directory is what makes PQK, QPL and QELM tunable at all.
+    # They cache the projected feature matrix under a name built from `data_key` and a
+    # fingerprint of the circuit -- not the row count. A trial projects the inner
     # split (22 rows, say) and writes that file; the final fit then projects the whole
     # training set (30 rows), matches the same name, and is stopped by PQK's own
     # row-count guard: "Projection file ... has 22 rows, but the current dataset expects
@@ -1293,6 +1293,7 @@ def run_function_study(
     with tempfile.TemporaryDirectory(prefix="qbiocode_tuning_") as scratch:
         scoring_args["pqk_projection_dir"] = scratch
         scoring_args["qpl_projection_dir"] = scratch
+        scoring_args["qelm_projection_dir"] = scratch
         with _suppress_unstorable_choice_warning():
             study.optimize(objective, n_trials=n_trials, n_jobs=1)
 
@@ -1436,6 +1437,7 @@ def _validation_function_study(compute_fn, space, args, validation, *, model, n_
     with tempfile.TemporaryDirectory(prefix="qbiocode_tuning_") as scratch:
         scoring_args["pqk_projection_dir"] = scratch
         scoring_args["qpl_projection_dir"] = scratch
+        scoring_args["qelm_projection_dir"] = scratch
         with _suppress_unstorable_choice_warning():
             study.optimize(objective, n_trials=n_trials, n_jobs=1)
 
