@@ -32,8 +32,15 @@ import pandas as pd
 import yaml
 
 GENERATOR_VERSION = "holdout/1.0"
-#: meta.yaml families that are one generator each, so all their variants form one cluster.
-SYNTHETIC_FAMILY_PREFIXES = ("shape_", "quantum_")
+#: meta.yaml families that are one cluster, so all their datasets fall on one side of the
+#: hold-out. ``shape_`` and ``quantum_`` are one generator each; ``tcga_rna`` is the 19
+#: TCGA cohorts, which share an assay, a pipeline, a gene universe and a label definition
+#: -- see meta_regression.SINGLE_CLUSTER_SOURCES for why that makes them one unit of
+#: independence rather than 19, and why the opposite choice is defensible but
+#: anti-conservative.
+SINGLE_CLUSTER_FAMILY_PREFIXES = ("shape_", "quantum_", "tcga_")
+#: Deprecated alias, kept so an external caller importing it still works.
+SYNTHETIC_FAMILY_PREFIXES = SINGLE_CLUSTER_FAMILY_PREFIXES
 
 
 def dataset_clusters(datasets: Path, cluster_map: Path | None = None) -> pd.DataFrame:
@@ -43,7 +50,7 @@ def dataset_clusters(datasets: Path, cluster_map: Path | None = None) -> pd.Data
         meta = yaml.safe_load(meta_path.read_text())
         ds = meta.get("dataset_id", meta_path.parent.name)
         family = str(meta.get("family", ""))
-        cluster = family if family.startswith(SYNTHETIC_FAMILY_PREFIXES) else ds
+        cluster = family if family.startswith(SINGLE_CLUSTER_FAMILY_PREFIXES) else ds
         rows.append({"dataset_id": ds, "family": family, "cluster": cluster})
     frame = pd.DataFrame(rows, columns=["dataset_id", "family", "cluster"])
     if cluster_map is not None:

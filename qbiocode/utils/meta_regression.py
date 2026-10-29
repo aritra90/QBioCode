@@ -632,6 +632,30 @@ CLUSTER_COLUMN = "cluster_cons"
 #: family is a draw from one generator, so the family is the cluster: the three seeds of
 #: ``checkerboard_k2_d8_n400`` are replicates, not three independent datasets.
 GENERATED_SOURCES = ("shapes", "quantum")
+
+#: Sources whose datasets are ONE cluster however many of them there are, mapping to
+#: ``syn_<source>`` -- here ``'tcga'`` -> ``'tcga'``.
+#:
+#: The 19 TCGA cohorts are different cancers with disjoint patients, so calling them one
+#: dataset would be wrong. But the cluster is not "one dataset", it is the unit of
+#: INDEPENDENCE, and what the corpus-level tests resample is the error of a *method* on a
+#: *kind of data*. Every cohort here is the same kind: one assay (RNA-seq log2TPM), one
+#: upstream pipeline, one gene universe, one label definition (PFI), the same ~200-370
+#: samples and the same ~19.5k features reduced the same way. A method that suits that
+#: geometry suits all 19 for the same reason, which is precisely the correlated error a
+#: cluster-robust test exists to absorb.
+#:
+#: Treating them as 19 independent clusters inflates G from 66 to 84 on the pooled corpus
+#: and narrows every interval that depends on it -- anti-conservative in exactly the
+#: claim the pooled analysis is for ("do the tabular findings generalize to RNA-seq?").
+#: One cluster makes TCGA one unit of evidence, which is the conservative reading and the
+#: one a referee cannot object to.
+#:
+#: It IS a judgment, not a fact, and the opposite choice is defensible on the grounds
+#: that the cancers are different diseases. So it is overridable per analysis: pass a
+#: ``mapping`` naming each cohort its own cluster and report both. The notebook does that
+#: as a sensitivity check rather than leaving the choice invisible.
+SINGLE_CLUSTER_SOURCES = ("tcga",)
 #: Family of such an id: everything before the first ``_k<digit>`` or ``_d<digit>``. Matched
 #: non-greedily so ``simple_linear_d8_n400_s0``, which has no ``k``, keeps both words.
 _GENERATED_ID = re.compile(r"^(?P<family>.*?)_(?:k\d|d\d)")
@@ -655,6 +679,8 @@ def _family_by_name(stem: str) -> str:
     must not be merged into one cluster.
     """
     source, bare = _split_source(stem)
+    if source in SINGLE_CLUSTER_SOURCES:
+        return source
     if source in GENERATED_SOURCES:
         match = _GENERATED_ID.match(bare)
         if match:

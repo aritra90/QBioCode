@@ -592,3 +592,40 @@ class TestManifestMode:
         ref = select_winners(relabelled, metric="balanced_accuracy", epsilon=0.027,
                              selection="validation")
         assert np.allclose(ours.per_dataset["se"], ref.per_dataset["se"])
+
+
+class TestSingleClusterSources:
+    """The 19 TCGA cohorts are one unit of independence, not 19."""
+
+    COHORTS = ["tcga__BLCA", "tcga__BRCA", "tcga__CESC", "tcga__COAD", "tcga__GBM",
+               "tcga__HNSC", "tcga__KIRC", "tcga__KIRP", "tcga__LGG", "tcga__LIHC",
+               "tcga__LUAD", "tcga__LUSC", "tcga__OV", "tcga__PRAD", "tcga__SARC",
+               "tcga__SKCM", "tcga__STAD", "tcga__THCA", "tcga__UCEC"]
+
+    def test_every_cohort_is_one_cluster(self):
+        assert {mr.dataset_family(c) for c in self.COHORTS} == {"tcga"}
+
+    def test_pooled_G_is_not_inflated_by_the_cohorts(self):
+        """The number this fix exists for. Pooling 171 tabular datasets with 19 cohorts
+        must add ONE cluster, not 19: 19 independent clusters would narrow every
+        cluster-robust interval in exactly the claim the pooled analysis is for."""
+        tabular = ["libsvm__australian", "pmlb__GAMETES_a_EDM_1_1",
+                   "shapes__checkerboard_k2_d8_n400_s0",
+                   "shapes__checkerboard_k8_d8_n400_s2"]
+        before = {mr.dataset_family(d) for d in tabular}
+        after = {mr.dataset_family(d) for d in tabular + self.COHORTS}
+        assert len(after) == len(before) + 1
+        assert after - before == {"tcga"}
+
+    def test_an_explicit_mapping_still_overrides_it(self):
+        """It is a judgment, not a fact -- a per-cohort clustering must stay reachable so
+        the opposite choice can be reported as a sensitivity check."""
+        per_cohort = {c: c for c in self.COHORTS}
+        got = {mr.dataset_family(c, per_cohort) for c in self.COHORTS}
+        assert got == set(self.COHORTS)
+
+    def test_other_sources_are_unaffected(self):
+        assert mr.dataset_family("libsvm__breast_cancer") == "libsvm__breast_cancer"
+        assert mr.dataset_family("pmlb__breast_cancer") == "pmlb__breast_cancer"
+        assert mr.dataset_family("shapes__checkerboard_k2_d8_n400_s0") \
+            == "syn_shapes_checkerboard"
