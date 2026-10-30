@@ -41,9 +41,11 @@ import os
 import pathlib
 import stat
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
+from qbiocode.utils import tabpfn_account
 from qbiocode.utils.tabpfn_account import (
     DEFAULT_TOKEN_PATH,
     ENV_VAR,
@@ -201,7 +203,10 @@ class TestNothingPrintableContainsTheToken:
         assert status["path"].startswith("~/"), status["path"]
         assert str(tmp_path) not in status["path"]
 
-    def test_status_works_and_stays_quiet_when_nothing_is_configured(self, tmp_path):
+    def test_status_works_and_stays_quiet_when_nothing_is_configured(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(pathlib.Path, "home", staticmethod(lambda: tmp_path / "home"))
         status = describe_token_source(path=tmp_path / "absent.json")
         assert status == {
             "configured": False,
@@ -223,8 +228,9 @@ class TestTheTemplate:
     def test_it_is_created_owner_readable_only(self, tmp_path):
         path = write_token_template(path=tmp_path / "sub" / "tabpfn.json")
         assert path.is_file()
-        mode = stat.S_IMODE(path.stat().st_mode)
-        assert mode == 0o600, f"created with {oct(mode)}, expected 0o600"
+        if os.name == "posix":
+            mode = stat.S_IMODE(path.stat().st_mode)
+            assert mode == 0o600, f"created with {oct(mode)}, expected 0o600"
         assert json.loads(path.read_text()) == {"token": PLACEHOLDER}
 
     def test_it_refuses_to_overwrite_an_existing_file(self, token_file):
@@ -237,12 +243,21 @@ class TestTheTemplate:
         """It must be obviously fake, so nobody ships it thinking it works."""
         assert "paste" in PLACEHOLDER and "here" in PLACEHOLDER
 
+    @pytest.mark.skipif(os.name != "posix", reason="requires POSIX permission bits")
     def test_a_group_readable_file_is_flagged(self, tmp_path):
         path = tmp_path / "tabpfn.json"
         path.write_text(json.dumps({"token": FAKE_TOKEN}))
         path.chmod(0o644)
         with pytest.warns(UserWarning, match="readable by other users"):
             load_tabpfn_token(path=path)
+
+    def test_windows_mode_bits_do_not_trigger_a_posix_permission_warning(
+        self, monkeypatch, recwarn
+    ):
+        monkeypatch.setattr(tabpfn_account, "os", SimpleNamespace(name="nt"))
+        path = SimpleNamespace(stat=lambda: SimpleNamespace(st_mode=stat.S_IFREG | 0o666))
+        tabpfn_account._warn_if_readable_by_others(path)
+        assert len(recwarn) == 0
 
 
 class TestTheTokenCannotBeCommitted:

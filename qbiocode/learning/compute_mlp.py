@@ -176,21 +176,21 @@ def compute_mlp_opt(
     This function is designed to be used in a supervised learning context, where the goal is to classify data points.
 
     Args:
-            X_train (numpy.ndarray): Training features.
-            X_test (numpy.ndarray): Test features.
-            y_train (numpy.ndarray): Training labels.
-            y_test (numpy.ndarray): Test labels.
-            args (dict): Additional arguments, such as config parameters.
-            verbose (bool): If True, prints additional information during execution.
-            cv (int): Number of cross-validation folds.
-            model (str): Name of the model being used.
-            hidden_layer_sizes (tuple or list): The ith element represents the number of neurons in the ith hidden layer.
-            activation (str or list): Activation function for the hidden layer.
-            max_iter (int or list): Maximum number of iterations.
-            solver (str or list): The solver for weight optimization.
-            alpha (float or list): L2 penalty (regularization term) parameter.
-            learning_rate (str or list): Learning rate schedule for weight updates.
-            random_state (int or None): Seed for the estimator's own randomness. QProfiler fills this in from the run's ``seed`` so two runs at one seed agree; None leaves the estimator drawing from the global RNG.
+        X_train (numpy.ndarray): Training features.
+        X_test (numpy.ndarray): Test features.
+        y_train (numpy.ndarray): Training labels.
+        y_test (numpy.ndarray): Test labels.
+        args (dict): Additional arguments, such as config parameters.
+        verbose (bool): If True, prints additional information during execution.
+        cv (int): Number of cross-validation folds.
+        model (str): Name of the model being used.
+        hidden_layer_sizes (tuple or list): The ith element represents the number of neurons in the ith hidden layer.
+        activation (str or list): Activation function for the hidden layer.
+        max_iter (int or list): Maximum number of iterations.
+        solver (str or list): The solver for weight optimization.
+        alpha (float or list): L2 penalty (regularization term) parameter.
+        learning_rate (str or list): Learning rate schedule for weight updates.
+        random_state (int or None): Seed for the estimator's own randomness. QProfiler fills this in from the run's ``seed`` so two runs at one seed agree; None leaves the estimator drawing from the global RNG.
         tuner (str): Which search to run. ``'optuna'`` (default) spends ``n_trials`` on
             Optuna's TPE sampler, which also allows a hyperparameter to be given as a
             ``{low, high}`` range rather than a list. ``'grid'`` restores the exhaustive
@@ -207,8 +207,10 @@ def compute_mlp_opt(
         default_params (dict or None): The arm's default config, enqueued as trial 0.
 
     Returns:
-            modeleval (dict): A dictionary containing the evaluation metrics of the model on the test dataset, including accuracy, AUC, F1 score,
-                      and the time taken to train and validate the model, along with the best parameters found during the search.
+        modeleval (dict): A dictionary containing the evaluation metrics of the model on
+            the test dataset, including accuracy, AUC, F1 score, and the time taken to
+            train and validate the model, along with the best parameters found during
+            the search.
     """
 
     beg_time = time.time()

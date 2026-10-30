@@ -33,11 +33,13 @@ model_run is stubbed where a real fit would only add time; one test runs the rea
 arms once model_run accepts ``validation=``.
 """
 
+import errno
 import inspect
 import json
 import logging
 import pickle
 from importlib import import_module
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -51,7 +53,7 @@ from qbiocode.evaluation import protocol
 emb_cache = import_module("qbiocode.apps.qprofiler.embedding_cache")
 qp = import_module("qbiocode.apps.qprofiler.qprofiler")
 
-SHIPPED_CONFIG = qp.__file__.rsplit("/", 1)[0] + "/configs/config.yaml"
+SHIPPED_CONFIG = Path(qp.__file__).resolve().parent / "configs" / "config.yaml"
 LOG = logging.getLogger("test")
 K, R = 3, 2
 
@@ -307,6 +309,79 @@ class TestTheSplit:
 
 
 # ------------------------------------------------------------------ 4. the outputs
+class TestAtomicSidecarWrites:
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "replace"])
+    def test_csv_is_synced_through_a_writable_handle_before_publication(
+            self, tmp_path, monkeypatch, existing):
+        path = tmp_path / "nested" / "sidecar.csv"
+        old = b"value\nprevious result\n"
+        if existing:
+            path.parent.mkdir()
+            path.write_bytes(old)
+        frame = pd.DataFrame({"row_id": [1, 2, 3], "value": ["café", "α,β", "line\nbreak"]})
+        expected = frame.to_csv(index=False).encode("utf-8")
+        real_open, real_fsync, real_replace = open, qp.os.fsync, qp.os.replace
+        handles, synced = [], []
+
+        def tracked_open(*args, **kwargs):
+            handle = real_open(*args, **kwargs)
+            handles.append(handle)
+            return handle
+
+        def writable_fsync(fd):
+            handle = next(h for h in handles if not h.closed and h.fileno() == fd)
+            if not handle.writable():
+                # Windows rejects syncing a read-only descriptor. Enforce that
+                # requirement on every platform so Linux also catches the regression.
+                raise OSError(errno.EBADF, "Bad file descriptor")
+            assert Path(handle.name).read_bytes() == expected, "CSV buffers were not flushed"
+            if existing:
+                assert path.read_bytes() == old
+            else:
+                assert not path.exists()
+            synced.append(fd)
+            real_fsync(fd)
+
+        def replace_after_close(source, destination):
+            assert synced and all(handle.closed for handle in handles)
+            real_replace(source, destination)
+
+        monkeypatch.setattr(qp, "open", tracked_open, raising=False)
+        monkeypatch.setattr(qp.os, "fsync", writable_fsync)
+        monkeypatch.setattr(qp.os, "replace", replace_after_close)
+        qp._write_frame_atomic(frame, path)
+
+        assert len(synced) == 1
+        assert path.read_bytes() == expected
+        pd.testing.assert_frame_equal(pd.read_csv(path, encoding="utf-8"), frame)
+        assert list(path.parent.iterdir()) == [path]
+
+    @pytest.mark.parametrize("stage", ["write", "fsync", "replace"])
+    def test_a_failed_write_keeps_the_previous_file_and_removes_the_temporary(
+            self, tmp_path, monkeypatch, stage):
+        path = tmp_path / "sidecar.csv"
+        old = b"value\nprevious result\n"
+        path.write_bytes(old)
+        frame = pd.DataFrame({"value": ["replacement"]})
+        failure = OSError(errno.EIO, f"injected {stage} failure")
+
+        def fail(*args, **kwargs):
+            if stage == "write":
+                args[0].write("partially written CSV")
+            raise failure
+
+        if stage == "write":
+            monkeypatch.setattr(frame, "to_csv", fail)
+        else:
+            monkeypatch.setattr(qp.os, stage, fail)
+        with pytest.raises(OSError) as caught:
+            qp._write_frame_atomic(frame, path)
+
+        assert caught.value is failure
+        assert path.read_bytes() == old
+        assert list(tmp_path.iterdir()) == [path]
+
+
 class TestAManifestRun:
     @pytest.fixture
     def run(self, tree, stubbed, tmp_path, monkeypatch):

@@ -42,6 +42,7 @@ import json
 import logging
 import pickle
 from importlib import import_module
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -55,7 +56,7 @@ from qbiocode.evaluation import protocol
 qp = import_module("qbiocode.apps.qprofiler.qprofiler")
 resume = import_module("qbiocode.apps.qprofiler.resume")
 
-SHIPPED_CONFIG = qp.__file__.rsplit("/", 1)[0] + "/configs/config.yaml"
+SHIPPED_CONFIG = Path(qp.__file__).resolve().parent / "configs" / "config.yaml"
 LOG = logging.getLogger("test")
 K, R = 3, 1
 

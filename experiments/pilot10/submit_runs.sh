@@ -38,6 +38,20 @@
 # embedding, n_jobs and its output paths (tests/test_pilot_split_contract.py) -- and every
 # job owns every path it writes, so no two jobs share a file.
 set -u
+
+# Quote one argument for the job's POSIX shell and the copyable DRY command. Keep simple
+# flags readable; single quotes preserve paths containing spaces or shell metacharacters.
+quote_arg() {
+  case $1 in
+    ''|*[!a-zA-Z0-9_@%+=:,./-]*)
+      local value=$1
+      value=${value//\'/\'\\\'\'}
+      printf "'%s'" "$value"
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 HERE=$(cd "$(dirname "$0")" && pwd)
 # The interpreter the jobs run, and the one status.py is called with.
 #
@@ -304,7 +318,7 @@ for k in "${!selected[@]}"; do
   IFS=$'\t' read -r cfg name dataset wall <<< "${selected[$k]}"
   dsdir=$(dirname "$cfg")
   mkdir -p "$dsdir/lsf_logs"
-  payload="cd $dsdir && export $ENVV && $PY -m qbiocode.apps.qprofiler.cli --config-dir=$dsdir --config-name=$name$SKIP_OVERRIDE"
+  payload="cd $(quote_arg "$dsdir") && export $ENVV && $(quote_arg "$PY") -m qbiocode.apps.qprofiler.cli $(quote_arg "--config-dir=$dsdir") $(quote_arg "--config-name=$name")$SKIP_OVERRIDE"
 
   mopt=()
   if [ "$H" -gt 0 ]; then
@@ -324,10 +338,8 @@ for k in "${!selected[@]}"; do
   if [ "${DRY:-0}" = "1" ]; then
     printf 'bsub'
     for a in "${bsub_args[@]}"; do
-      case $a in
-        *[[:space:]\[\]\&]*) printf " '%s'" "$a" ;;
-        *)                   printf ' %s' "$a" ;;
-      esac
+      printf ' '
+      quote_arg "$a"
     done
     printf '\n'
   elif ! bsub "${bsub_args[@]}"; then

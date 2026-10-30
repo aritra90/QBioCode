@@ -92,7 +92,12 @@ def _warn_if_readable_by_others(path):
     Not an error: on a single-user laptop it is harmless, and refusing to proceed would
     be obstructive. But the permissions are the only thing protecting the token from
     every other process running as another user on a shared machine.
+
+    Only POSIX mode bits describe group/other access. Windows permissions are governed
+    by ACLs, so its mode bits cannot establish whether other accounts can read the file.
     """
+    if os.name != "posix":
+        return
     try:
         mode = path.stat().st_mode
     except OSError:  # pragma: no cover - raced away between exists() and stat()
@@ -219,10 +224,11 @@ def describe_token_source(args=None, path=None):
 
 
 def write_token_template(path=None, args=None):
-    """Create the token file with a placeholder, and lock its permissions down.
+    """Create the token file exclusively with a placeholder.
 
-    Creates the parent directory, writes ``{"token": PLACEHOLDER}`` and chmods the file
-    to ``0600`` so that only the owner can read it.
+    Creates the parent directory and writes ``{"token": PLACEHOLDER}``. On POSIX the
+    file is created with mode ``0600`` so only the owner can read it. On Windows it
+    inherits the parent directory's permissions.
 
     Refuses to touch an existing file: it may already hold a real token, and overwriting
     a credential to "help" is not recoverable.
@@ -240,8 +246,8 @@ def write_token_template(path=None, args=None):
             f"token. Edit it directly, or delete it first if you mean to start over."
         )
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    # Written through an exclusive open at 0600 rather than write_text() then chmod, so
-    # the token the user pastes in is never briefly world-readable.
+    # On POSIX, the exclusive open at 0600 avoids a briefly world-readable file between
+    # write_text() and chmod. Windows uses inherited directory permissions instead.
     descriptor = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as handle:
         json.dump({"token": PLACEHOLDER}, handle, indent=2)

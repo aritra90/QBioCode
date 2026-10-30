@@ -331,7 +331,7 @@ def screen_features(
        feature is z-scored across passes.
     6. ``redundant``: average-linkage clustering on ``1 - |Spearman rho|``, cut at
        ``1 - redundancy``. Each cluster keeps its medoid, the member with the highest mean
-       |rho| to the others; ties go to higher reliability, then to the name.
+       ``|rho|`` to the others; ties go to higher reliability, then to the name.
     7. ``vif`` and ``cap``: medoids are offered in a fixed order (larger cluster first,
        then higher reliability, then name). Each one is admitted if every admitted
        feature's VIF stays at or below ``vif_max``, with the nuisance columns in the
@@ -746,6 +746,7 @@ def dataset_family(name: str, mapping: Mapping[str, str] | str | None = None, *,
        first of ``stem``, ``dataset``, ``Dataset``) and the cluster column ``column``.
        A stem the mapping does not list falls through to the rules below, with a
        warning logged once per stem.
+
     Rules 2-4 look past the ``<source>__`` prefix that ``curate.py`` puts on every curated
     id, so they apply to ``pmlb__GAMETES_x`` as they do to a bare ``GAMETES_x``:
 

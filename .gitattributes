@@ -1,0 +1,2 @@
+# Pilot submission scripts also run under Git Bash on Windows.
+experiments/pilot10/*.sh text eol=lf

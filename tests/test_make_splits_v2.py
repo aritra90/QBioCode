@@ -1,11 +1,11 @@
-"""benchmark/make_splits.py (make_splits/2.0) writes manifests QProfiler can trust.
+"""benchmark/make_splits.py (make_splits/2.0.1) writes manifests QProfiler can trust.
 
 Under ``split_mode: manifest`` QProfiler reads its outer splits, validation rows and all,
 from these files instead of splitting itself, so the generator is where the protocol is
 decided. The properties pinned here:
 
-  1. **Repeat 0 is v1.** Repeat r is StratifiedKFold(seed + r); repeat 0 must be exactly
-     the make_splits/1.0 assignment, so splits/v1 results stay comparable.
+  1. **Ungrouped repeat 0 is v1.** Repeat r is StratifiedKFold(seed + r); repeat 0 must
+     be exactly the make_splits/1.0 assignment, so splits/v1 results stay comparable.
   2. **next_fold validation, explicit.** Each fold record carries ``val`` = the test rows
      of fold (f + 1) mod k, and the file reads back through split_manifest.load_manifest.
   3. **Byte-deterministic.** Same inputs, identical bytes (manifests and index.csv), so
@@ -85,7 +85,7 @@ def test_schema_and_reader_round_trip(ms, tree, tmp_path):
     assert list(payload) == ["schema_version", "dataset_id", "sha256", "n", "k", "n_repeats",
                              "protocol", "validation", "seed", "repeat_seeds", "group_col",
                              "generator_version", "folds"]
-    assert payload["schema_version"] == 2 and payload["generator_version"] == "make_splits/2.0"
+    assert payload["schema_version"] == 2 and payload["generator_version"] == "make_splits/2.0.1"
     assert payload["n_repeats"] == 3 and payload["repeat_seeds"] == [42, 43, 44]
     assert payload["validation"] == "next_fold"
     keys = [(f["repeat"], f["fold"]) for f in payload["folds"]]
@@ -165,7 +165,7 @@ def test_inventory_and_spec(ms, tree, tmp_path):
 
 
 def test_default_out_is_v2():
-    source = (BENCHMARK / "make_splits.py").read_text()
+    source = (BENCHMARK / "make_splits.py").read_text(encoding="utf-8")
     assert 'here / "splits" / "v2"' in source
 
 
@@ -216,21 +216,36 @@ def test_changed_csv_and_bad_arguments_are_refused(ms, tree, tmp_path):
         ms.split_one(tree / "toy__a", 5, 42)
 
 
-def test_group_col_keeps_groups_disjoint_per_repeat(ms, tmp_path):
+@pytest.mark.parametrize("seed", [0, 7, 42])
+@pytest.mark.parametrize("group_type", ["integer", "string"])
+def test_group_col_keeps_groups_disjoint_per_repeat(ms, tmp_path, seed, group_type):
     # 15 groups of 3, label constant within a group, 6 positive: each of k=3 folds can
     # take exactly 2 positive and 3 negative groups. (The balance check counts rows, so
     # a coarser group structure would need a group-sized tolerance.)
     n = 45
-    groups = np.repeat(np.arange(15), 3)
-    y = (groups % 5 < 2).astype(int)
+    codes = np.repeat(np.arange(15), 3)
+    y = (codes % 5 < 2).astype(int)
+    groups = codes if group_type == "integer" else np.array([f"patient-{g:02d}" for g in codes])
     directory, _ = _curated(tmp_path / "datasets", "toy__g", n=n, seed=3, groups=groups, y=y)
-    manifest, _ = ms.split_one(directory, 3, 42, repeats=2)
+    manifest, _ = ms.split_one(directory, 3, seed, repeats=2)
+    repeated, _ = ms.split_one(directory, 3, seed, repeats=2)
+    assert repeated == manifest
     assert manifest["protocol"] == "StratifiedGroupKFold" and manifest["group_col"] == "g"
+    assert manifest["repeat_seeds"] == [seed, seed + 1]
     for record in manifest["folds"]:
         fit = np.setdiff1d(record["train"], record["val"])
         g_fit, g_val, g_test = (set(groups[i]) for i in (fit, record["val"], record["test"]))
         assert not (g_fit & g_val) and not (g_fit & g_test) and not (g_val & g_test)
+        for side in (fit, record["val"], record["test"]):
+            assert len(side) == 15
+            assert np.mean(y[side]) == pytest.approx(0.4)
+    for repeat in range(2):
+        tested = [i for record in manifest["folds"] if record["repeat"] == repeat
+                  for i in record["test"]]
+        assert sorted(tested) == list(range(n))
     out = tmp_path / "splits"
     out.mkdir()
     ms.dump_manifest(out / "toy__g.json", manifest)
+    ms.dump_manifest(out / "toy__g-repeated.json", repeated)
+    assert (out / "toy__g.json").read_bytes() == (out / "toy__g-repeated.json").read_bytes()
     ms.verify_written(out / "toy__g.json", directory, manifest)

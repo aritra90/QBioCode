@@ -618,7 +618,7 @@ class TestNoResultsTableComesOutRagged:
                         and piece.value.startswith("results_")
                     ):
                         offenders.setdefault(
-                            str(path.relative_to(REPO_ROOT)), []
+                            path.relative_to(REPO_ROOT).as_posix(), []
                         ).append(node.lineno)
         assert set(offenders) == {"qbiocode/evaluation/model_evaluation.py"}, (
             f"a 'results_<model>' column is built outside modeleval: {offenders}. "

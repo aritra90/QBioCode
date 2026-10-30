@@ -1009,7 +1009,7 @@ def _shipped_configs():
     for path in sorted(REPO_ROOT.glob("qbiocode/apps/*/configs/*.yaml")):
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
-            found.append((str(path.relative_to(REPO_ROOT)), loaded))
+            found.append((path.relative_to(REPO_ROOT).as_posix(), loaded))
     return found
 
 

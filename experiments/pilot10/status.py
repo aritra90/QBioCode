@@ -265,7 +265,8 @@ def why(cfg, n=12):
 
 def main():
     # `./status.py --list all | head` should stop quietly, not with a BrokenPipe traceback.
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("yamls", nargs="*", help="restrict to these configs (default: all)")
     ap.add_argument("--runs-dir", default=RUNS_DIR)

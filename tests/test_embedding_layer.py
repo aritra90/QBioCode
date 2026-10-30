@@ -86,7 +86,7 @@ def test_no_optional_dependency_is_resolved_at_import_time():
 
     offenders = []
     for path in sorted(QUVINE_ROOT.rglob("*.py")):
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for sub in module_scope_nodes(tree):
             if (
                 isinstance(sub, ast.Call)

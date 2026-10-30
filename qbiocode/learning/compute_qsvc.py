@@ -56,7 +56,7 @@ class StatevectorFidelityKernel(FidelityQuantumKernel):
     not evaluated), symmetry (upper triangle, mirrored) and PSD projection (the base
     class's own ``_make_psd``).
 
-    Bit-identical (max |dK| = 0) to ``FidelityQuantumKernel`` on all 36 encoding x reps x
+    Bit-identical (max ``|dK|`` = 0) to ``FidelityQuantumKernel`` on all 36 encoding x reps x
     entanglement settings the pilot's ``gridsearch_qsvc_args`` searches
     (tests/test_statevector_kernel.py), and 147-370x faster at heart's size. Because that identity rests on two library internals -- per-pub
     reseeding, and how ``choice`` consumes its uniforms -- it is not taken on trust: the
