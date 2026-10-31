@@ -158,3 +158,81 @@ class TestCostModelPricesQpl:
             assert (cm.manifest_job_hours(group, "sv", 8, 250)
                     == cm.manifest_job_hours(group, "sv", 8, 250, quantum_space="wide",
                                              measurement="rdm2"))
+
+
+class TestGeneratedJobsLoadThroughOmegaConf:
+    """A second gridsearch_pqk_args is legal YAML, and yaml.safe_load accepted it -- but
+    qprofiler loads configs through OmegaConf, which REFUSES a duplicate key. The block
+    was appended after the template's own entry, so every pqk job was unloadable and the
+    cluster's cache check failed on the first one. qpl escaped only because the template
+    defines no qpl keys, which is why an end-to-end run of a qpl job did not catch it."""
+
+    def test_drop_removes_a_multiline_flow_mapping(self, gen):
+        body = ("a: 1\n"
+                "gridsearch_pqk_args: {'encoding': ['Z'],\n"
+                "                      'reps': [1]\n"
+                "                      }\n"
+                "# kept\n"
+                "b: 2\n")
+        out, n = gen._drop_top_level_key(body, "gridsearch_pqk_args")
+        assert n == 1 and out == "a: 1\n# kept\nb: 2\n"
+
+    @pytest.fixture(scope="class")
+    def generated(self, tmp_path_factory):
+        """Real jobs, through the real generator, over a tiny curated dataset + manifest."""
+        import subprocess
+        import sys
+
+        import numpy as np
+        import pandas as pd
+
+        root = tmp_path_factory.mktemp("qv")
+        ds = root / "datasets" / "pmlb__toy"
+        ds.mkdir(parents=True)
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(60, 6))
+        y = (X[:, 0] > 0).astype(int)
+        frame = pd.DataFrame(X, columns=[f"f{i}" for i in range(6)])
+        frame["label"] = y
+        frame.to_csv(ds / "pmlb__toy.csv", index=False)
+        import hashlib
+        sha = hashlib.sha256((ds / "pmlb__toy.csv").read_bytes()).hexdigest()
+        m = int(np.bincount(y).min())
+        (ds / "meta.yaml").write_text(yaml.safe_dump({
+            "dataset_id": "pmlb__toy", "source": "pmlb", "n": 60, "p": 6,
+            "minority_n": m, "minority_fraction": m / 60, "n_components_max": 6,
+            "group_col": None, "family": "real_tabular", "sha256": sha,
+            "class_counts": {0: int((y == 0).sum()), 1: int((y == 1).sum())}}))
+        splits = root / "splits"
+        subprocess.run([sys.executable, str(ROOT / "benchmark" / "make_splits.py"),
+                        "--datasets", str(root / "datasets"), "--out", str(splits)],
+                       check=True, capture_output=True)
+        out = {}
+        for measurement in ("rdm1", "rdm2"):
+            run = root / "runs"
+            rid = f"t-{measurement}"
+            subprocess.run([sys.executable, str(GEN), "--split-mode", "manifest",
+                            "--datasets-root", str(root / "datasets"), "--split-dir",
+                            str(splits), "--runs-dir", str(run), "--run-id", rid,
+                            "--datasets", "pmlb__toy", "--splits", "1", "--n-trials", "3",
+                            "--models", "pqk,qpl,noclassical", "--quantum-space", "wide",
+                            "--measurement", measurement, "--embedding-cache", "",
+                            "--embed-above", "13", "--wall", "1:00"],
+                           check=True, capture_output=True)
+            out[measurement] = sorted((run / rid / "pmlb__toy").glob("*.yaml"))
+        return out
+
+    @pytest.mark.parametrize("measurement", ["rdm1", "rdm2"])
+    def test_every_generated_job_loads_through_omegaconf(self, gen, generated, measurement):
+        from omegaconf import OmegaConf
+
+        jobs = generated[measurement]
+        assert {p.name.rsplit("_", 1)[1] for p in jobs} == {"pqk.yaml", "qpl.yaml"}
+        for path in jobs:
+            text = path.read_text()
+            keys = gen._top_level_keys(text)
+            assert sorted({k for k in keys if keys.count(k) > 1}) == [], path.name
+            cfg = OmegaConf.load(path)                 # what qprofiler does
+            arm = cfg.quantum_model[0]
+            assert cfg[f"gridsearch_{arm}_args"]["measurement"] == [measurement]
+            assert cfg[f"{arm}_args"]["measurement"] == measurement

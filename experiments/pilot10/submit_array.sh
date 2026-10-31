@@ -315,10 +315,23 @@ if [ "${CACHE_CHECK:-1}" = "1" ]; then
     # summary below used to parse such a traceback as if it were MISSING lines and
     # reported its fragments ('cannot', 'mod_spec,', '(most') as affected datasets.
     if ! grep -qE '^(MISSING|STALE)' "$CHECK_LOG"; then
-      echo "!! the embedding-cache check could not RUN: it reported no MISSING/STALE line." >&2
-      echo "!! This is NOT a missing cache, and PRECOMPUTE_ONLY will not fix it." >&2
+      echo "!! the embedding-cache check FAILED, and not because a cache file is missing:" >&2
+      echo "!! it reported no MISSING/STALE line, so PRECOMPUTE_ONLY will not fix it." >&2
       echo "!! Interpreter: $PY" >&2
-      tail -15 "$CHECK_LOG" | sed 's/^/!!   /' >&2
+      # The cause, not the tail. --check prints a 'current' line per file, so the last
+      # lines of a long log are the files that were FINE, while a config that failed to
+      # load -- or a CONFLICT between two configs -- is reported further up. Showing the
+      # tail once printed fifteen 'current' lines and hid an OmegaConf "found duplicate
+      # key" error entirely.
+      cause=$(grep -nE '^CONFLICT|Error:|Exception:|found duplicate key|^Traceback' \
+              "$CHECK_LOG" | head -12)
+      if [ -n "$cause" ]; then
+        printf '%s\n' "$cause" | sed 's/^/!!   /' >&2
+        grep -qE '^CONFLICT' "$CHECK_LOG" && echo "!! CONFLICT: two configs in this range" \
+          "need the SAME cache file with different contents -- the line names the key" >&2
+      else
+        tail -15 "$CHECK_LOG" | sed 's/^/!!   /' >&2
+      fi
       echo "!! Full output: $CHECK_LOG" >&2
       exit 1
     fi

@@ -1179,6 +1179,26 @@ def _space_yaml(model, space):
     return f"gridsearch_{model}_args: {{" + (",\n" + pad).join(rows) + "\n" + pad + "}\n"
 
 
+def _top_level_keys(text):
+    """The top-level keys a YAML fragment defines, in order: ``key:`` at column 0."""
+    import re
+    return re.findall(r"^([A-Za-z_][A-Za-z0-9_]*):", text, re.M)
+
+
+def _drop_top_level_key(body, key):
+    """``body`` without its top-level ``key:`` entry, and how many it removed.
+
+    An entry runs from ``key:`` at column 0 to just before the next line that starts a
+    new top-level key or a comment at column 0 -- which covers a flow mapping
+    continued over several indented lines, the form every block here is written in.
+    Comment lines directly above the entry are left in place: they describe the
+    template's value, and the replacement carries its own.
+    """
+    import re
+    pattern = re.compile(rf"^{re.escape(key)}:[^\n]*\n(?:[ \t]+[^\n]*\n)*", re.M)
+    return pattern.subn("", body)
+
+
 def quantum_variant_block(arms, *, quantum_space="default", measurement=None,
                           qpl_heads=None):
     """YAML a job appends to configure its projection arms, or "" when nothing changes.
@@ -1344,11 +1364,20 @@ def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration
     block = quantum_variant_block(quantum, quantum_space=quantum_space,
                                   measurement=measurement, qpl_heads=qpl_heads)
     if block:
-        # Before the output section, so the hydra block stays last and these keys sit
-        # after (and so override) the template's quantum blocks.
+        # REPLACE the template's entries for these keys rather than append after them.
+        # A second gridsearch_pqk_args is legal YAML -- the later wins -- but qprofiler
+        # loads configs through OmegaConf, which REFUSES a duplicate key ("found
+        # duplicate key gridsearch_pqk_args"), so an appended block made every pqk job
+        # unloadable. qpl escaped only because the template defines no qpl keys.
+        for key in _top_level_keys(block):
+            body, _ = _drop_top_level_key(body, key)
+        # Before the output section, so the hydra block stays last.
         marker = "# ---------------------------------------------------------------------------\n# Output location."
         assert body.count(marker) == 1, "template changed: no single output-location banner"
         body = body.replace(marker, block.lstrip("\n") + "\n" + marker)
+        keys = _top_level_keys(body)
+        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        assert not dupes, f"{name}: duplicate top-level key(s) {dupes} -- OmegaConf refuses them"
     return name, body
 
 
