@@ -1,0 +1,19 @@
+# Region A of merged_tabular_vs_tcga_analysis.ipynb section 3.3a:
+# mean arm balanced accuracy <= 0.6 and |delta| <= 0.10. 16 datasets.
+# Generated from experiments/ModelResults_merged.csv; regenerate, don't edit.
+tcga__BLCA
+tcga__BRCA
+tcga__CESC
+tcga__COAD
+tcga__GBM
+tcga__HNSC
+tcga__LIHC
+tcga__LUAD
+tcga__LUSC
+tcga__OV
+tcga__PRAD
+tcga__SARC
+tcga__SKCM
+tcga__STAD
+tcga__THCA
+tcga__UCEC

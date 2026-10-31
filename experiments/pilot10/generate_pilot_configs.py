@@ -205,7 +205,7 @@ DATASETS = [
 ]
 
 CLASSICAL_MODELS = "['lr', 'svc', 'nb', 'dt', 'rf', 'xgb', 'catboost', 'mlp', 'tabpfn']"
-QUANTUM_MODELS = "['qsvc', 'pqk', 'qnn', 'vqc']"
+QUANTUM_MODELS = "['qsvc', 'pqk', 'qnn', 'vqc', 'qpl']"
 #: The quantum arms a manifest run gets when --models is not given. qnn was the weakest
 #: and costliest arm on controlled run ctrl1, and its noisy validation scores pulled the
 #: quantum side down (dropping it raised the quantum side on all 3 datasets); vqc shares
@@ -906,6 +906,8 @@ N_TRIALS_DEFAULT = 30
 WALL_DEFAULT = "72:00"
 #: The group that holds every classical arm of a job.
 CLASSICAL_GROUP = "classical"
+#: --models token for "no classical job": see model_groups.
+NO_CLASSICAL = "noclassical"
 #: qnn's observable: Z on every qubit ('global', compute_qnn's default) or on qubit 0 only
 #: ('local', VQC's model). 'tune' puts both in qnn's search space.
 QNN_READOUTS = ("tune", "global", "local")
@@ -1030,13 +1032,27 @@ def model_groups(models=None):
     classical, quantum = ast.literal_eval(CLASSICAL_MODELS), ast.literal_eval(QUANTUM_MODELS)
     if models is None:
         return [(q, [], [q]) for q in DEFAULT_QUANTUM_ARMS] + [(CLASSICAL_GROUP, classical, [])]
-    unknown = [m for m in models if m not in classical + quantum + [CLASSICAL_GROUP]]
+    unknown = [m for m in models
+               if m not in classical + quantum + [CLASSICAL_GROUP, NO_CLASSICAL]]
     if unknown:
         raise ValueError(f"--models: unknown arm(s) {', '.join(unknown)}; the arms are "
                          f"{', '.join(quantum + classical)} (or '{CLASSICAL_GROUP}')")
     named = [c for c in classical if c in models]
+    groups = [(q, [], [q]) for q in quantum if q in models]
+    # A list naming only quantum arms, and saying so with 'noclassical', runs no
+    # classical job. Without the flag the classical group is kept whole, as it always
+    # was, because a run with no classical comparison is usually a mistake -- but a
+    # follow-up campaign whose comparison is an EARLIER run on identical splits is the
+    # case where repeating nine classical arms buys nothing.
+    if NO_CLASSICAL in models:
+        if named or CLASSICAL_GROUP in models:
+            raise ValueError(f"--models: '{NO_CLASSICAL}' contradicts the classical "
+                             f"arm(s) named alongside it")
+        if not groups:
+            raise ValueError(f"--models: '{NO_CLASSICAL}' leaves no arm at all")
+        return groups
     keep = classical if CLASSICAL_GROUP in models or not named else named
-    return [(q, [], [q]) for q in quantum if q in models] + [(CLASSICAL_GROUP, keep, [])]
+    return groups + [(CLASSICAL_GROUP, keep, [])]
 
 
 def resolve_dataset(name, datasets_root):
@@ -1122,6 +1138,107 @@ def _splits_phrase(iteration, repeat, fold):
     return f"splits {its[0]}-{its[-1]} ({len(its)} splits, {rtxt})"
 
 
+#: The --quantum-space wide search, for pqk and qpl. Discrete throughout, for the reason
+#: the shipped config gives for bandwidth: a selected value that is one of a few known
+#: constants is what makes the selected_<name> columns comparable across splits and
+#: datasets, and lets the tuner cap n_trials at the space size.
+#:
+#: bandwidth stops at pi. Features reach the map in [0, 1] and the map applies P(2x), so
+#: pi is one full rotation; past it two different feature values land on one rotation,
+#: and a wider range only adds configurations that collide with ones already in it.
+#: The eight values are log-spaced from pi/64, and keep 1.0 -- the value every earlier
+#: run used -- so each search includes the configuration those results came from.
+WIDE_QUANTUM_SPACE = {
+    "encoding": ["Z", "ZZ", "P"],
+    "reps": [1, 2, 3, 4, 6],
+    "entanglement": ["linear", "full", "pairwise", "circular"],
+    "bandwidth": [0.0491, 0.0982, 0.1963, 0.3927, 0.7854, 1.0, 1.5708, 3.1416],
+}
+
+#: The template's pqk search space, for a qpl job on --quantum-space default: qpl searches
+#: the same projection pqk does, so the two arms differ only in their downstream model.
+DEFAULT_PROJECTION_SPACE = {
+    "encoding": ["Z", "ZZ", "P"],
+    "reps": [1, 2, 3, 4, 6],
+    "entanglement": ["linear", "pairwise", "full"],
+    "bandwidth": [0.0982, 0.3927, 1.0, 1.5708, 2.3562, 3.1416],
+}
+
+#: What a projection may measure. 'rdm1' is the shipped 3n single-qubit pool; the
+#: rdm2 options need projection_backend, which these jobs then set.
+MEASUREMENTS = ("rdm1", "rdm2_nn", "rdm2")
+PROJECTION_ARMS = ("pqk", "qpl")
+
+
+def _space_yaml(model, space):
+    """``gridsearch_<model>_args: {...}`` for ``space``, one key per line."""
+    rows = []
+    for key, values in space.items():
+        rows.append(f"'{key}': [{', '.join(repr(v) for v in values)}]")
+    pad = " " * (len(f"gridsearch_{model}_args: ") + 1)
+    return f"gridsearch_{model}_args: {{" + (",\n" + pad).join(rows) + "\n" + pad + "}\n"
+
+
+def quantum_variant_block(arms, *, quantum_space="default", measurement=None,
+                          qpl_heads=None):
+    """YAML a job appends to configure its projection arms, or "" when nothing changes.
+
+    Empty for a run that sets none of these options and runs no qpl, so its configs stay
+    byte-identical to a run without them (the rule feature_selection_block follows).
+    Otherwise it writes, for each projection arm (pqk, qpl), an explicit search space --
+    the wide one or the template's -- and qpl's downstream models.
+
+    Args:
+        arms (iterable): the job's quantum arms.
+        quantum_space (str): 'default' (the template's values) or 'wide'.
+        measurement (str or None): fix the projection's measurement (rdm1, rdm2_nn,
+            rdm2). Fixed rather than searched, one run per value, so "does the 2-RDM
+            help" is a paired comparison on identical splits. None leaves it at the
+            function default, rdm1, and out of the search.
+        qpl_heads (list or None): qpl's downstream models (default catboost, tabpfn).
+    """
+    proj = [a for a in arms if a in PROJECTION_ARMS]
+    if not proj or (quantum_space == "default" and measurement is None
+                    and qpl_heads is None and "qpl" not in proj):
+        return ""
+    base = (WIDE_QUANTUM_SPACE if quantum_space == "wide" else DEFAULT_PROJECTION_SPACE)
+    out = ["",
+           "# ---------------------------------------------------------------------------",
+           "# Projection arms, as this run configured them: --quantum-space "
+           f"{quantum_space}" + (f", --measurement {measurement}" if measurement else ""),
+           "# Appended after the template's quantum blocks, so these keys win.",
+           "# ---------------------------------------------------------------------------"]
+    if measurement and measurement != "rdm1":
+        out += ["# The 2-RDM is measured off the statevector, so the projection runs on the",
+                "# local projector instead of the hand-built estimator path (which builds",
+                "# single-qubit observables only). The two agree exactly on rdm1:",
+                "# tests/test_projection_backend_wiring.py.",
+                "projection_backend: 'statevector'"]
+    # A fixed measurement has to be the arm's DEFAULT as well as its only search value.
+    # The tuner enqueues the default config as trial 0 and, finding a default outside the
+    # configured choices, ADDS it to them -- so a search list of ['rdm2'] over a default
+    # of 'rdm1' quietly becomes a search over both, and an "rdm2 run" scores rdm1 trials
+    # (and, on a short budget, reports rdm1 as the winner). Setting it in <arm>_args puts
+    # trial 0 on the fixed value too, so every trial of the run measures the same thing.
+    fixed_m = f", 'measurement': '{measurement}'" if measurement else ""
+    for arm in proj:
+        space = dict(base)
+        if measurement:
+            space["measurement"] = [measurement]
+        out.append(_space_yaml(arm, space).rstrip("\n"))
+    if "pqk" in proj and measurement:
+        out += ["pqk_args: {'encoding': ZZ, 'entanglement': 'pairwise', "
+                f"'primitive': 'estimator', 'reps': 4{fixed_m}}}"]
+    if "qpl" in proj:
+        heads = list(qpl_heads or ("catboost", "tabpfn"))
+        out += ["# qpl's downstream models, each its own results row (qpl_<model>). The",
+                "# projection is computed once per trial and shared by all of them.",
+                "qpl_args: {'encoding': ZZ, 'entanglement': 'pairwise', "
+                f"'primitive': 'estimator', 'reps': 4{fixed_m},",
+                f"           'classical_models': [{', '.join(repr(h) for h in heads)}]}}"]
+    return "\n".join(out) + "\n"
+
+
 def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_trials,
                        qnn_readout, n_features=None):
     """The protocol keys of a manifest-mode job, edited into a split-layout config body.
@@ -1205,7 +1322,8 @@ def _manifest_protocol(body, *, run_id, split_dir, iteration, repeat, fold, n_tr
 def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration, repeat,
                        fold, *, run_root, run_id, split_dir, n_trials, qnn_readout,
                        embedding_cache, why, embed_above=EMBEDDING_MIN_FEATURES,
-                       n_features=None):
+                       n_features=None, quantum_space="default", measurement=None,
+                       qpl_heads=None):
     """(name, body) of one manifest-mode job: ``group`` of dataset ``ds`` (curated_dataset's
     dict) on embedding ``emb``, split ``iteration`` -- or, with lists for ``iteration``,
     ``repeat`` and ``fold``, on those splits in turn (--splits-per-job)."""
@@ -1223,6 +1341,14 @@ def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration
     body = _manifest_protocol(body, run_id=run_id, split_dir=split_dir, iteration=iteration,
                               repeat=repeat, fold=fold, n_trials=n_trials,
                               qnn_readout=qnn_readout, n_features=n_features)
+    block = quantum_variant_block(quantum, quantum_space=quantum_space,
+                                  measurement=measurement, qpl_heads=qpl_heads)
+    if block:
+        # Before the output section, so the hydra block stays last and these keys sit
+        # after (and so override) the template's quantum blocks.
+        marker = "# ---------------------------------------------------------------------------\n# Output location."
+        assert body.count(marker) == 1, "template changed: no single output-location banner"
+        body = body.replace(marker, block.lstrip("\n") + "\n" + marker)
     return name, body
 
 
@@ -1281,6 +1407,10 @@ def main_manifest(ap, args):
         wanted = parse_splits(args.splits)
         models = ([m.strip() for m in args.models.split(",") if m.strip()]
                   if args.models else None)
+        qpl_heads = ([h.strip() for h in args.qpl_heads.split(",") if h.strip()]
+                     if args.qpl_heads else None)
+        if qpl_heads is not None and not qpl_heads:
+            raise ValueError("--qpl-heads names no model")
         groups = model_groups(models)
         walls = parse_wall(args.wall, [g for g, _, _ in groups])
         per_job = parse_splits_per_job(args.splits_per_job, [g for g, _, _ in groups])
@@ -1384,7 +1514,8 @@ def main_manifest(ap, args):
                         run_root=run_root, run_id=args.run_id, split_dir=split_dir,
                         n_trials=args.n_trials, qnn_readout=args.qnn_readout,
                         embedding_cache=cache, why=why, embed_above=args.embed_above,
-                        n_features=args.n_features)
+                        n_features=args.n_features, quantum_space=args.quantum_space,
+                        measurement=args.measurement, qpl_heads=qpl_heads)
                     path = os.path.join(ds_dir, f"{name}.yaml")
                     with open(path, "w") as fh:
                         fh.write(body)
@@ -1577,6 +1708,20 @@ def main():
                            "is embedded, so '5000 then PCA to 8' and 'top 16 genes "
                            "unembedded' are both reachable. The kept columns differ per "
                            "split and are recorded in the selected_features/ sidecar")
+    fold.add_argument("--quantum-space", choices=("default", "wide"), default="default",
+                      help="pqk/qpl search space. 'wide' searches encoding Z/ZZ/P, reps "
+                           "1-6, entanglement linear/full/pairwise/circular and 8 "
+                           "bandwidths pi/64..pi (480 configurations; see "
+                           "WIDE_QUANTUM_SPACE). Default leaves the template's")
+    fold.add_argument("--measurement", choices=MEASUREMENTS, default=None,
+                      help="what pqk/qpl measure: rdm1 (3n single-qubit Paulis, the "
+                           "shipped projection), rdm2_nn (+ the 9 correlators of each "
+                           "neighbouring pair) or rdm2 (+ every pair). FIXED for the run, "
+                           "not searched -- run one --run-id per value so the comparison "
+                           "is paired. rdm2* sets projection_backend: statevector")
+    fold.add_argument("--qpl-heads", default=None, metavar="M1,M2",
+                      help="qpl's downstream models, comma-separated (default "
+                           "catboost,tabpfn); each is its own results row qpl_<model>")
     fold.add_argument("--splits", default=None,
                       help="global iterations: '1-5' (repeat 0), '1,6,11', 'all' "
                            "(default all)")
@@ -1586,7 +1731,7 @@ def main():
 
     manifest_only = ("split_dir", "datasets_root", "run_id", "n_trials", "wall", "datasets",
                      "datasets_file", "models", "splits", "qnn_readout", "splits_per_job",
-                     "n_features")
+                     "n_features", "measurement", "qpl_heads")
     if args.split_mode == "manifest":
         # The reverse of the refusal below: internal-mode knobs mean nothing here, and a
         # silently ignored --n-trials-quantum or --budget-hours would be a wrong run.
@@ -1607,6 +1752,10 @@ def main():
         main_manifest(ap, args)
         return
     given = [f"--{f.replace('_', '-')}" for f in manifest_only if getattr(args, f) is not None]
+    # Defaulted, so not in manifest_only (whose test is `is not None`); refused here by
+    # value, since internal mode has no projection-arm rewrite to apply it to.
+    if args.quantum_space != "default":
+        given.append("--quantum-space")
     if given:
         ap.error(f"{', '.join(given)} only apply with --split-mode manifest")
     if args.runs_dir is None:
