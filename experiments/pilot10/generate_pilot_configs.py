@@ -1524,8 +1524,11 @@ def main_manifest(ap, args):
                     if cm is not None:
                         exp_h = cm.manifest_job_hours(group, bk, qubits, ds["rows"],
                                                       k=manifest["k"], n_trials=args.n_trials,
-                                                      n_splits=len(chunk))
-                        extrapolated = "yes" if cm.manifest_extrapolated(bk, qubits, ds["rows"]) else ""
+                                                      n_splits=len(chunk),
+                                                      quantum_space=args.quantum_space,
+                                                      measurement=args.measurement)
+                        extrapolated = ("yes" if cm.manifest_extrapolated(bk, qubits, ds["rows"],
+                                                                     group=group) else "")
                         if wall == "auto":
                             wall, capped = cm.auto_wall(exp_h)
                             if capped:

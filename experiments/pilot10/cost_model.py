@@ -425,6 +425,8 @@ def manifest_split_seconds(group, bk, q, rows, k=5, n_trials=30):
     if group == "classical":
         a, b = CLASSICAL_SPLIT_S
         return a + b * rows
+    if group == "qpl":
+        return qpl_split_seconds(bk, q, rows, k, n_trials)
     if group == "qsvc" and bk == "sv":
         a, b = MANIFEST_LINEAR_S["qsvc"]
         # One statevector per row; the per-row cost grows with the 2^q amplitudes.
@@ -442,13 +444,80 @@ def manifest_split_seconds(group, bk, q, rows, k=5, n_trials=30):
     return secs * MANIFEST_CALIBRATION.get((group, bk), 1.0)
 
 
-def manifest_job_hours(group, bk, q, rows, k=5, n_trials=30, n_splits=1):
-    """Expected wall-clock hours of one manifest job: startup + n_splits splits."""
-    return (JOB_OVERHEAD_S + n_splits * manifest_split_seconds(group, bk, q, rows, k, n_trials)) / 3600.0
+#: qpl's downstream fit, per qpl fit, as a share of one classical-group split. A qpl
+#: fit tunes each head on the projection (classical_models), and the classical group's
+#: per-split cost (CLASSICAL_SPLIT_S) is nine such tuned fits on comparable rows. So two
+#: heads (catboost, tabpfn) are priced at 2/9 of it -- an ESTIMATE, not a measurement:
+#: no qpl job has been timed, and catboost and tabpfn are the two dearest of the nine,
+#: which is why the share is not discounted further. Replace with calibrate_manifest()
+#: output once a qpl run exists.
+QPL_HEADS_DEFAULT = 2
+CLASSICAL_GROUP_ARMS = 9
+
+#: Projection cost of the --quantum-space wide search and of the 2-RDM, relative to what
+#: grid_factor prices (the template's grid, which has no 'circular' entanglement and no
+#: two-body observables). MEASURED on the statevector projector at 8 qubits, 40 rows,
+#: 2026-10-30, against ZZ/linear/reps 4/rdm1 at 1.48 ms/row:
+#:
+#:   ZZ/full/4      2.3x    ZZ/circular/4  1.0x    P/full/6       3.4x
+#:   rdm2_nn        1.3x    rdm2           2.4x    P/full/6/rdm2  4.8x
+#:
+#: WIDE_SPACE_FACTOR is the mean over the wide space, not its worst corner: 30 TPE trials
+#: spread over 480 configurations, so a split meets the mean, while the 3x wall safety
+#: factor absorbs a trial-heavy draw toward the dear corner. MEASUREMENT_FACTOR scales the
+#: projection only -- the heads see more columns too, but that cost is inside the heads'
+#: estimate already and is not measured separately.
+WIDE_SPACE_FACTOR = 1.6
+MEASUREMENT_FACTOR = {"rdm1": 1.0, "rdm2_nn": 1.3, "rdm2": 2.4}
 
 
-def manifest_extrapolated(bk, q, rows):
-    """True when (bk, q, rows) lies outside what the manifest laws were fitted on."""
+def projection_factor(quantum_space="default", measurement=None):
+    """Multiplier on a projection arm's priced cost for a wide space and a 2-RDM."""
+    space = WIDE_SPACE_FACTOR if quantum_space == "wide" else 1.0
+    return space * MEASUREMENT_FACTOR.get(measurement or "rdm1", 1.0)
+
+
+def qpl_split_seconds(bk, q, rows, k=5, n_trials=30, n_heads=QPL_HEADS_DEFAULT):
+    """Expected seconds for ONE outer split of a qpl job.
+
+    The projection is pqk's -- the same feature map over the same ``n_tr + n_te`` rows
+    -- so that term is pqk's priced cost. On top, every fit (``n_trials`` trials plus the
+    refit) tunes ``n_heads`` downstream models on the projection, priced from the
+    classical group's measured per-split cost. Uncalibrated for qpl as a whole, which is
+    why :func:`manifest_extrapolated` always reports it.
+    """
+    projection = manifest_split_seconds("pqk", bk, q, rows, k, n_trials)
+    a, b = CLASSICAL_SPLIT_S
+    heads_per_fit = (a + b * rows) * n_heads / CLASSICAL_GROUP_ARMS
+    return projection + (n_trials + 1) * heads_per_fit
+
+
+def manifest_job_hours(group, bk, q, rows, k=5, n_trials=30, n_splits=1,
+                       quantum_space="default", measurement=None):
+    """Expected wall-clock hours of one manifest job: startup + n_splits splits.
+
+    ``quantum_space`` and ``measurement`` scale the PROJECTION term of pqk and qpl by
+    :func:`projection_factor`; they leave every other arm, and qpl's heads, unchanged.
+    """
+    f = projection_factor(quantum_space, measurement)
+    if group == "pqk":
+        split = manifest_split_seconds("pqk", bk, q, rows, k, n_trials) * f
+    elif group == "qpl":
+        proj = manifest_split_seconds("pqk", bk, q, rows, k, n_trials)
+        split = qpl_split_seconds(bk, q, rows, k, n_trials) + proj * (f - 1.0)
+    else:
+        split = manifest_split_seconds(group, bk, q, rows, k, n_trials)
+    return (JOB_OVERHEAD_S + n_splits * split) / 3600.0
+
+
+def manifest_extrapolated(bk, q, rows, group=None):
+    """True when the price is outside what the manifest laws were fitted on.
+
+    Always True for qpl, which has no calibration of its own (see qpl_split_seconds):
+    its wall is an estimate, and MANIFEST.tsv should say so rather than look measured.
+    """
+    if group == "qpl":
+        return True
     return (bk, q) not in MANIFEST_CALIBRATED["widths"] or rows > MANIFEST_CALIBRATED["max_rows"]
 
 

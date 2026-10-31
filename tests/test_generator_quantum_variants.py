@@ -121,3 +121,40 @@ class TestRefusedOutsideManifestMode:
                               str(tmp_path)], capture_output=True, text=True)
         assert out.returncode != 0
         assert "only apply with --split-mode manifest" in out.stderr
+
+
+class TestCostModelPricesQpl:
+    """--wall auto priced jobs with a cost model that had no qpl entry and raised
+    KeyError: "no calibration for arm 'qpl'" on the first qpl job -- missed locally
+    because the end-to-end run used a fixed --wall."""
+
+    @pytest.fixture(scope="class")
+    def cm(self):
+        spec = importlib.util.spec_from_file_location(
+            "cm_qv", ROOT / "experiments" / "pilot10" / "cost_model.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_qpl_has_a_price_above_pqk(self, cm):
+        pqk = cm.manifest_job_hours("pqk", "sv", 8, 250, n_splits=15)
+        qpl = cm.manifest_job_hours("qpl", "sv", 8, 250, n_splits=15)
+        assert qpl > pqk > 0
+
+    def test_qpl_is_always_reported_as_extrapolated(self, cm):
+        """No qpl job has been timed, so its wall must not look calibrated."""
+        assert cm.manifest_extrapolated("sv", 8, 150, group="qpl")
+        assert not cm.manifest_extrapolated("sv", 8, 150, group="pqk")
+
+    def test_wide_space_and_rdm2_raise_the_projection_price(self, cm):
+        base = cm.manifest_job_hours("pqk", "sv", 8, 250)
+        wide = cm.manifest_job_hours("pqk", "sv", 8, 250, quantum_space="wide")
+        rdm2 = cm.manifest_job_hours("pqk", "sv", 8, 250, quantum_space="wide",
+                                     measurement="rdm2")
+        assert base < wide < rdm2
+
+    def test_the_factor_leaves_other_arms_alone(self, cm):
+        for group in ("qsvc", "classical"):
+            assert (cm.manifest_job_hours(group, "sv", 8, 250)
+                    == cm.manifest_job_hours(group, "sv", 8, 250, quantum_space="wide",
+                                             measurement="rdm2"))
