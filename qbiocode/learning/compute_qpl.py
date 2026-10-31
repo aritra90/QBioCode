@@ -260,6 +260,7 @@ def compute_qpl(
     classical_models=None,
     data_map="unit",
     bandwidth=1.0,
+    measurement="rdm1",
     *,
     classical_models_args=None,
     head_scoring=None,
@@ -352,6 +353,16 @@ def compute_qpl(
         bandwidth (float): Scale applied to the features before the feature map
             (:func:`qbiocode.utils.qutils.apply_bandwidth`). Default 1.0, the unscaled
             map; any other value is part of the projection cache key.
+        measurement (str): What the projection measures. ``'rdm1'`` (the default) is
+            ``<X>``, ``<Y>``, ``<Z>`` on every qubit -- ``3n`` features, which fix each
+            qubit's reduced density matrix, and exactly what this function has always
+            computed: same circuit, same layout, same cache files. ``'rdm2_nn'`` adds the
+            nine two-body correlators of each neighbouring pair (``3n + 9(n-1)``, 87 at 8
+            qubits) and ``'rdm2'`` those of every pair (``3n + 9n(n-1)/2``, 276 at 8
+            qubits), which together fix every pair's reduced state. The 2-RDM pools start
+            with the ``rdm1`` block in its own order, so they add columns and change none.
+            The 2-RDM options need ``projection_backend`` (a local simulator) and are
+            refused on hardware, whose legacy path builds single-qubit observables only.
         head_scoring (str or None): Metric every searched head's ``RandomizedSearchCV``
             (:data:`HEAD_N_ITER` candidates x :data:`HEAD_CV` folds on the projections)
             picks its config by. None (the
@@ -431,6 +442,26 @@ def compute_qpl(
     # the row-count/width validation below cannot reject any of them, because those cases
     # share a shape. This does orphan projections cached under the older key, which costs a
     # recompute rather than correctness; only the tutorial trees hold any.
+    # What the projection measures. 'rdm1' is the shipped 3n single-qubit pool and joins
+    # the fingerprint ONLY off that default, so every cache already on disk keeps its key;
+    # a 2-RDM projection is a different array and must never load a 1-RDM file.
+    from qbiocode.utils.qelm_features import RDM_MEASUREMENTS, qelm_observables
+
+    if measurement not in RDM_MEASUREMENTS:
+        raise ValueError(
+            f"measurement must be one of {list(RDM_MEASUREMENTS)}; got {measurement!r}."
+        )
+    rdm_observables = (None if measurement == "rdm1" else
+                       qelm_observables(feat_dimension, RDM_MEASUREMENTS[measurement]))
+    if rdm_observables is not None:
+        if not args.get("projection_backend"):
+            raise ValueError(
+                f"measurement={measurement!r} needs projection_backend (e.g. "
+                f"'statevector'): the default estimator path builds the {3 * feat_dimension} "
+                f"single-qubit observables by hand and cannot measure two-body "
+                f"correlators. Set projection_backend, or use measurement='rdm1'."
+            )
+        fingerprint_parts = fingerprint_parts + (f"measurement={measurement}",)
     fingerprint_parts = fingerprint_parts + (
         qutils.dataset_fingerprint(X_train, X_test),
         args.get("shots"),
@@ -538,7 +569,7 @@ def compute_qpl(
             projector = make_projector(
                 feat_dimension, encoding=encoding, reps=reps,
                 entanglement=entanglement, backend=projection_backend,
-                data_map_func=data_map_func,
+                data_map_func=data_map_func, observables=rdm_observables,
             )
             for f_tr, split in projection_targets:
                 if os.path.exists(f_tr):
@@ -556,7 +587,9 @@ def compute_qpl(
                 # permutation of features), but NOT byte-identical to previously cached
                 # projections or to a legacy-path run -- so `projection_backend` would
                 # silently stop being a drop-in. Verified to give exactly 0.0 difference.
-                np.save(f_tr, projections[:, :, ::-1])
+                # Flat 2-RDM rows are already in qubit order; see compute_pqk.
+                np.save(f_tr, projections if rdm_observables is not None
+                        else projections[:, :, ::-1])
             # Truncation is silent, so surface it rather than leaving it to be noticed
             # in the accuracy numbers. None means the backend does not report it.
             fidelity = projector.fidelity_estimate()
@@ -1178,6 +1211,7 @@ def compute_qpl_opt(
     classical_models=None,
     data_map=None,
     bandwidth=None,
+    measurement=None,
     *,
     classical_models_args=None,
     n_trials=10,
@@ -1229,6 +1263,10 @@ def compute_qpl_opt(
         bandwidth (list or dict): Input scales to search (see :func:`compute_qpl`). None
             leaves it at 1.0.
             None leaves it at the default.
+        measurement (list): What the projection measures, as candidates ('rdm1',
+            'rdm2_nn', 'rdm2'; see :func:`compute_qpl`). None leaves it at 'rdm1'. A
+            one-element list fixes it for the run while still recording it as
+            ``selected_measurement`` on every row.
         classical_models (list, optional): Which downstream classical models to fit on
             the quantum projection. **Not** a hyperparameter to search -- it selects
             which models run, so it is a list of heads rather than a list of candidate
@@ -1279,6 +1317,7 @@ def compute_qpl_opt(
         "reps": reps,
         "data_map": data_map,
         "bandwidth": bandwidth,
+        "measurement": measurement,
     }
 
     # `classical_models` selects which heads run; it is not a candidate value, so it goes

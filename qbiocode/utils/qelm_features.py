@@ -91,7 +91,29 @@ PAULI_CHARS = ("X", "Y", "Z")
 #:   pool of all non-identity Paulis of weight at most ``max_weight``. The only pool
 #:   whose width is free, and so the one a search over the number of quantum features
 #:   varies.
-MEASUREMENTS = ("xyz", "xyz+zz", "random_pauli")
+#: * ``'rdm2'`` -- the two-qubit reduced density matrix of EVERY pair: the ``3n``
+#:   single-qubit terms, then the 9 two-body correlators ``<P_i Q_j>`` (P, Q in X, Y, Z)
+#:   of each of the ``n(n-1)/2`` pairs: ``3n + 9 n(n-1)/2`` features, 276 at 8 qubits.
+#:   The 1-RDM of a qubit is fixed by its three Pauli expectations, and the 2-RDM of a
+#:   pair by those six plus its nine correlators, so this pool determines every pair's
+#:   reduced state exactly -- it is the complete two-body description, not a sample of it.
+#: * ``'rdm2_nn'`` -- the same, for the ``n - 1`` NEIGHBOURING pairs ``(k, k+1)`` only:
+#:   ``3n + 9(n-1)`` features, 87 at 8 qubits. For a linear or pairwise circuit most of
+#:   the two-body correlation sits between the qubits the circuit entangles, so this
+#:   keeps most of the information at a third of the width, and it is local, so an MPS
+#:   backend can still take it.
+#:
+#: Both ``rdm2`` pools START with the ``'xyz'`` block in its own order, so the first
+#: ``3n`` columns of a 2-RDM projection are the 1-RDM projection, column for column. That
+#: is what makes the two comparable on identical splits: the 2-RDM adds features and
+#: changes none.
+MEASUREMENTS = ("xyz", "xyz+zz", "random_pauli", "rdm2", "rdm2_nn")
+
+#: The three projected-kernel measurements by their reduced-density-matrix names, as
+#: ``compute_pqk``/``compute_qpl`` and the configs spell them. ``'rdm1'`` is ``'xyz'``:
+#: three Pauli expectations fix a qubit's reduced state, so the shipped projection
+#: already IS the 1-RDM, and naming it so keeps the old cache files valid.
+RDM_MEASUREMENTS = {"rdm1": "xyz", "rdm2_nn": "rdm2_nn", "rdm2": "rdm2"}
 
 #: Default weight cap for ``'random_pauli'``: one- and two-body operators only. Higher
 #: weights are permitted but grow the MPS work and, past weight ~3, mostly add features
@@ -228,6 +250,24 @@ def _chain_zz_pool(n_qubits):
     return [("ZZ", (qubit, qubit + 1)) for qubit in range(n_qubits - 1)]
 
 
+def _pair_correlator_pool(pairs):
+    """The nine two-body correlators ``<P_i Q_j>`` of each pair, pairs in the order given.
+
+    Within a pair the order is P major, Q minor (XX, XY, XZ, YX, ...), fixed so that a
+    column of a 2-RDM projection always means the same operator.
+    """
+    return [(p + q, (i, j)) for i, j in pairs for p in PAULI_CHARS for q in PAULI_CHARS]
+
+
+def _rdm2_pool(n_qubits, neighbours_only):
+    """The 2-RDM pool: the single-qubit block, then every (or every neighbouring) pair."""
+    from itertools import combinations
+
+    pairs = ([(k, k + 1) for k in range(n_qubits - 1)] if neighbours_only
+             else list(combinations(range(n_qubits), 2)))
+    return _single_qubit_pool(n_qubits) + _pair_correlator_pool(pairs)
+
+
 def _weighted_pauli_pool(n_qubits, max_weight):
     """Every non-identity Pauli of weight 1..``max_weight``, as sorted specs.
 
@@ -346,8 +386,12 @@ def qelm_observables(n_qubits, measurement="xyz", n_features=None, seed=None,
 
     if measurement == "xyz":
         pool = _single_qubit_pool(n_qubits)
-    else:  # 'xyz+zz'
+    elif measurement == "xyz+zz":
         pool = _single_qubit_pool(n_qubits) + _chain_zz_pool(n_qubits)
+    elif measurement == "rdm2":
+        pool = _rdm2_pool(n_qubits, neighbours_only=False)
+    else:  # 'rdm2_nn'
+        pool = _rdm2_pool(n_qubits, neighbours_only=True)
     if n_features is not None and n_features != len(pool):
         raise ValueError(
             f"measurement={measurement!r} on {n_qubits} qubits is a fixed pool of "
