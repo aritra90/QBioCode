@@ -98,6 +98,31 @@ def _yaml_list(layers, key):
     return ast.literal_eval(m.group(0)) if m else []
 
 
+def _qpl_heads(layers):
+    """How many downstream models a qpl job fits: ``len(qpl_args.classical_models)``.
+
+    qpl writes ONE result row per head (qpl_opt_catboost, qpl_opt_tabpfn, ...), so it is
+    the head count, not qpl's single entry in quantum_model, that a complete job holds.
+    Counting it as one row per split let a job that wrote only its first head -- and died
+    before tabpfn, the head that has failed before -- read as done. Read from the
+    qpl_args block, whose flow mapping can span lines, so this searches its text rather
+    than one line. Defaults to compute_qpl's own default list when the block names none.
+    """
+    for text in reversed(layers):
+        m = re.search(r"^qpl_args:[ \t]*\{(.*?)\n(?=\S)", text + "\n#", re.M | re.S)
+        if not m:
+            continue
+        heads = re.search(r"['\"]classical_models['\"]\s*:\s*(\[[^\]]*\])", m.group(1))
+        if heads:
+            return max(1, len(ast.literal_eval(heads.group(1))))
+        return len(QPL_DEFAULT_HEADS)
+    return len(QPL_DEFAULT_HEADS)
+
+
+#: compute_qpl's default classical_models, for a qpl_args that does not set them.
+QPL_DEFAULT_HEADS = ("rf", "mlp", "svc", "lr", "xgb", "catboost")
+
+
 def read_config(path):
     """The fields status needs, read by regex: 208 full YAML parses would dominate a watch.
 
@@ -113,7 +138,10 @@ def read_config(path):
         it = re.match(r"\d+", _value(layers, "iter"))
         n_iter = int(it.group(0)) if it else 0
     n_emb = max(1, len(_yaml_list(layers, "embeddings")))
-    n_models = len(_yaml_list(layers, "classical_model")) + len(_yaml_list(layers, "quantum_model"))
+    quantum = _yaml_list(layers, "quantum_model")
+    # Each arm writes one row per split -- except qpl, which writes one per head.
+    n_models = (len(_yaml_list(layers, "classical_model"))
+                + sum(_qpl_heads(layers) if arm == "qpl" else 1 for arm in quantum))
     name = os.path.splitext(os.path.basename(path))[0]
     return {"yaml": os.path.abspath(path), "config": name,
             "dataset": os.path.basename(os.path.dirname(os.path.abspath(path))),

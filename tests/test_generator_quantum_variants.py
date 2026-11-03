@@ -236,3 +236,43 @@ class TestGeneratedJobsLoadThroughOmegaConf:
             arm = cfg.quantum_model[0]
             assert cfg[f"gridsearch_{arm}_args"]["measurement"] == [measurement]
             assert cfg[f"{arm}_args"]["measurement"] == measurement
+
+
+class TestStatusCountsQplHeads:
+    """qpl writes one result row PER HEAD, but status counted it as one row per split, so
+    a qpl job that wrote only its first head -- and died before tabpfn -- read as done.
+    collate_results imports read_config from status, so the same count decided
+    'complete' there too."""
+
+    @pytest.fixture(scope="class")
+    def status(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "experiments" / "pilot10"))
+        import status as module
+        return module
+
+    @staticmethod
+    def _job(tmp_path, quantum, qpl_heads=None, splits=3):
+        lines = ["split_mode: manifest", f"splits: [{', '.join(str(i) for i in range(1, splits + 1))}]",
+                 "embeddings: ['none']", "classical_model: []", f"quantum_model: {quantum}"]
+        if qpl_heads is not None:
+            lines += ["qpl_args: {'encoding': ZZ, 'reps': 4,",
+                      f"           'classical_models': {qpl_heads}}}"]
+        path = tmp_path / "ds" / "job.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    @pytest.mark.parametrize("heads, expected", [(["catboost", "tabpfn"], 6),
+                                                 (["catboost", "lr", "xgb"], 9),
+                                                 (["catboost"], 3)])
+    def test_qpl_expects_one_row_per_head_per_split(self, status, tmp_path, heads, expected):
+        cfg = status.read_config(self._job(tmp_path, ["qpl"], heads))
+        assert cfg["expected"] == expected
+
+    def test_pqk_is_unchanged(self, status, tmp_path):
+        assert status.read_config(self._job(tmp_path, ["pqk"]))["expected"] == 3
+
+    def test_qpl_without_heads_uses_compute_qpls_default(self, status, tmp_path):
+        cfg = status.read_config(self._job(tmp_path, ["qpl"]))
+        assert cfg["expected"] == 3 * len(status.QPL_DEFAULT_HEADS)
