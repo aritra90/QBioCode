@@ -6,11 +6,13 @@
 #   DRY=1 ./submit_campaign.sh <run ids...>     preview: build task lists, submit nothing
 #   ./submit_campaign.sh --status <run ids...>  done / partial / failed per run, no submit
 #
-# SEQUENTIAL ON PURPOSE. submit_array.sh throttles on the pending count of its OWN job
-# name (bjobs -J p10a_<run_id>), so six copies started in parallel each wait for their
-# own 200 pending -- 1200 queued at once against a per-user MPJOBS of 400, which the
-# scheduler then rejects or parks. Run one after another, each drains below the
-# threshold before the next is submitted, and the per-user limit holds.
+# Between runs it WAITS until the user's pending jobs -- all of them, not one run's --
+# drop below PEND_THRESHOLD (default 200). submit_array.sh cannot do that for us: its own
+# wait only runs between the slices of ONE run, and a run of <= MAX_INDEX (400) tasks is
+# a single slice, so it submits and returns at once. Six such runs back to back would
+# put ~1400 elements in the queue against a per-user MPJOBS of 400. Counting every
+# pending job of the user, rather than one job name, is what makes the limit hold across
+# runs; it also counts jobs this script did not submit, which is the conservative side.
 #
 # Every run is checked BEFORE anything is submitted: that its tree exists, and a DRY pass
 # of submit_array.sh, which runs its interpreter and embedding-cache checks. One bad run
@@ -69,10 +71,29 @@ if [ "${DRY:-0}" = "1" ]; then
   exit 0
 fi
 
-# 3. Submit, one run at a time.
+# 3. Submit, one run at a time, waiting between runs for the user's queue to drain.
+PEND_THRESHOLD=${PEND_THRESHOLD:-200}
+POLL_INTERVAL=${POLL_INTERVAL:-120}
+user_pending() {
+  if [ "${SCHED:-lsf}" = "slurm" ]; then
+    squeue -h -r -u "$USER" -t PENDING 2>/dev/null | wc -l | tr -d ' '
+  else
+    bjobs -noheader -u "$USER" -p 2>/dev/null | wc -l | tr -d ' '
+  fi
+}
+wait_for_queue() {
+  local pend
+  pend=$(user_pending)
+  while [ "${pend:-0}" -ge "$PEND_THRESHOLD" ]; do
+    echo "  $(date '+%H:%M:%S')  $pend of your jobs pending; waiting for < $PEND_THRESHOLD" >&2
+    sleep "$POLL_INTERVAL"
+    pend=$(user_pending)
+  done
+}
 n=0
 for rid in "$@"; do
   n=$((n + 1))
+  [ "$n" -gt 1 ] && wait_for_queue
   echo
   echo "=================== $n/$# : $rid ===================" >&2
   if ! RUNS="$RUNS_ROOT/$rid" "$HERE/submit_array.sh"; then
