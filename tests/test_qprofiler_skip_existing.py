@@ -485,3 +485,34 @@ class TestItIsOffUnlessAskedFor:
                       monkeypatch)
         assert len(stubbed.calls) == 2
         assert not (second / resume.ADOPTED_CSV).exists()
+
+
+class TestQplIsAdoptedByItsHeadLabels:
+    """qpl writes one row per head (qpl_opt_catboost, qpl_opt_tabpfn) and never a bare
+    qpl_opt, so resuming on _model_label alone found nothing and recomputed every split.
+    A qpl job killed at the queue's 72:00 limit then restarted from split 1 and hit the
+    same wall again: resubmitting could never finish it."""
+
+    def test_qpl_has_one_label_per_head(self):
+        from qbiocode.apps.qprofiler.qprofiler import _model_labels
+        args = {"grid_search": True, "tune_quantum": True,
+                "qpl_args": {"classical_models": ["catboost", "tabpfn"]}}
+        assert _model_labels("qpl", args) == ["qpl_opt_catboost", "qpl_opt_tabpfn"]
+
+    def test_qpl_default_heads_come_from_compute_qpl(self):
+        from qbiocode.apps.qprofiler.qprofiler import _model_labels
+        from qbiocode.learning.compute_qpl import QPL_DEFAULT_HEADS
+        args = {"grid_search": True, "tune_quantum": True}
+        assert _model_labels("qpl", args) == [f"qpl_opt_{h}" for h in QPL_DEFAULT_HEADS]
+
+    def test_a_bare_string_is_one_head(self):
+        from qbiocode.apps.qprofiler.qprofiler import _model_labels
+        args = {"grid_search": True, "tune_quantum": True,
+                "qpl_args": {"classical_models": "catboost"}}
+        assert _model_labels("qpl", args) == ["qpl_opt_catboost"]
+
+    def test_other_models_keep_one_label(self):
+        from qbiocode.apps.qprofiler.qprofiler import _model_labels
+        args = {"grid_search": True, "tune_quantum": True}
+        assert _model_labels("pqk", args) == ["pqk_opt"]
+        assert _model_labels("rf", args) == ["rf_opt"]

@@ -89,6 +89,25 @@ def heads_present(cfg):
     return {model: len(its) for model, its in seen.items()}
 
 
+def cfg_heads(cfg):
+    """The heads a qpl config asked for, from its own YAML."""
+    import ast
+    with open(cfg["yaml"]) as fh:
+        text = fh.read()
+    m = re.search(r"['\"]classical_models['\"]\s*:\s*(\[[^\]]*\])", text)
+    return list(ast.literal_eval(m.group(1))) if m else list(status.QPL_DEFAULT_HEADS)
+
+
+def lsf_end(text):
+    """How LSF says the job ended, from its .out: the TERM_ line or the exit line."""
+    for pattern in (r"^(TERM_\w+:[^\n]*)", r"^(Exited with exit code \d+[^\n]*)",
+                    r"^(Successfully completed[^\n]*)"):
+        m = re.search(pattern, text, re.M)
+        if m:
+            return m.group(1).strip()
+    return "no LSF exit line -- the job may still be running, or was killed hard"
+
+
 def classify(cfg, log):
     """(bucket, detail) for one unfinished config."""
     if log is None:
@@ -96,7 +115,10 @@ def classify(cfg, log):
     jobid, out, wall = log
     with open(out, errors="replace") as fh:
         text = fh.read()
-    if "TERM_RUNLIMIT" in text:
+    # LSF exit 140 is 128 + SIGUSR2's 12 -- the run-limit kill. A job can be killed hard
+    # enough that its TERM_RUNLIMIT line never lands in the .out while the exit line does,
+    # and this campaign had such jobs reported as "unknown".
+    if "TERM_RUNLIMIT" in text or re.search(r"^Exited with exit code 140\b", text, re.M):
         return "wall", f"job {jobid} killed at -W {wall}"
     if "TERM_MEMLIMIT" in text:
         return "memory", f"job {jobid} exceeded its memory request"
@@ -105,11 +127,17 @@ def classify(cfg, log):
         return "error", exc
     heads = heads_present(cfg)
     if cfg["config"].endswith("_qpl") and heads:
-        full = max(heads.values())
-        short = {m: n for m, n in heads.items() if n < full}
-        missing = "" if short else " -- every head it wrote is complete, so one is ABSENT"
-        return "head", f"rows per head {heads}{missing}"
-    return "unknown", f"job {jobid}; see {out}"
+        # A head is missing only if the config ASKED for it and no row names it. Every
+        # head present at the same short count means the job stopped early, which is a
+        # kill or a crash -- not a missing head. An earlier version reported "ABSENT"
+        # whenever the heads it saw agreed with each other, so it called an
+        # early-stopped job a missing tabpfn.
+        wanted = cfg_heads(cfg)
+        absent = sorted(h for h in wanted if not any(m.endswith("_" + h) for m in heads))
+        if absent:
+            return "head", f"heads {absent} wrote NO row; present {heads}"
+    lsf = lsf_end(text)
+    return "unknown", f"job {jobid}: {lsf}"
 
 
 def main():
@@ -152,6 +180,9 @@ def main():
         elif bucket == "head":
             for _, d in items[:5]:
                 print(f"   {d}")
+        if bucket == "unknown":
+            for msg, n in Counter(d.split(": ", 1)[1] for _, d in items).most_common(5):
+                print(f"   {n:4d}  {msg}")
         if args.list or bucket in ("unknown", "no-log"):
             for c, d in items:
                 print(f"   {c['config']:52s} rows {c['rows']}/{c['expected']:<4d} {d}")

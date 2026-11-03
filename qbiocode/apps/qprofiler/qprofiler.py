@@ -625,6 +625,27 @@ def _model_label(name, args):
     return f"{name}_opt" if tuned else name
 
 
+def _model_labels(name, args):
+    """EVERY label ``name``'s results are filed under: one, except for qpl.
+
+    qpl fits its downstream heads on one projection and writes a row per head,
+    ``qpl_opt_catboost``, ``qpl_opt_tabpfn``, ... -- never a bare ``qpl_opt``. Resuming on
+    :func:`_model_label` alone looked for that bare label, found nothing, and recomputed
+    every split of every qpl job, so a qpl job killed at the queue's wall restarted from
+    split 1 and hit the same wall again. The head list is the one compute_qpl will run:
+    ``qpl_args.classical_models``, else its default.
+    """
+    base = _model_label(name, args)
+    if name != "qpl":
+        return [base]
+    # compute_qpl's own resolver, so this names exactly the heads it will run: its
+    # default list for None, a bare string as one head, an OmegaConf ListConfig as a list.
+    from qbiocode.learning.compute_qpl import _resolve_heads
+
+    heads = _resolve_heads((args.get("qpl_args") or {}).get("classical_models"))
+    return [f"{base}_{head}" for head in heads]
+
+
 @contextlib.contextmanager
 def _only_models(args, names):
     """Run the block with ``args['model']`` cut down to ``names``, then put it back.
@@ -1343,7 +1364,7 @@ def main(args):
         )
         # Model name -> the label its results are filed under. Built from the WHOLE list,
         # before _only_models narrows it for a resumed pass.
-        model_labels = {name: _model_label(name, args) for name in args['model']}
+        model_labels = {name: _model_labels(name, args) for name in args['model']}
 
         # call and run evaluation functions
         df_dataset = pd.DataFrame(X)
@@ -1433,24 +1454,39 @@ def main(args):
                 # are read and before the complexity measures are recomputed, so a pass
                 # that is already complete costs one dictionary lookup per model.
                 adopted = {}
-                for name, label in model_labels.items():
-                    row, csv_path = completed.get(file, embed, iter, label)
-                    if row is None:
-                        continue
-                    # A row the provenance check rejects is NAMED, not dropped quietly: a
-                    # resume that silently declines to adopt looks exactly like one with
-                    # nothing to adopt, and the difference is whether the dataset or its
-                    # frozen splits changed under the run.
-                    reason = resume.refused(row, adopt_require)
-                    if reason:
-                        log.warning(
-                            f"{data_key}: skip_existing will NOT adopt {label} -- "
-                            f"{reason} (in {csv_path}). It is being recomputed."
-                        )
-                        continue
-                    adopted[label] = (row, csv_path)
-                remaining = [name for name, label in model_labels.items()
-                             if label not in adopted]
+                remaining = []
+                for name, labels in model_labels.items():
+                    # A model is adopted only when EVERY row it writes is on disk and
+                    # accepted. qpl's heads come out of one fit on one projection, so a
+                    # pass holding some heads and not others cannot be completed by
+                    # fitting the missing one alone -- it is refitted whole.
+                    found = {}
+                    for label in labels:
+                        row, csv_path = completed.get(file, embed, iter, label)
+                        if row is None:
+                            break
+                        # A row the provenance check rejects is NAMED, not dropped
+                        # quietly: a resume that silently declines to adopt looks exactly
+                        # like one with nothing to adopt, and the difference is whether
+                        # the dataset or its frozen splits changed under the run.
+                        reason = resume.refused(row, adopt_require)
+                        if reason:
+                            log.warning(
+                                f"{data_key}: skip_existing will NOT adopt {label} -- "
+                                f"{reason} (in {csv_path}). It is being recomputed."
+                            )
+                            break
+                        found[label] = (row, csv_path)
+                    if len(found) == len(labels):
+                        adopted.update(found)
+                    else:
+                        if found:
+                            log.info(
+                                f"{data_key}: skip_existing holds {sorted(found)} but not "
+                                f"{sorted(set(labels) - set(found))}; {name} writes them "
+                                f"from one fit, so it is refitted whole"
+                            )
+                        remaining.append(name)
                 if adopted:
                     log.info(
                         f"{data_key}: skip_existing adopts {sorted(adopted)} from "
