@@ -21,6 +21,7 @@ qbiocode.learning package
        qbiocode.learning.compute_pqk
        qbiocode.learning.compute_qelm
        qbiocode.learning.compute_qensemble
+       qbiocode.learning.compute_qhdc
        qbiocode.learning.compute_qnn
        qbiocode.learning.compute_qpl
        qbiocode.learning.compute_qsvc
@@ -70,6 +71,10 @@ qbiocode.learning package
          - Tune QELM's hyperparameters with Optuna, then run it at the best ones found.
        * - :func:`compute_qensemble <qbiocode.learning.compute_qensemble.compute_qensemble>`
          - Compute quantum ensemble classifier predictions.
+       * - :func:`compute_qhdc <qbiocode.learning.compute_qhdc.compute_qhdc>`
+         - Train hdlib's quantum hyperdimensional classifier on the supplied split.
+       * - :func:`compute_qhdc_opt <qbiocode.learning.compute_qhdc.compute_qhdc_opt>`
+         - Tune qHDC on an inner training split, refit, and evaluate on the outer test set.
        * - :func:`compute_qnn <qbiocode.learning.compute_qnn.compute_qnn>`
          - This function computes a Quantum Neural Network (QNN) model on the provided training data and evaluates it on the test data.
        * - :func:`compute_qnn_opt <qbiocode.learning.compute_qnn.compute_qnn_opt>`
@@ -103,5 +108,3 @@ qbiocode.learning package
        * - :func:`compute_xgb_opt <qbiocode.learning.compute_xgb.compute_xgb_opt>`
          - This function generates a model using an Extreme Gradient Boositing (xgb) Classifier method as implemented in xgboost.
     
-
-

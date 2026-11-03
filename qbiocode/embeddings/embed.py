@@ -14,10 +14,20 @@
 
 import difflib
 import os
+import tempfile
 import warnings
 from functools import lru_cache
 
 import numpy as np
+
+# UMAP/Numba can fail during import when its default cache location is not
+# writable (common in containers, read-only home directories, and fresh Conda
+# environments). Keep an explicit user setting, otherwise provide a writable
+# process cache before importing UMAP below.
+if not os.environ.get("NUMBA_CACHE_DIR"):
+    _numba_cache_dir = os.path.join(tempfile.gettempdir(), "qbiocode-numba")
+    os.makedirs(_numba_cache_dir, exist_ok=True)
+    os.environ["NUMBA_CACHE_DIR"] = _numba_cache_dir
 
 # ====== Qiskit imports ======
 from qiskit import QuantumCircuit

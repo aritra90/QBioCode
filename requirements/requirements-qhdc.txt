@@ -1,0 +1,3 @@
+# Optional qHDC dependency. hdlib 2.1.0 now publishes the QuantumClassificationModel
+# used by QBioCode, so this installs from PyPI rather than cloning the source repository.
+hdlib==2.1.0

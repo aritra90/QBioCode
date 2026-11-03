@@ -39,7 +39,11 @@ _TUNERS = frozenset({"optuna", "grid"})
 #: holds the per-downstream-model hyperparameter grids, so dropping it when tuning is on
 #: would search the projection against heads tuned over DIFFERENT grids than the refit
 #: uses -- the same class of mismatch, one level down.
-_QUANTUM_PASSTHROUGH = {"qpl": ("classical_models", "classical_models_args")}
+_QUANTUM_PASSTHROUGH = {
+    "qpl": ("classical_models", "classical_models_args"),
+    "qhdc": ("size", "levels", "retrain_epochs", "learning_rate",
+             "early_stop", "input_scaling", "device", "seed"),
+}
 
 #: The models that run on a quantum backend, as ``args['model']`` spells them.
 #:
@@ -50,10 +54,10 @@ _QUANTUM_PASSTHROUGH = {"qpl": ("classical_models", "classical_models_args")}
 #: ``("QNN", "PQK", "VQC", "QSVC")`` -- and a THIRD copy inline in the scatter arm -- both
 #: missing ``qpl``, so every QPL row was coloured and ordered as a classical model in
 #: every published figure. One list, one place to add the next quantum learner to.
-QUANTUM_MODELS = frozenset({"qsvc", "qnn", "vqc", "pqk", "qpl", "qelm"})
+QUANTUM_MODELS = frozenset({"qsvc", "qnn", "vqc", "pqk", "qpl", "qelm", "qhdc"})
 
 
-def _call_with_global_seeds(compute_fn, seed, q_seed, *fn_args, **fn_kwargs):
+def _call_with_global_seeds(compute_fn, seed, q_seed, /, *fn_args, **fn_kwargs):
     """Re-establish the global RNG seeds inside the worker, then run ``compute_fn``.
 
     ``qprofiler`` sets ``np.random.seed`` and ``algorithm_globals.random_seed`` in
@@ -73,6 +77,8 @@ def _call_with_global_seeds(compute_fn, seed, q_seed, *fn_args, **fn_kwargs):
     throwaway worker and that is moot, but with ``n_jobs: 1`` joblib runs it in the
     calling process, and the re-seed plus the model's own draws then moved the CALLER's
     stream -- so whatever qprofiler drew next depended on which model had just run.
+    Dispatcher seeds are positional-only so a learner's explicit ``seed``
+    keyword (for example ``qhdc_args.seed``) reaches that learner unchanged.
     """
     import numpy as np
 
@@ -335,6 +341,7 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args, validation=None)
     from qbiocode.learning.compute_pqk import compute_pqk, compute_pqk_opt
     from qbiocode.learning.compute_qelm import compute_qelm, compute_qelm_opt
     from qbiocode.learning.compute_qpl import compute_qpl, compute_qpl_opt
+    from qbiocode.learning.compute_qhdc import compute_qhdc, compute_qhdc_opt
     from qbiocode.learning.compute_qnn import compute_qnn, compute_qnn_opt
     from qbiocode.learning.compute_qsvc import compute_qsvc, compute_qsvc_opt
     from qbiocode.learning.compute_nb import compute_nb, compute_nb_opt
@@ -376,6 +383,8 @@ def model_run(X_train, X_test, y_train, y_test, data_key, args, validation=None)
         "qpl_opt": compute_qpl_opt,
         "qelm": compute_qelm,
         "qelm_opt": compute_qelm_opt,
+        "qhdc": compute_qhdc,
+        "qhdc_opt": compute_qhdc_opt,
     }
 
     quantum_models = QUANTUM_MODELS

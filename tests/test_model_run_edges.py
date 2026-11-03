@@ -575,6 +575,7 @@ DIRECT_CALL_REQUIREMENTS = {
     "pqk": (("backend", "seed", "pqk_projection_dir"), {}),
     "qpl": (("backend", "seed", "qpl_projection_dir"), {}),
     "qelm": (("backend", "seed", "qelm_projection_dir"), {}),
+    "qhdc": ((), {"size": 8, "seed": 7}),
 }
 
 #: The learners that read ``args`` for themselves -- and so the ones that need a real
@@ -648,6 +649,8 @@ def direct_call(tiny_split, quantum_split, minimal_args, request):
     def call(name, args=None):
         if name == "tabpfn":
             request.getfixturevalue("tabpfn_ready")
+        if name == "qhdc":
+            request.getfixturevalue("qhdc_ready")
         keys, kwargs = DIRECT_CALL_REQUIREMENTS[name]
         X_train, X_test, y_train, y_test = (
             quantum_split if name in QUANTUM_DIRECT else tiny_split

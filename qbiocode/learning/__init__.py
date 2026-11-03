@@ -68,6 +68,7 @@ from .compute_tabpfn import compute_tabpfn, compute_tabpfn_opt
 from .compute_pqk import compute_pqk, compute_pqk_opt
 from .compute_qelm import compute_qelm, compute_qelm_opt
 from .compute_qpl import compute_qpl, compute_qpl_opt
+from .compute_qhdc import compute_qhdc, compute_qhdc_opt
 from .compute_qensemble import compute_qensemble
 from .compute_qnn import compute_qnn, compute_qnn_opt
 from .compute_qsvc import compute_qsvc, compute_qsvc_opt
@@ -106,6 +107,7 @@ __all__ = [
     'compute_qpl_opt',
     'compute_qelm',
     'compute_qelm_opt',
+    'compute_qhdc',
+    'compute_qhdc_opt',
     'compute_qensemble',
 ]
-

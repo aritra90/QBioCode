@@ -78,9 +78,10 @@ def compute_qnn(
     so ``args['seed']`` (and, for the sampler, ``args['shots']``) apply on
     ``'simulator'`` as on every other backend. ``'simulator'`` needs no transpilation;
     ``'simulator_aer'`` and the IBM backends also get an optimization-level-3 preset
-    pass manager. The estimator runs at ``default_precision=0.0``: no artificial noise
-    is added to its expectation values, so it is exact and reproducible on both
-    simulators.
+    pass manager. Local estimators run at ``default_precision=0.0`` for exact,
+    reproducible expectations. IBM Runtime requires a strictly positive precision,
+    so hardware estimators retain Qiskit Machine Learning's default precision
+    (``0.015625``).
 
     Args:
         X_train (array-like): Training feature set.
@@ -198,11 +199,16 @@ def compute_qnn(
         if pm is not None:
             qc = pm.run(qc)
             observable = observable.apply_layout(qc.layout)
-        # default_precision=0.0: EstimatorQNN's default (0.015625) is passed as the
-        # target precision of every run, and a V2 estimator honours it by adding
-        # Gaussian noise of that standard deviation to each expectation value. On Aer's
-        # EstimatorV2 that noise is unseeded, which is what made qnn on 'simulator_aer'
-        # irreproducible; on a statevector it is noise with no physical meaning.
+        # Local V2 estimators accept precision=0 and remain exact. IBM Runtime
+        # requires a strictly positive precision. Retain its established default
+        # rather than deriving precision from shots: Runtime precision is an
+        # estimator accuracy target, while shots independently control sampling.
+        backend_name = qutils.normalize_backend(args)["backend"]
+        estimator_precision = (
+            0.0
+            if backend_name in ("simulator", "simulator_aer")
+            else 0.015625
+        )
         neural_network = EstimatorQNN(
             circuit=qc,
             observables=observable,
@@ -210,7 +216,7 @@ def compute_qnn(
             pass_manager=pm,
             input_params=feature_map.parameters,
             weight_params=ansatz.parameters,
-            default_precision=0.0,
+            default_precision=estimator_precision,
         )
 
         # QNN maps inputs to [-1, +1]
