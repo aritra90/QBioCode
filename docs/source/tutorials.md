@@ -336,7 +336,7 @@ Run the two classical learners added alongside XGBoost, and see the three ways t
 - In-context learning: a frozen pretrained model whose `fit` only memorises rows, so no hyperparameter changes its capacity
 - Configuration validity that depends on a derived default rather than on what you wrote
 - Optional extras with a manual gate, and why such a model cannot be a base dependency
-- TabPFN's fixed ceilings: 10 classes (unwaivable), 50,000 rows, 2,000 features
+- TabPFN's fixed ceilings: 10 classes (unwaivable), 50,000 rows, and 500 features on the pinned `v2` checkpoint (2,000 on `v2.5`)
 
 ---
 

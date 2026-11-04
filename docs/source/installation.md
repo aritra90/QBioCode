@@ -189,6 +189,12 @@ below).
 ```{note}
 TabPFN supports at most **10 classes**. Unlike its row and feature limits, that ceiling
 is fixed by the checkpoint and is not waived by `ignore_pretraining_limits`.
+
+The pinned `v2` checkpoint also refuses more than **500 features** (2,000 on `v2.5`)
+unless `ignore_pretraining_limits: True` is set. As a `qpl` head this is reached by the
+projection, not the dataset: `measurement: rdm2` on `n` qubits gives `3n + 9n(n-1)/2`
+columns, 528 at 11 qubits. `qpl` then drops the `tabpfn` head with a `UserWarning`
+rather than failing every tuning trial.
 ```
 
 ### Tensor-network projection backends (`[mps]`)

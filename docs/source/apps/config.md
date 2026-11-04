@@ -1362,6 +1362,12 @@ identical to CPU, which would make a benchmark irreproducible across machines.
 TabPFN also supports **at most 10 classes**. Unlike its row and feature limits, that one
 cannot be waived with `ignore_pretraining_limits`; a dataset with more is rejected up
 front, naming its class count.
+
+The feature limit of the pinned `v2` checkpoint is **500** (2,000 on `v2.5`), waivable
+with `ignore_pretraining_limits: True`. For `qpl` it applies to the projection's width:
+`3n` columns for `measurement: rdm1`, `3n + 9(n-1)` for `rdm2_nn` and `3n + 9n(n-1)/2`
+for `rdm2` (528 at 11 qubits). A wider projection drops the `tabpfn` head with a
+`UserWarning`, and `generate_pilot_configs.py` leaves it out of `qpl_args` with a comment.
 ```
 
 ```{seealso}
