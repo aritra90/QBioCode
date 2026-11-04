@@ -1199,8 +1199,23 @@ def _drop_top_level_key(body, key):
     return pattern.subn("", body)
 
 
+#: TabPFN's feature limit on the pinned v2 checkpoint (compute_tabpfn.TABPFN_MAX_FEATURES).
+#: Copied rather than imported: the generator must not import the torch stack.
+TABPFN_MAX_FEATURES = 500
+
+
+def projection_width(qubits, measurement):
+    """Columns a pqk/qpl projection has: 3n for rdm1, plus 9 per measured pair for rdm2."""
+    n = int(qubits)
+    if measurement == "rdm2":
+        return 3 * n + 9 * n * (n - 1) // 2
+    if measurement == "rdm2_nn":
+        return 3 * n + 9 * (n - 1)
+    return 3 * n
+
+
 def quantum_variant_block(arms, *, quantum_space="default", measurement=None,
-                          qpl_heads=None):
+                          qpl_heads=None, qubits=None):
     """YAML a job appends to configure its projection arms, or "" when nothing changes.
 
     Empty for a run that sets none of these options and runs no qpl, so its configs stay
@@ -1251,6 +1266,20 @@ def quantum_variant_block(arms, *, quantum_space="default", measurement=None,
                 f"'primitive': 'estimator', 'reps': 4{fixed_m}}}"]
     if "qpl" in proj:
         heads = list(qpl_heads or ("catboost", "tabpfn"))
+        # A head the job cannot run is left OUT of the YAML rather than dropped at run
+        # time. compute_qpl would drop it anyway (> TABPFN_MAX_FEATURES), but then the
+        # job writes fewer rows than its YAML names, status.py counts it partial for
+        # ever, and every resubmission refits it. Leaving it out keeps the YAML, the
+        # rows and the completeness count in agreement.
+        if (qubits is not None and "tabpfn" in heads
+                and projection_width(qubits, measurement) > TABPFN_MAX_FEATURES):
+            heads = [h for h in heads if h != "tabpfn"]
+            out += [f"# tabpfn left out: {measurement or 'rdm1'} on {qubits} qubits is "
+                    f"{projection_width(qubits, measurement)} features, past its "
+                    f"{TABPFN_MAX_FEATURES}-feature limit"]
+            if not heads:
+                raise ValueError(f"qpl: no head can run on {qubits} qubits at "
+                                 f"{measurement}; name a head with --qpl-heads")
         out += ["# qpl's downstream models, each its own results row (qpl_<model>). The",
                 "# projection is computed once per trial and shared by all of them.",
                 "qpl_args: {'encoding': ZZ, 'entanglement': 'pairwise', "
@@ -1361,8 +1390,10 @@ def build_manifest_job(idx, total, ds, emb, group, classical, quantum, iteration
     body = _manifest_protocol(body, run_id=run_id, split_dir=split_dir, iteration=iteration,
                               repeat=repeat, fold=fold, n_trials=n_trials,
                               qnn_readout=qnn_readout, n_features=n_features)
+    _, qubits, _ = backend_for(ds["feats"], embed_above)
     block = quantum_variant_block(quantum, quantum_space=quantum_space,
-                                  measurement=measurement, qpl_heads=qpl_heads)
+                                  measurement=measurement, qpl_heads=qpl_heads,
+                                  qubits=qubits)
     if block:
         # REPLACE the template's entries for these keys rather than append after them.
         # A second gridsearch_pqk_args is legal YAML -- the later wins -- but qprofiler

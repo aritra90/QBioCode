@@ -77,6 +77,15 @@ from qbiocode.learning.compute_fold import estimator_param_names, fold_fixed
 #: waived with ``ignore_pretraining_limits``; this one raises regardless.
 TABPFN_MAX_CLASSES = 10
 
+#: Most input features the PINNED checkpoint (:data:`TABPFN_DEFAULT_VERSION`, v2) accepts
+#: before it raises ``TabPFNValidationError`` -- measured: a 2-RDM projection of an
+#: 11-qubit dataset is 528 features, and every trial raised "Number of features `528` ...
+#: is greater than the maximum number of features `500` officially supported". The
+#: comment above quotes 2_000, which is the v2.5 checkpoints' figure, not v2's. Waivable
+#: with ``ignore_pretraining_limits``, at the cost of running the model on data wider than
+#: anything it was pretrained on.
+TABPFN_MAX_FEATURES = 500
+
 #: Cache for the lazily imported estimator class, so a tuned run importing it once per
 #: trial does not re-enter the import machinery on every one.
 _TABPFN_CLASSIFIER = None

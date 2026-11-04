@@ -118,6 +118,7 @@ from qbiocode.learning.compute_fold import (
 from qbiocode.learning.compute_tabpfn import (
     TABPFN_DEFAULT_VERSION,
     TABPFN_MAX_CLASSES,
+    TABPFN_MAX_FEATURES,
     _explain_weight_access_failure,
     _load_tabpfn_classifier,
     resolve_model_path,
@@ -756,6 +757,29 @@ def compute_qpl(
             warnings.warn(
                 f"TabPFN supports at most {TABPFN_MAX_CLASSES} classes but this target has "
                 f"{n_classes}, so it will be skipped as a QPL head.\n"
+                f"Continuing with other models: "
+                f"{[m for m in classical_models if m != 'tabpfn']}",
+                UserWarning,
+            )
+            classical_models = [m for m in classical_models if m != "tabpfn"]
+
+    # The projection's width is known before any circuit runs: 3n for rdm1, the pool's
+    # length for a 2-RDM. A full 2-RDM passes TabPFN's limit at 11 qubits (3*11 + 9*55 =
+    # 528 > 500), and the failure is not one crash but EVERY trial raising inside the
+    # search -- so the search reports "every tuning trial failed" after hours of circuits,
+    # naming neither the head nor the width. Dropped here, the same way as for too many
+    # classes, unless the run waives the limit for tabpfn explicitly.
+    if "tabpfn" in classical_models:
+        width = 3 * feat_dimension if rdm_observables is None else len(rdm_observables)
+        waived = bool(((classical_models_args or {}).get("tabpfn") or {})
+                      .get("ignore_pretraining_limits", False))
+        if width > TABPFN_MAX_FEATURES and not waived:
+            warnings.warn(
+                f"TabPFN accepts at most {TABPFN_MAX_FEATURES} features but "
+                f"measurement={measurement!r} on {feat_dimension} qubits projects to "
+                f"{width}, so it will be skipped as a QPL head. To keep it, set "
+                f"classical_models_args: {{'tabpfn': {{'ignore_pretraining_limits': True}}}} "
+                f"-- which runs it on data wider than its checkpoint was trained on.\n"
                 f"Continuing with other models: "
                 f"{[m for m in classical_models if m != 'tabpfn']}",
                 UserWarning,

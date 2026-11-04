@@ -276,3 +276,31 @@ class TestStatusCountsQplHeads:
     def test_qpl_without_heads_uses_compute_qpls_default(self, status, tmp_path):
         cfg = status.read_config(self._job(tmp_path, ["qpl"]))
         assert cfg["expected"] == 3 * len(status.QPL_DEFAULT_HEADS)
+
+
+class TestTabpfnLeftOutWhenTheProjectionIsTooWide:
+    """openml__ilpd (11 features, unembedded) at rdm2 projects to 3*11 + 9*55 = 528
+    columns; TabPFN v2 refuses more than 500, so every tuning trial raised and the job
+    ended "every tuning trial failed". compute_qpl now drops the head, but a YAML still
+    naming it makes status.py expect a row the job never writes -- partial for ever. The
+    generator must leave the head out, so YAML, rows and count agree."""
+
+    @pytest.mark.parametrize("qubits, measurement, width", [
+        (11, "rdm2", 528), (10, "rdm2", 435), (11, "rdm2_nn", 123), (11, "rdm1", 33)])
+    def test_width(self, gen, qubits, measurement, width):
+        assert gen.projection_width(qubits, measurement) == width
+
+    def test_ilpd_rdm2_is_catboost_only(self, gen):
+        y = _parse(gen.quantum_variant_block(["qpl"], measurement="rdm2", qubits=11))
+        assert y["qpl_args"]["classical_models"] == ["catboost"]
+
+    @pytest.mark.parametrize("qubits, measurement", [(10, "rdm2"), (11, "rdm2_nn"),
+                                                     (11, "rdm1"), (None, "rdm2")])
+    def test_tabpfn_kept_when_it_fits_or_width_unknown(self, gen, qubits, measurement):
+        y = _parse(gen.quantum_variant_block(["qpl"], measurement=measurement, qubits=qubits))
+        assert y["qpl_args"]["classical_models"] == ["catboost", "tabpfn"]
+
+    def test_tabpfn_as_the_only_head_is_refused(self, gen):
+        with pytest.raises(ValueError, match="no head can run"):
+            gen.quantum_variant_block(["qpl"], measurement="rdm2", qubits=11,
+                                      qpl_heads=["tabpfn"])
