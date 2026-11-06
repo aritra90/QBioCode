@@ -42,7 +42,7 @@ _TUNERS = frozenset({"optuna", "grid"})
 _QUANTUM_PASSTHROUGH = {
     "qpl": ("classical_models", "classical_models_args"),
     "qhdc": ("size", "levels", "retrain_epochs", "learning_rate",
-             "early_stop", "input_scaling", "device", "seed"),
+             "early_stop", "device", "seed"),
 }
 
 #: The models that run on a quantum backend, as ``args['model']`` spells them.

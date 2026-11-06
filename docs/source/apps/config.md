@@ -1147,7 +1147,6 @@ shots: 1024
 qhdc_args:
   size: 64
   levels: 2
-  input_scaling: minmax
   retrain_epochs: 0
   learning_rate: 1.0
   early_stop: True
@@ -1160,12 +1159,10 @@ sets the number of feature quantization levels; start small when exploring the
 runtime. The seed defaults to `q_seed`, then `seed`, then 42, and can be overridden
 with `qhdc_args.seed`.
 
-The encoder expects values in `[0, 1]`. `input_scaling: minmax` fits a scaler on
-the supplied training features **after embedding**, transforms the test features
-with that scaler, and clips them to `[0, 1]`. It preserves all row membership,
-ordering and labels. Use `input_scaling: none` only when both supplied arrays are
-already in `[0, 1]`; out-of-range values then raise an error. This model-specific
-preprocessing is recorded in the result parameters.
+The encoder expects values in `[0, 1]`. QProfiler applies its configured scaler
+once, on each split before dispatching any model, so qHDC receives the same
+features as the other learners. Direct qHDC preprocessing is intentionally not
+exposed through QBioCode; users calling hdlib directly can scale their arrays there.
 
 Training builds class prototypes. `retrain_epochs: 0` disables optional prototype
 updates; a positive value enables updates using training data only. The test set
@@ -1186,9 +1183,9 @@ gridsearch_qhdc_args:
   levels: [2, 4]
 ```
 
-The tuner makes an inner split from the training set only, fits each trial's
-scaler on its inner training rows, and refits the winning configuration on all
-outer training rows. The final evaluation uses the original outer test set.
+The tuner makes an inner split from the training set only and refits the winning
+configuration on all outer training rows. The final evaluation uses the original
+outer test set.
 Settings in `qhdc_args` remain fixed unless overridden by `gridsearch_qhdc_args`.
 If other quantum models are selected, they also need search blocks when
 `tune_quantum` is enabled.

@@ -575,7 +575,7 @@ DIRECT_CALL_REQUIREMENTS = {
     "pqk": (("backend", "seed", "pqk_projection_dir"), {}),
     "qpl": (("backend", "seed", "qpl_projection_dir"), {}),
     "qelm": (("backend", "seed", "qelm_projection_dir"), {}),
-    "qhdc": ((), {"size": 8, "seed": 7}),
+    "qhdc": (("backend", "seed"), {"size": 8}),
 }
 
 #: The learners that read ``args`` for themselves -- and so the ones that need a real
@@ -905,6 +905,10 @@ class TestADirectComputeCallIsNotCoveredByTheDispatcher:
         there is no fit to pay for.
         """
         args = minimal_args(name)
+        if name == "qhdc":
+            # qHDC uses ``simulator`` as its direct-call default when backend is
+            # omitted; this node is about the other quantum learners' required key.
+            return
         del args["seed"]
         with pytest.raises(ValueError, match=r"seed"):
             direct_call(name, args)

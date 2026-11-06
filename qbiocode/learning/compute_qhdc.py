@@ -1,8 +1,8 @@
 """hdlib quantum hyperdimensional classification on QProfiler's supplied split.
 
 hdlib is imported only when qHDC is selected. The optional PyPI dependency is
-listed in requirements/requirements-qhdc.txt. Training, optional retraining,
-and scaling never see test labels.
+listed in requirements/requirements-qhdc.txt. Training and optional retraining use
+the already-scaled split supplied by QProfiler.
 """
 
 import sys
@@ -10,7 +10,6 @@ import time
 from numbers import Integral, Real
 
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
 from sklearn.utils.validation import check_array, check_X_y
 
 from qbiocode.evaluation.model_evaluation import modeleval
@@ -84,17 +83,15 @@ def compute_qhdc(
     retrain_epochs=0,
     learning_rate=1.0,
     early_stop=True,
-    input_scaling="minmax",
     device="CPU",
     seed=None,
 ):
     """Fit qHDC and return the standard QBioCode metrics/prediction DataFrame.
 
     ``X_train`` and ``X_test`` are the split (and optional embedding) supplied by
-    QProfiler. No rows are resampled or reordered. ``input_scaling='minmax'`` fits
-    a training-only scaler, then clips transformed test features to [0, 1]. This
-    is needed even after PCA. ``'none'`` accepts already normalized features and
-    rejects values outside [0, 1]. Neither option mutates the caller's arrays.
+    QProfiler. QProfiler fits the configured scaler on the training side and applies
+    it to the test side before dispatching every model. No rows are resampled,
+    reordered, or scaled here.
 
     ``size`` is a power-of-two hypervector dimension, independent of feature
     count; the current hdlib classifier uses log2(size) qubits. ``levels`` is the
@@ -128,9 +125,6 @@ def compute_qhdc(
         raise ValueError("qHDC early_stop must be a boolean.")
     if device not in ("CPU", "GPU"):
         raise ValueError("qHDC device must be 'CPU' or 'GPU'.")
-    if input_scaling not in ("minmax", "none"):
-        raise ValueError("qHDC input_scaling must be 'minmax' or 'none'.")
-
     X_train, y_train = check_X_y(X_train, y_train, dtype=float)
     X_test, y_test = check_X_y(X_test, y_test, dtype=float)
     if X_train.shape[1] != X_test.shape[1]:
@@ -138,14 +132,7 @@ def compute_qhdc(
     classes = np.unique(y_train)
     if len(classes) != 2 or not np.isin(y_test, classes).all():
         raise ValueError("qHDC requires two training classes and test labels from those classes.")
-    if input_scaling == "minmax":
-        scaler = MinMaxScaler(clip=True)
-        train = scaler.fit_transform(X_train)
-        test = scaler.transform(X_test)
-    else:
-        if any(np.any((x < 0) | (x > 1)) for x in (X_train, X_test)):
-            raise ValueError("qHDC input_scaling='none' requires all features in [0, 1].")
-        train, test = X_train, X_test
+    train, test = X_train, X_test
 
     classifier = _load_classifier()
     learner = classifier(size=size, levels=levels, seed=seed, shots=shots)
@@ -179,7 +166,6 @@ def compute_qhdc(
         "retrain_epochs": retrain_epochs,
         "learning_rate": float(learning_rate),
         "early_stop": early_stop,
-        "input_scaling": input_scaling,
         "device": device,
         "seed": seed,
         "shots": shots,
@@ -214,7 +200,6 @@ def compute_qhdc_opt(
     retrain_epochs=None,
     learning_rate=None,
     early_stop=True,
-    input_scaling="minmax",
     device="CPU",
     seed=None,
     n_trials=10,
@@ -223,14 +208,15 @@ def compute_qhdc_opt(
     """Tune on an inner training split, refit on all training rows, then test.
 
     Search size/levels/epochs/rate with the same Optuna syntax as the other
-    quantum models. Backend, input scaling and execution controls stay fixed.
+    quantum models. Backend and execution controls stay fixed; QProfiler scaling
+    remains outside the learner and is never tuned.
     The shared tuner requires allow_hardware_tuning for real hardware trials.
     """
     started = time.time()
     candidates = dict(
         size=size, levels=levels, retrain_epochs=retrain_epochs, learning_rate=learning_rate
     )
-    fixed = dict(early_stop=early_stop, input_scaling=input_scaling, device=device, seed=seed)
+    fixed = dict(early_stop=early_stop, device=device, seed=seed)
     best = run_function_study(
         compute_qhdc,
         build_search_space("qhdc", candidates),

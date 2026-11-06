@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.metrics import roc_auc_score
-from sklearn.preprocessing import MinMaxScaler
 
 import qbiocode
 
@@ -20,11 +19,9 @@ qhdc = importlib.import_module("qbiocode.learning.compute_qhdc")
 
 @pytest.fixture
 def data():
-    # Test extrema deliberately exceed the training range. Fitting the scaler
-    # on both sets would change every training coordinate and fail this test.
     return (
-        np.array([[-4.0, 10.0], [-2.0, 11.0], [0.0, 13.0], [2.0, 14.0]]),
-        np.array([[10.0, 12.0], [-20.0, 15.0], [1.0, 11.0]]),
+        np.array([[0.0, 0.1], [0.2, 0.3], [0.6, 0.8], [0.9, 1.0]]),
+        np.array([[1.0, 0.2], [0.0, 0.7], [0.4, 0.1]]),
         np.array([0, 1, 0, 1]),
         np.array([1, 0, 1]),
     )
@@ -62,13 +59,12 @@ def recording_model(monkeypatch):
     return instances
 
 
-def test_preserves_split_and_fits_scaler_only_on_training(data, recording_model):
+def test_preserves_qprofiler_scaled_split(data, recording_model):
     originals = [x.copy() for x in data]
     frame = qhdc.compute_qhdc(*data, {"q_seed": 19, "shots": 256}, retrain_epochs=2)
     fitted = recording_model[0]
-    expected = MinMaxScaler(clip=True).fit(data[0])
-    np.testing.assert_allclose(fitted.train, expected.transform(data[0]))
-    np.testing.assert_allclose(fitted.test, expected.transform(data[1]))
+    np.testing.assert_allclose(fitted.train, data[0])
+    np.testing.assert_allclose(fitted.test, data[1])
     np.testing.assert_array_equal(fitted.labels, data[2])
     for before, after in zip(originals, data):
         np.testing.assert_array_equal(before, after)
@@ -122,7 +118,6 @@ def test_package_import_does_not_import_hdlib():
         ({"levels": 1}, "levels"),
         ({"retrain_epochs": -1}, "retrain_epochs"),
         ({"learning_rate": float("nan")}, "learning_rate"),
-        ({"input_scaling": "none"}, "all features in"),
     ],
 )
 def test_invalid_inputs_fail_before_constructing_model(data, recording_model, kwargs, message):
@@ -190,7 +185,7 @@ def test_tuning_never_sees_outer_test_rows_and_keeps_execution_settings(recordin
         "grid_search": True,
         "tune_quantum": True,
         "n_trials_quantum": 2,
-        "qhdc_args": {"size": 8, "input_scaling": "none", "early_stop": False, "seed": 23},
+        "qhdc_args": {"size": 8, "early_stop": False, "seed": 23},
         "gridsearch_qhdc_args": {"levels": [2, 3]},
     }
     result = qbiocode.model_run(X, test, y, np.array([1, 0]), "same-split", args)
@@ -206,7 +201,6 @@ def test_tuning_never_sees_outer_test_rows_and_keeps_execution_settings(recordin
     np.testing.assert_array_equal(final.test, test)
     row = result["results_qhdc_opt"][0]
     assert row["BestParams_Tuned"]["size"] == 8
-    assert row["BestParams_Tuned"]["input_scaling"] == "none"
     assert row["BestParams_Tuned"]["early_stop"] is False
 
 

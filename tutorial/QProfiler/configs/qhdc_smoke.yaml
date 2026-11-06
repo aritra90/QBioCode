@@ -48,7 +48,6 @@ pqk_args:
 qhdc_args:
   size: 16                 # Hypervector dimension: 16 -> 4 qubits, even after PCA.
   levels: 4               # Discrete feature levels.
-  input_scaling: minmax    # Fit on training features after embedding; clip test to [0, 1].
   retrain_epochs: 0        # Raise to 1 or 2 to exercise training-only prototype updates.
   learning_rate: 1.0
   early_stop: True

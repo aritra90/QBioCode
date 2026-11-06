@@ -662,7 +662,6 @@ qelm_reservoir_seed: 42
 qhdc_args:
   size: 64
   levels: 2
-  input_scaling: minmax
   retrain_epochs: 0
   learning_rate: 1.0
   early_stop: True
