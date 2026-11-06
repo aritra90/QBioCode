@@ -51,6 +51,17 @@ Three checks fail loudly, because each would otherwise produce a table that look
     disagreement means the jobs trained on different features, and their scores are not a
     paired comparison. This is the production check of the seeded-UMAP fix: before it,
     this failed for every umap pass after the first.
+
+    Only the STABLE columns decide it. A few characteristics differ between CPU models on
+    byte-identical input -- the graph-spectral task.* features and their permutation
+    z-scores (an eigendecomposition and tie-broken k-NN graphs), pyMFE's graph and
+    neighbourhood measures (hubs, density, cls_coef, n3, n4), its tree landmarkers, the
+    condition number of a near-singular matrix and the Isomap error. In the full1 + tcga1
+    benchmark 1541 of the 1543 cells where any column disagreed spanned two CPU models,
+    and these columns were the only ones that ever did; the other 120 never disagreed
+    once. They are reported, with how far apart they are, but a mismatch there is not
+    evidence that the jobs saw different features, while a mismatch in any other column
+    is. --strict-characteristics restores the old all-columns rule.
 """
 import argparse
 import glob
@@ -97,6 +108,11 @@ def attach_tiebreak(frame, job_sidecars, config):
 #: is ~1e-15 (a kernel-density sum in a different order); a real feature mismatch moves them
 #: at the first or second significant figure.
 RTOL, ATOL = 1e-6, 1e-9
+#: Characteristic columns that are not reproducible across CPU models on identical input
+#: (see the module docstring). Prefixes, matched with str.startswith.
+CPU_SENSITIVE = ("task.", "mfe.hubs.", "mfe.density", "mfe.cls_coef", "mfe.n3.", "mfe.n4.",
+                 "mfe.best_node.", "mfe.worst_node.", "Condition number",
+                 "Isomap Reconstruction Error")
 #: The per-pass sidecars a split_mode: manifest run writes under its run directory
 #: (qbiocode.evaluation.protocol OOF_DIR, TRIALS_DIR, VAL_PREDICTIONS_DIR), each with the
 #: columns that identify one row in it.
@@ -143,6 +159,9 @@ def main():
                     help="drop configs that have not landed every iteration")
     ap.add_argument("--allow-mismatch", action="store_true",
                     help="write the output even if the consistency checks fail")
+    ap.add_argument("--strict-characteristics", action="store_true",
+                    help="fail on a disagreement in ANY characteristic column, including "
+                         "the CPU-sensitive ones (CPU_SENSITIVE)")
     args = ap.parse_args()
 
     if os.path.abspath(args.out_dir).startswith(os.path.abspath(args.runs_dir) + os.sep):
@@ -228,11 +247,22 @@ def main():
         sides[name] = side
 
     raw_cols = []
+    soft = {}            # CPU-sensitive column -> (cells disagreeing, worst relative spread)
+
+    def gate(cols):
+        return cols if args.strict_characteristics else [
+            c for c in cols if not c.startswith(CPU_SENSITIVE)]
+
+    def note_soft(bad):
+        for col, v in bad.items():
+            n, worst = soft.get(col, (0, 0.0))
+            soft[col] = (n + 1, max(worst, v))
+
     if raws:
         rawdf = pd.concat(raws, ignore_index=True)
         raw_cols = [c for c in rawdf.columns if c not in ("Dataset", "__config")]
         for ds, g in rawdf.groupby("Dataset"):
-            bad = _disagreement(g, raw_cols)
+            bad = _disagreement(g, gate(raw_cols))
             if bad:
                 problems.append(f"RawDataEvaluation of {ds} differs between its jobs: "
                                 + ", ".join(f"{k} ({v:.2g})" for k, v in list(bad.items())[:6]))
@@ -242,14 +272,17 @@ def main():
     # iteration) were computed on that pass's embedded training split, by a different job
     # per model. They must agree.
     char_cols = [c for c in raw_cols if c in res.columns]
+    hard_cols = gate(char_cols)
+    soft_cols = [c for c in char_cols if c not in hard_cols]
     n_groups, bad_groups = 0, []
     for key, g in res.groupby(["Dataset", "embeddings", "iteration"]):
         if len(g) < 2:
             continue
         n_groups += 1
-        bad = _disagreement(g, char_cols)
+        bad = _disagreement(g, hard_cols)
         if bad:
             bad_groups.append((key, bad))
+        note_soft(_disagreement(g, soft_cols))
     if bad_groups:
         lines = [f"  {k[0]} {k[1]} iter {k[2]}: "
                  + ", ".join(f"{c} ({v:.2g})" for c, v in list(b.items())[:4])
@@ -259,7 +292,12 @@ def main():
                         + "\n".join(lines))
     else:
         print(f"feature consistency: {n_groups} (dataset, embedding, iteration) passes "
-              f"checked across jobs, {len(char_cols)} columns each, all agree")
+              f"checked across jobs, {len(hard_cols)} columns each, all agree")
+    if soft:
+        print(f"  not gated (CPU-sensitive, {len(soft_cols)} columns; see CPU_SENSITIVE): "
+              f"{len(soft)} differ somewhere, e.g. "
+              + ", ".join(f"{c} in {n} passes (up to {w:.2g})"
+                          for c, (n, w) in sorted(soft.items(), key=lambda kv: -kv[1][0])[:4]))
 
     if problems:
         print("\n!! " + "\n!! ".join(problems), file=sys.stderr)

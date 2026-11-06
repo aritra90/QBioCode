@@ -1346,3 +1346,60 @@ class TestEmbedAboveAndTheDefaultArms:
         with pytest.raises(SystemExit):
             _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
                           "--embed-above", "7")
+
+
+class TestCollateGatesOnlyStableCharacteristics:
+    """full1-qt-* would not collate: ~30% of passes 'saw DIFFERENT training features'. In
+    the full1 + tcga1 benchmark 1541 of the 1543 such cells spanned two CPU models, and
+    only graph-spectral / pyMFE-neighbourhood / condition-number columns ever disagreed --
+    numerics, not data. Those are reported; every other column still fails the run."""
+
+    @pytest.fixture
+    def landed(self, generator, monkeypatch, tmp_path):
+        root, rows = _manifest_run(generator, monkeypatch, tmp_path, "--datasets", "labor",
+                                   "--models", "qsvc", "--splits", "1",
+                                   "--wall", "classical=0:45,qsvc=2:00")
+        for i, r in enumerate(rows):
+            cfg = _load(pathlib.Path(r["yaml"]))
+            run = root / r["dataset"] / "results" / r["config"] / "run_1"
+            _fake_results(run, r["dataset"], r["embedding"], r["iteration"],
+                          cfg["classical_model"] + cfg["quantum_model"])
+            res = run / "ModelResults.csv"
+            lines = res.read_text().splitlines()
+            # Per job: a stable column that agrees, CPU-sensitive ones that drift slightly.
+            lines = [lines[0] + ",mfe.nr_attr,task.graph_hf_mass_z,mfe.hubs.mean"] + [
+                l + f",7,{1.0 + 0.3 * i},{0.5 + 0.01 * i}" for l in lines[1:]]
+            res.write_text("\n".join(lines) + "\n")
+            # collate compares only the columns RawDataEvaluation also carries.
+            (run / "RawDataEvaluation.csv").write_text(
+                "Dataset,mfe.nr_attr,task.graph_hf_mass_z,mfe.hubs.mean\n"
+                f"{r['dataset']},7,{1.0 + 0.3 * i},{0.5 + 0.01 * i}\n")
+        return root, rows
+
+    def _collate(self, monkeypatch, root, out, *extra):
+        monkeypatch.setattr(sys, "argv", ["collate_results.py", "--runs-dir", str(root),
+                                          "--out-dir", str(out), *extra])
+        _module("collate_results").main()
+
+    def test_cpu_sensitive_drift_is_reported_not_fatal(self, landed, monkeypatch, tmp_path,
+                                                       capsys):
+        root, _ = landed
+        self._collate(monkeypatch, root, tmp_path / "out")
+        out = capsys.readouterr().out
+        assert (tmp_path / "out" / "ModelResults.csv").exists()
+        assert "all agree" in out and "not gated (CPU-sensitive" in out
+        assert "task.graph_hf_mass_z" in out
+
+    def test_strict_restores_the_old_rule(self, landed, monkeypatch, tmp_path):
+        root, _ = landed
+        with pytest.raises(SystemExit, match="not writing"):
+            self._collate(monkeypatch, root, tmp_path / "out", "--strict-characteristics")
+
+    def test_a_stable_column_mismatch_still_fails(self, landed, monkeypatch, tmp_path):
+        root, rows = landed
+        res = root / rows[0]["dataset"] / "results" / rows[0]["config"] / "run_1" / "ModelResults.csv"
+        res.write_text(res.read_text().replace(",7,", ",8,"))
+        raw = res.parent / "RawDataEvaluation.csv"
+        raw.write_text(raw.read_text().replace(",7,", ",8,"))
+        with pytest.raises(SystemExit, match="not writing"):
+            self._collate(monkeypatch, root, tmp_path / "out")
