@@ -276,3 +276,84 @@ def cluster_bootstrap_ci(values, clusters, *, n_boot: int = 10000, seed: int = 0
     return (float(np.mean(values)),
             float(np.quantile(draws, alpha / 2)),
             float(np.quantile(draws, 1 - alpha / 2)))
+
+
+# ---------------------------------------------------------------------------
+# The Region A quantum-tuning campaign (full1-qt-* / tcga1-qt-*)
+# ---------------------------------------------------------------------------
+
+#: The three measurements of the campaign, in the order every table and figure uses.
+MEASUREMENTS = ("rdm1", "rdm2_nn", "rdm2")
+
+
+def load_regiona(path: Path | str) -> pd.DataFrame:
+    """``ModelResults_regionA.csv`` (``experiments/pilot10/merge_regiona.py``), checked.
+
+    The ``model`` column there carries the measurement, ``pqk_opt@rdm2``; this adds
+    ``arm`` (``pqk_opt``, ``qpl_opt_catboost``, ...) beside it. Incomplete runs are
+    expected: nothing here asserts a row count, and every contrast built on it is
+    restricted to the cells both of its sides have.
+    """
+    df = pd.read_csv(Path(path), low_memory=False)
+    missing = {"run", "corpus", "measurement", "model", "val_auc"} - set(df.columns)
+    if missing:
+        raise ValueError(f"{path}: no {sorted(missing)} column(s) -- not written by "
+                         f"merge_regiona.py")
+    if df["model"].isna().any():
+        raise ValueError(f"{path}: {int(df['model'].isna().sum())} row(s) with no model "
+                         f"-- a truncated write leaves exactly this")
+    df["arm"] = df["model"].str.split("@").str[0]
+    return df
+
+
+def cell_series(df: pd.DataFrame, model: str, value: str) -> pd.Series:
+    """One model's ``value`` per cell, indexed by :data:`CELL`; empty if it has none."""
+    g = df[df["model"] == model]
+    return g.set_index(CELL)[value].astype(float).dropna()
+
+
+def paired_by_dataset(a: pd.Series, b: pd.Series) -> pd.DataFrame:
+    """Per dataset, the mean over SHARED cells of ``a - b``, and how many cells that is.
+
+    The only comparison an incomplete run supports: a dataset's cells that one side has
+    not reached yet are left out of both sides, rather than averaging a full baseline
+    against a partial replacement.
+    """
+    both = a.index.intersection(b.index)
+    d = (a.loc[both] - b.loc[both])
+    return (d.groupby(level=0).agg(["mean", "size"])
+            .rename(columns={"mean": "diff", "size": "cells"}))
+
+
+def replace_arm(test: pd.DataFrame, val: pd.DataFrame, arm: str,
+                new_test: pd.Series, new_val: pd.Series):
+    """``test``/``val`` with ``arm``'s column replaced on the cells ``new_*`` cover.
+
+    Returns ``(test, val, covered)``: copies with the replacement, and the index of the
+    cells it reached. A cell the new run has not reached keeps nothing of either -- the
+    caller restricts to ``covered``, so "before" and "after" are the same cells.
+    """
+    covered = (new_test.index.intersection(new_val.index)
+               .intersection(test.index))
+    test, val = test.copy(), val.copy()
+    test.loc[covered, arm] = new_test.loc[covered].values
+    val.loc[covered, arm] = new_val.loc[covered].values
+    return test, val, covered
+
+
+def validation_pick(df: pd.DataFrame, models, value: str = "balanced_accuracy"):
+    """Per cell, ``(test, val)`` of whichever of ``models`` has the best validation score.
+
+    The protocol's own selection rule, applied across the measurements of one arm: it
+    picks a measurement per cell from validation alone, so its test score is as honest
+    as any single arm's. Only cells where every one of ``models`` landed are kept --
+    picking among whatever has finished would favour the cheap measurement.
+    """
+    test = pd.concat({m: cell_series(df, m, value) for m in models}, axis=1).dropna()
+    val = pd.concat({m: cell_series(df, m, "val_auc") for m in models}, axis=1).dropna()
+    both = test.index.intersection(val.index)
+    test, val = test.loc[both], val.loc[both]
+    pick = np.nanargmax(val.to_numpy(float), axis=1)
+    rows = np.arange(len(test))
+    return (pd.Series(test.to_numpy(float)[rows, pick], index=both),
+            pd.Series(val.to_numpy(float)[rows, pick], index=both))
