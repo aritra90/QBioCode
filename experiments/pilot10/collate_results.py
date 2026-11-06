@@ -173,7 +173,11 @@ def main():
         raw = os.path.join(run_dir, "RawDataEvaluation.csv")
         if os.path.exists(raw):
             r = pd.read_csv(raw)
-            r["__config"] = cfg["config"]
+            # Joined, not assigned: a per-job RawDataEvaluation is wide enough that adding
+            # a column in place makes pandas warn "highly fragmented" once per job, and
+            # thousands of those buried the collation summary on the cluster.
+            r = pd.concat([r, pd.Series(cfg["config"], index=r.index, name="__config")],
+                          axis=1)
             raws.append(r)
         pk = os.path.join(run_dir, "results.pkl")
         if os.path.exists(pk):
@@ -181,8 +185,9 @@ def main():
                 pkls.extend(pickle.load(fh))
         for name in SIDECARS:
             for side in job_sidecars[name]:
-                side.insert(0, "config", cfg["config"])
-                sidecars[name].append(side)
+                sidecars[name].append(pd.concat(
+                    [pd.Series(cfg["config"], index=side.index, name="config"), side],
+                    axis=1))
 
     man = pd.DataFrame(manifest)
     missing = man[man["rows"] == 0]
