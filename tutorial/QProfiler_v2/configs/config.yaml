@@ -81,7 +81,7 @@ n_components: 3
 # model_version 'v2', whose weights download anonymously.
 # qsvc/vqc/qnn are the expensive quantum ones and are left out; add them for a real
 # sweep, but expect the runtime to grow by much more than a third:
-#   model: [..., 'qsvc', 'vqc', 'qnn', 'pqk']
+#   model: [..., 'qsvc', 'vqc', 'qnn', 'pqk', 'qhdc']
 model: ['lr', 'nb', 'dt', 'rf', 'svc', 'mlp', 'xgb', 'catboost', 'tabpfn', 'pqk']
 
 average: 'weighted'
@@ -412,3 +412,9 @@ gridsearch_qpl_args: {'encoding': ['Z', 'ZZ'],
                       'reps': [1, 2],
                       'entanglement': ['linear', 'full']
                      }
+
+# qHDC receives QProfiler's already-scaled split. To tune it, set
+# tune_quantum: True above; qHDC then reports as qhdc_opt.
+qhdc_args: {size: 64, levels: 2, retrain_epochs: 0,
+             learning_rate: 1.0, early_stop: True, device: CPU}
+gridsearch_qhdc_args: {size: [32, 64], levels: [2, 4]}

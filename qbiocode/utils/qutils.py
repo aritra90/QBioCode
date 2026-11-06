@@ -30,7 +30,6 @@ from qiskit_ibm_runtime import EstimatorV2 as Estimator
 from qiskit_ibm_runtime import SamplerOptions
 from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime import Session
-from qiskit_ibm_transpiler.transpiler_service import TranspilerService
 from qiskit_aer import AerSimulator
 from qiskit_aer.primitives import EstimatorV2 as AerEstimatorV2
 from qiskit_aer.primitives import SamplerV2 as AerSamplerV2
@@ -286,6 +285,10 @@ def transpile_circuit(circuit, opt_level, backend, initial_layout, PT=False, dd_
         t_qc (QuantumCircuit): The transpiled quantum circuit.
     """
     if str(opt_level) == "AI":
+        # IBM Transpiler 0.18 imports torch. Keep it out of package initialization
+        # so QBioCode can establish its OpenMP import order before torch loads.
+        from qiskit_ibm_transpiler.transpiler_service import TranspilerService
+
         pm = TranspilerService(
             backend_name=backend,
             ai="true",

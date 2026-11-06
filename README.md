@@ -451,6 +451,9 @@ runsheet and the non-claims, and `qdata-gen selftest` for the physics checks.
 - Variational Quantum Classifier (VQC)
 - Quantum Neural Network (QNN)
 - Quantum Ensemble (QEnsemble) - swap and random unitary methods
+- Quantum Hyperdimensional Classifier (`qhdc`) — optional hdlib 2.1.0 installation
+  on Python 3.11/3.12; uses QProfiler's existing splits, results, and IBM credentials.
+  See the [qHDC configuration guide](docs/source/apps/config.md#quantum-hyperdimensional-classifier-qhdc).
 
 #### Quantum Extreme Learning Machine (QELM)
 

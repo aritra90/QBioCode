@@ -551,7 +551,6 @@ pqk_args: {'encoding': ZZ,
            'primitive': 'estimator',
            'reps': 4
            }
-
 # Begin QPL arguments
 # QPL is the generalised PQK: the same quantum projection, then a CONFIGURABLE set of
 # downstream classical models instead of PQK's single fixed SVC. The projection keys
@@ -658,6 +657,19 @@ qelm_args: {'encoding': ZZ,
 # of this key and report the spread.
 qelm_reservoir_seed: 42
 
+# Optional qHDC learner: install requirements/requirements-qhdc.txt first, then
+# add 'qhdc' to model. Uses these same QProfiler splits and IBM account settings.
+qhdc_args:
+  size: 64
+  levels: 2
+  retrain_epochs: 0
+  learning_rate: 1.0
+  early_stop: True
+  device: CPU
+
+gridsearch_qhdc_args:
+  size: [32, 64]
+  levels: [2, 4]
 
 # set hydra output directories
 hydra:

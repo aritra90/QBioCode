@@ -198,6 +198,7 @@ def test_every_third_party_import_under_qbiocode_is_declared():
             "requirements-quvine.txt",
             "requirements-tabpfn.txt",
             "requirements-mps.txt",
+            "requirements-qhdc.txt",
         )
         for spec in _read_requirements(name)
     }

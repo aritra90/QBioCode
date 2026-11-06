@@ -1,0 +1,73 @@
+# Run from the QBioCode repository root:
+#   qprofiler --config-dir=tutorial/QProfiler/configs --config-name=qhdc_smoke
+# Uses the bundled 64-row, four-feature binary fixture; no downloads or IBM jobs.
+config_file_name: qhdc_smoke
+folder_path: ${hydra:runtime.cwd}/tutorial/QProfiler/fixtures
+file_dataset: ['qhdc_smoke.csv']
+index_col: False
+
+model: ['lr', 'rf', 'pqk', 'qhdc']
+backend: simulator
+n_jobs: 1
+seed: 42
+q_seed: 42
+shots: 256
+resil_level: 1
+
+# Every model gets the same split and embedding for each iteration.
+iter: 2
+test_size: 0.25
+stratify: ['y']
+scaling: MinMaxScaler
+embeddings: ['none', 'pca']
+embedding_min_features: 0
+n_components: 2
+n_neighbors: 5
+average: weighted
+multi_class: raise
+
+grid_search: False
+tune_quantum: False
+tuner: optuna
+n_trials: 2
+n_trials_quantum: 2
+validation_split: 0.25
+cross_validation: 3
+
+lr_args:
+  max_iter: 300
+rf_args:
+  n_estimators: 25
+  max_depth: 4
+pqk_args:
+  encoding: ZZ
+  primitive: estimator
+  entanglement: linear
+  reps: 1
+
+qhdc_args:
+  size: 16                 # Hypervector dimension: 16 -> 4 qubits, even after PCA.
+  levels: 4               # Discrete feature levels.
+  retrain_epochs: 0        # Raise to 1 or 2 to exercise training-only prototype updates.
+  learning_rate: 1.0
+  early_stop: True
+  device: CPU
+  seed: 42
+
+# Optional quick tuning run (same outer split protocol): append
+#   'model=[qhdc]' grid_search=True tune_quantum=True
+gridsearch_qhdc_args:
+  size: [8, 16]
+  levels: [2, 4]
+
+# Used only if you explicitly select an IBM backend.
+qiskit_json_path: ~/.qiskit/qiskit-ibm.json
+# name: your_saved_account_name
+# ibm_instance: your_instance
+
+# Keep all outputs, including PQK checkpoints, inside a distinct run directory.
+hydra:
+  job:
+    chdir: True
+  run:
+    dir: ${hydra:runtime.cwd}/results/qhdc_smoke/${now:%Y-%m-%d_%H-%M-%S}

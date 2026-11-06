@@ -1122,6 +1122,95 @@ searched one carries. That matters for
 `qbiocode.utils.select_winners`, which pairs arms across the iteration axis:
 relabelling the reused iterations would split one arm in two and break the pairing.
 
+#### Quantum hyperdimensional classifier (qHDC)
+
+Select `qhdc` in `model` to run hdlib's `QuantumClassificationModel` through
+QProfiler. It uses the **same outer train/test split and embedding** as the other
+learners and writes accuracy, weighted F1, AUC, runtime and model parameters to
+the standard results files.
+
+The quantum classifier uses hdlib 2.1.0 from PyPI. On Python 3.11 or 3.12,
+install the optional dependency from the QBioCode checkout:
+
+```bash
+python -m pip install -r requirements/requirements-qhdc.txt
+```
+
+This dependency is separate from the published core requirements and from
+`.[all]`. The other models do not import or require hdlib. The requirements file
+pins the published `hdlib==2.1.0` release.
+
+```yaml
+model: ['rf', 'pqk', 'qhdc']
+backend: simulator
+shots: 1024
+qhdc_args:
+  size: 64
+  levels: 2
+  retrain_epochs: 0
+  learning_rate: 1.0
+  early_stop: True
+  device: CPU
+```
+
+`size` is the hypervector dimension (a power of two, at least 2), not the number
+of input features. The pinned implementation uses `log2(size)` qubits. `levels`
+sets the number of feature quantization levels; start small when exploring the
+runtime. The seed defaults to `q_seed`, then `seed`, then 42, and can be overridden
+with `qhdc_args.seed`.
+
+The encoder expects values in `[0, 1]`. QProfiler applies its configured scaler
+once, on each split before dispatching any model, so qHDC receives the same
+features as the other learners. Direct qHDC preprocessing is intentionally not
+exposed through QBioCode; users calling hdlib directly can scale their arrays there.
+
+Training builds class prototypes. `retrain_epochs: 0` disables optional prototype
+updates; a positive value enables updates using training data only. The test set
+is never used for retraining or early stopping. AUC uses the difference between
+positive- and negative-class similarities, aligned through hdlib's `classes_`.
+These are ranking scores, not calibrated probabilities. Runtime includes scaling,
+classical circuit preparation, optional retraining, and prediction.
+
+Tuning follows the existing quantum controls:
+
+```yaml
+grid_search: True
+tune_quantum: True
+n_trials_quantum: 4
+validation_split: 0.25
+gridsearch_qhdc_args:
+  size: [32, 64]
+  levels: [2, 4]
+```
+
+The tuner makes an inner split from the training set only and refits the winning
+configuration on all outer training rows. The final evaluation uses the original
+outer test set.
+Settings in `qhdc_args` remain fixed unless overridden by `gridsearch_qhdc_args`.
+If other quantum models are selected, they also need search blocks when
+`tune_quantum` is enabled.
+
+Hardware uses QBioCode's existing `qiskit_json_path`, `name`, and `ibm_*` account
+settings, including config overrides. Set `backend` to an IBM device or
+`ibm_least`; the latter selects a device with enough qubits. `noisy_ibm_*` builds
+an Aer simulation from that device. CPU simulation is the default; `device: GPU`
+requires an Aer installation with GPU support. hdlib owns its prediction
+sessions and mitigation; `resil_level` does not configure its mitigation.
+Hardware tuning retains the existing `allow_hardware_tuning` opt-in.
+qHDC does not inherit PQK's checkpoint/resume support.
+
+A ready-to-run CPU smoke test is bundled with a 64-row synthetic dataset. From
+the repository root, after installing hdlib, run:
+
+```bash
+qprofiler --config-dir=tutorial/QProfiler/configs --config-name=qhdc_smoke
+```
+
+This compares LR, RF, PQK and qHDC across two shared splits and the `none`/`pca`
+representations, producing 16 rows under `results/qhdc_smoke/<timestamp>/`.
+See `tutorial/QProfiler/configs/qhdc_smoke.yaml` for all qHDC arguments and
+`tutorial/QProfiler/fixtures/README.md` for a shorter qHDC-only invocation.
+
 #### Projection caches
 
 `pqk`, `qpl` and `qelm` cache their projected feature matrices so a rerun does not

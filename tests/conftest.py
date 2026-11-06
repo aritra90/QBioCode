@@ -143,3 +143,15 @@ def tabpfn_ready(tabpfn_skip_reason):
     if tabpfn_skip_reason is not None:
         pytest.skip(tabpfn_skip_reason)
     return True
+
+
+@pytest.fixture(scope="session")
+def qhdc_ready():
+    """Require the optional PyPI quantum classifier for real simulator tests."""
+    from qbiocode.learning.compute_qhdc import _load_classifier
+
+    try:
+        _load_classifier()
+    except ImportError as exc:
+        pytest.skip(str(exc))
+    return True

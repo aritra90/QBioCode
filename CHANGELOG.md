@@ -68,6 +68,14 @@ it; it now counts `make_projector` as well. And a test config that omitted
 `qelm_projection_dir` wrote its cache into the repository root, because the default is
 relative: the fixture now names it, `.gitignore` covers the directory, and the config
 documentation says the defaults are relative.
+#### qHDC: hdlib quantum hyperdimensional classifier
+
+- **qHDC learner:** `compute_qhdc` and its Optuna twin plug hdlib's quantum
+  classifier into QProfiler as `model: ['qhdc']`. They preserve the outer split,
+  apply training-only feature scaling after embedding, and report standard metrics
+  using continuous class-similarity margins for AUC. IBM backends use the existing
+  account resolver. hdlib 2.1.0 is installed as an optional dependency.
+
 
 #### The selected quantum configuration is reported per row, as its own columns
 

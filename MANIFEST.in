@@ -43,6 +43,8 @@ recursive-include docs/source/_templates *.rst
 recursive-include tutorial *.ipynb
 include tutorial/QProfiler/data/pbmc5k_small_cd4_vs_cd8.h5ad
 recursive-include tutorial/QProfiler/data/sc_binary *.csv
+include tutorial/QProfiler/fixtures/qhdc_smoke.csv
+include tutorial/QProfiler/fixtures/README.md
 include tutorial/QSage/data/qprofiler_benchmarks.csv
 recursive-include tutorial/QEnsemble/experiments *.csv *.pkl
 

@@ -115,6 +115,11 @@ parquet = [
 tabpfn = [
     "tabpfn",
 ]
+# qHDC quantum hyperdimensional classifier. This is optional because the hdlib
+# dependency is only imported when the qHDC model is selected.
+qhdc = [
+    "hdlib==2.1.0",
+]
 # `pandoc` is intentionally not listed: it is a system binary, not a Python
 # package. Install it with brew/apt -- see requirements/requirements-docs.txt.
 docs = [
@@ -161,7 +166,7 @@ dev = [
 ]
 # Union of every extra above. Keep in sync when adding to any tier.
 all = [
-    "qbiocode[apps,quvine,tabpfn,mps,parquet,docs,dev]",
+    "qbiocode[apps,quvine,tabpfn,qhdc,mps,parquet,docs,dev]",
 ]
 
 [project.scripts]
